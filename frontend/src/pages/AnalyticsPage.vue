@@ -14,6 +14,22 @@ const summary = ref<Record<string, any>>()
 const importing = ref(false)
 const manualOpen = ref(false)
 const schedules = ref<Array<any>>([])
+const dashboard = ref<Record<string, any>>({})
+const bestPlatform = computed(() => platforms.value[0]?.name || '—')
+const timeLift = computed(() => {
+  const recommended = times.value.find((x) => x.name === 'RECOMMENDED_TIME')?.engagementRate || 0
+  const fixed = times.value.find((x) => x.name === 'FIXED_TIME')?.engagementRate || 0
+  return Number((recommended - fixed).toFixed(2))
+})
+const publishRate = computed(() =>
+  schedules.value.length
+    ? Math.round(
+        (schedules.value.filter((x) => ['SUCCESS', 'MOCK_SUCCESS'].includes(x.status)).length /
+          schedules.value.length) *
+          100,
+      )
+    : 0,
+)
 const metric = ref<Record<string, any>>({
   schedule_id: 0,
   platform: 'WEIBO',
@@ -62,13 +78,36 @@ const timeOption = computed(() => ({
   ],
 }))
 async function load() {
-  ;[overview.value, platforms.value, times.value, ranking.value] = await Promise.all([
-    workflowApi.analyticsOverview(),
-    workflowApi.analyticsPlatforms(),
-    workflowApi.analyticsTimes(),
-    workflowApi.analyticsRanking(),
-  ])
+  ;[overview.value, platforms.value, times.value, ranking.value, schedules.value, dashboard.value] =
+    await Promise.all([
+      workflowApi.analyticsOverview(),
+      workflowApi.analyticsPlatforms(),
+      workflowApi.analyticsTimes(),
+      workflowApi.analyticsRanking(),
+      workflowApi.schedules(),
+      workflowApi.dashboard(),
+    ])
 }
+const trendOption = computed(() => ({
+  tooltip: { trigger: 'axis' },
+  grid: { left: 45, right: 16, top: 20, bottom: 30 },
+  xAxis: {
+    type: 'category',
+    data: (dashboard.value.trend || []).map((x: any) => x.date.slice(5)),
+    axisLine: { lineStyle: { color: '#e5e7eb' } },
+  },
+  yAxis: { type: 'value', splitLine: { lineStyle: { color: '#eef0f3' } } },
+  series: [
+    {
+      type: 'line',
+      smooth: true,
+      symbolSize: 5,
+      data: (dashboard.value.trend || []).map((x: any) => x.engagement),
+      lineStyle: { color: '#2563eb', width: 2 },
+      itemStyle: { color: '#2563eb' },
+    },
+  ],
+}))
 async function upload(options: any) {
   importing.value = true
   const body = new FormData()
@@ -148,20 +187,31 @@ onMounted(() => load().catch((e) => ElMessage.error(getApiErrorMessage(e))))
     </div>
     <section class="metric-grid">
       <article>
-        <span>样本数</span><strong>{{ overview.sampleCount || 0 }}</strong
-        ><small>条互动记录</small>
+        <span>平均互动率</span><strong>{{ overview.engagementRate || 0 }}%</strong
+        ><small>{{ overview.sampleCount || 0 }} 条记录</small>
       </article>
       <article>
-        <span>总曝光</span><strong>{{ (overview.impressions || 0).toLocaleString() }}</strong
-        ><small>impressions</small>
+        <span>推荐时间提升</span><strong>{{ timeLift }}%</strong><small>相对固定时间组</small>
       </article>
       <article>
-        <span>总互动</span><strong>{{ (overview.engagementTotal || 0).toLocaleString() }}</strong
-        ><small>点赞、评论、收藏、转发</small>
+        <span>发布成功率</span><strong>{{ publishRate }}%</strong
+        ><small>{{ schedules.length }} 个任务</small>
       </article>
       <article>
-        <span>互动率</span><strong>{{ overview.engagementRate || 0 }}%</strong
-        ><small>互动总量 / 曝光</small>
+        <span>表现最佳平台</span><strong class="!text-lg">{{ bestPlatform }}</strong
+        ><small>按当前互动率</small>
+      </article>
+    </section>
+    <section class="mt-4 grid gap-4 lg:grid-cols-[1.35fr_.65fr]">
+      <article class="panel p-5">
+        <p class="section-label">互动趋势</p>
+        <h2 class="section-title mt-1">最近 14 天</h2>
+        <ChartPanel :option="trendOption" />
+      </article>
+      <article class="panel p-5">
+        <p class="section-label">时间实验</p>
+        <h2 class="section-title mt-1">推荐时间与固定时间</h2>
+        <ChartPanel :option="timeOption" />
       </article>
     </section>
     <section class="mt-4 grid gap-4 lg:grid-cols-2">
@@ -170,17 +220,12 @@ onMounted(() => load().catch((e) => ElMessage.error(getApiErrorMessage(e))))
         <h2 class="section-title mt-1">平均互动率</h2>
         <ChartPanel :option="platformOption" />
       </article>
-      <article class="panel rounded-xl p-5">
-        <p class="section-label">时间实验</p>
-        <h2 class="section-title mt-1">推荐时间 vs 固定时间</h2>
-        <ChartPanel :option="timeOption" />
-      </article>
     </section>
     <section class="mt-4 grid gap-4 lg:grid-cols-[1.3fr_1fr]">
       <article class="panel rounded-xl p-5">
         <div class="flex justify-between">
           <div>
-            <p class="section-label">Content ranking</p>
+            <p class="section-label">内容排行</p>
             <h2 class="section-title mt-1">表现最佳内容</h2>
           </div>
           <el-button link @click="download('/analytics/report')">导出 HTML 报告</el-button>
@@ -203,7 +248,7 @@ onMounted(() => load().catch((e) => ElMessage.error(getApiErrorMessage(e))))
       <article class="panel rounded-xl p-5">
         <div class="flex items-start justify-between">
           <div>
-            <p class="section-label">AI review</p>
+            <p class="section-label">数据洞察</p>
             <h2 class="section-title mt-1">复盘摘要</h2>
           </div>
           <el-button type="primary" plain @click="aiSummary"

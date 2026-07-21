@@ -3,6 +3,7 @@ import { onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import { Beaker, Play, Plus, Square } from 'lucide-vue-next'
 import PageHeader from '@/components/PageHeader.vue'
+import EmptyState from '@/components/EmptyState.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import { workflowApi } from '@/api/workflow'
 import { getApiErrorMessage } from '@/api/client'
@@ -100,6 +101,14 @@ onMounted(load)
           </div>
         </div>
       </article>
+      <EmptyState
+        v-if="!rows.length"
+        class="xl:col-span-2"
+        title="还没有实验"
+        description="创建一个对照实验，系统只统计实际关联或录入的样本。"
+        ><template #icon><Beaker :size="27" /></template
+        ><el-button type="primary" plain @click="dialog = true">新建实验</el-button></EmptyState
+      >
     </section>
     <el-dialog v-model="dialog" title="新建实验" width="600px"
       ><el-form label-position="top"

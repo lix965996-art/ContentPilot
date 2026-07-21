@@ -16,11 +16,11 @@ test('administrator can login and open the dashboard', async ({ page }) => {
 
 test('operator can open the real content workflow pages', async ({ page }) => {
   await login(page, 'operator', 'Operator@123456')
-  await page.getByRole('link', { name: '内容管理' }).click()
+  await page.getByRole('link', { name: '内容库' }).click()
   await expect(page.getByRole('heading', { name: '内容库' })).toBeVisible()
-  await expect(page.getByText('还没有原文')).toBeVisible()
-  await page.getByRole('link', { name: '内容适配' }).click()
-  await expect(page.getByRole('heading', { name: '平台内容适配' })).toBeVisible()
+  await expect(page.getByText('内容库还是空的')).toBeVisible()
+  await page.getByRole('link', { name: '内容工作室' }).click()
+  await expect(page.getByRole('heading', { name: '内容工作室' })).toBeVisible()
   await page.getByRole('link', { name: '排期日历' }).click()
   await expect(page.locator('.fc')).toBeVisible()
 })
@@ -35,4 +35,24 @@ test('operator is denied by the administrator API', async ({ request }) => {
     headers: { Authorization: `Bearer ${loginBody.data.access_token}` },
   })
   expect(response.status()).toBe(403)
+})
+
+test('viewer only sees navigation entries allowed by RBAC', async ({ page }) => {
+  await login(page, 'viewer', 'Viewer@123456')
+
+  await expect(page.getByRole('link', { name: '工作台' })).toBeVisible()
+  await expect(page.getByRole('link', { name: '内容库' })).toBeVisible()
+  await expect(page.getByRole('link', { name: '排期日历' })).toBeVisible()
+  await expect(page.getByRole('link', { name: '数据复盘' })).toBeVisible()
+
+  await expect(page.getByRole('link', { name: '内容工作室' })).toHaveCount(0)
+  await expect(page.getByRole('link', { name: '媒体库' })).toHaveCount(0)
+  await expect(page.getByRole('link', { name: '发布时间' })).toHaveCount(0)
+  await expect(page.getByRole('link', { name: '发布任务' })).toHaveCount(0)
+  await expect(page.getByRole('link', { name: '实验分析' })).toHaveCount(0)
+  await expect(page.getByRole('link', { name: '系统设置' })).toHaveCount(0)
+  await expect(page.getByRole('button', { name: /新建内容/ })).toHaveCount(0)
+
+  await page.goto('/settings')
+  await expect(page.getByText('当前账号无权访问')).toBeVisible()
 })

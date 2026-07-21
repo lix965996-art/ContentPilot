@@ -3,6 +3,7 @@ import { computed, onMounted, ref } from 'vue'
 import FullCalendar from '@fullcalendar/vue3'
 import dayGridPlugin from '@fullcalendar/daygrid'
 import timeGridPlugin from '@fullcalendar/timegrid'
+import listPlugin from '@fullcalendar/list'
 import interactionPlugin from '@fullcalendar/interaction'
 import zhCnLocale from '@fullcalendar/core/locales/zh-cn'
 import { ElMessage } from 'element-plus'
@@ -15,6 +16,7 @@ import type { Article, Platform, Schedule, Variant } from '@/types/business'
 import { platformColors, platformNames } from '@/types/business'
 
 const schedules = ref<Schedule[]>([])
+const platformFilter = ref<Platform | ''>('')
 const drawer = ref(false)
 const editing = ref<Schedule>()
 const dialog = ref(false)
@@ -28,23 +30,25 @@ const form = ref<{
   publish_mode: string
 }>({ platform: 'WEIBO', scheduled_at: '', publish_mode: 'MANUAL' })
 const events = computed(() =>
-  schedules.value.map((x) => ({
-    id: String(x.id),
-    title: `${platformNames[x.platform]} · ${x.articleTitle}`,
-    start: x.scheduledAt,
-    backgroundColor: platformColors[x.platform],
-    borderColor: platformColors[x.platform],
-    extendedProps: x,
-  })),
+  schedules.value
+    .filter((x) => !platformFilter.value || x.platform === platformFilter.value)
+    .map((x) => ({
+      id: String(x.id),
+      title: `${platformNames[x.platform]} · ${x.articleTitle}`,
+      start: x.scheduledAt,
+      backgroundColor: platformColors[x.platform],
+      borderColor: platformColors[x.platform],
+      extendedProps: x,
+    })),
 )
 const options = computed(() => ({
-  plugins: [dayGridPlugin, timeGridPlugin, interactionPlugin],
+  plugins: [dayGridPlugin, timeGridPlugin, listPlugin, interactionPlugin],
   locale: zhCnLocale,
   initialView: 'dayGridMonth',
   headerToolbar: {
     left: 'prev,next today',
     center: 'title',
-    right: 'dayGridMonth,timeGridWeek,timeGridDay',
+    right: 'dayGridMonth,timeGridWeek,timeGridDay,listWeek',
   },
   height: 'auto',
   editable: true,
@@ -115,13 +119,27 @@ onMounted(init)
 </script>
 <template>
   <div>
-    <PageHeader title="排期日历" description="按月、周、日查看多平台任务，拖拽即可调整发布时间。"
+    <PageHeader title="排期日历" description="查看多平台发布计划，拖拽即可调整发布时间。"
       ><el-button type="primary" @click="openCreate"
         ><Plus :size="16" class="mr-2" />新建排期</el-button
       ></PageHeader
     >
-    <section class="calendar-shell panel">
-      <FullCalendar :options="{ ...options, events }" />
+    <section class="calendar-workspace">
+      <div class="calendar-filter">
+        <span>平台</span
+        ><button :class="{ active: !platformFilter }" @click="platformFilter = ''">全部</button
+        ><button
+          v-for="(name, key) in platformNames"
+          :key="key"
+          :class="{ active: platformFilter === key }"
+          @click="platformFilter = key"
+        >
+          <i :style="{ background: platformColors[key] }" />{{ name }}
+        </button>
+      </div>
+      <div class="calendar-shell">
+        <FullCalendar :options="{ ...options, events }" />
+      </div>
     </section>
     <el-drawer v-model="drawer" title="排期详情" size="420px"
       ><template v-if="editing"

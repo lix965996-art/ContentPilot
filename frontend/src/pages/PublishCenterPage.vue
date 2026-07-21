@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { RefreshCw, Rocket, ScrollText } from 'lucide-vue-next'
+import { Inbox, RefreshCw, Rocket, ScrollText } from 'lucide-vue-next'
+import EmptyState from '@/components/EmptyState.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import { workflowApi } from '@/api/workflow'
@@ -14,6 +15,14 @@ const loading = ref(false)
 const detail = ref<Schedule>()
 const drawer = ref(false)
 const status = ref('')
+const statusTabs = [
+  ['全部', ''],
+  ['待发布', 'PENDING'],
+  ['发布中', 'RUNNING'],
+  ['等待确认', 'WAITING_MANUAL_CONFIRM'],
+  ['已发布', 'SUCCESS'],
+  ['失败', 'FAILED'],
+]
 async function load() {
   loading.value = true
   try {
@@ -46,6 +55,13 @@ onMounted(load)
 function platformLabel(value: string): string {
   return platformNames[value as Platform] || value
 }
+function rowClassName({ row }: { row: Schedule }) {
+  return row.status === 'FAILED' ? 'failed-row' : ''
+}
+function selectStatus(value: string) {
+  status.value = value
+  void load()
+}
 </script>
 <template>
   <div>
@@ -54,24 +70,18 @@ function platformLabel(value: string): string {
         ><RefreshCw :size="15" class="mr-2" />刷新</el-button
       ></PageHeader
     >
-    <section class="toolbar panel">
-      <el-select v-model="status" clearable placeholder="全部状态" class="!w-48" @change="load"
-        ><el-option
-          v-for="item in [
-            'PENDING',
-            'RUNNING',
-            'MOCK_SUCCESS',
-            'WAITING_MANUAL_CONFIRM',
-            'FAILED',
-            'CANCELLED',
-          ]"
-          :key="item"
-          :label="item"
-          :value="item" /></el-select
-      ><span class="ml-auto meta-chip">默认人工确认发布</span>
-    </section>
-    <section class="mt-4 overflow-hidden rounded-xl border border-line bg-white">
-      <el-table v-loading="loading" :data="rows"
+    <div class="content-tabs publish-tabs">
+      <button
+        v-for="tab in statusTabs"
+        :key="tab[0]"
+        :class="{ active: status === tab[1] }"
+        @click="selectStatus(tab[1])"
+      >
+        {{ tab[0] }}
+      </button>
+    </div>
+    <section class="data-surface">
+      <el-table v-loading="loading" :data="rows" :row-class-name="rowClassName"
         ><el-table-column label="任务 / 内容" min-width="310"
           ><template #default="{ row }"
             ><button class="text-left" @click="open(row)">
@@ -120,8 +130,12 @@ function platformLabel(value: string): string {
               ><ScrollText :size="14" class="mr-1" />日志</el-button
             ></template
           ></el-table-column
-        ></el-table
-      >
+        ><template #empty
+          ><EmptyState
+            title="当前没有发布任务"
+            description="审核后的平台版本可以在排期日历中创建发布任务。"
+            ><template #icon><Inbox :size="25" /></template></EmptyState></template
+      ></el-table>
     </section>
     <el-drawer v-model="drawer" title="发布任务详情" size="480px"
       ><template v-if="detail"

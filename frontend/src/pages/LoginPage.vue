@@ -15,6 +15,11 @@ const auth = useAuthStore()
 const formRef = ref<FormInstance>()
 const showPassword = ref(false)
 const form = reactive({ username: '', password: '' })
+const accounts = [
+  { label: '管理员', username: 'admin', password: 'Admin@123456' },
+  { label: '运营者', username: 'operator', password: 'Operator@123456' },
+  { label: '查看者', username: 'viewer', password: 'Viewer@123456' },
+]
 const rules: FormRules = {
   username: [{ required: true, message: '请输入用户名', trigger: 'blur' }],
   password: [{ required: true, message: '请输入密码', trigger: 'blur' }],
@@ -32,6 +37,10 @@ async function submit(): Promise<void> {
     ElMessage.error(getApiErrorMessage(error, '登录失败'))
   }
 }
+function fill(account: (typeof accounts)[number]) {
+  form.username = account.username
+  form.password = account.password
+}
 </script>
 
 <template>
@@ -39,9 +48,13 @@ async function submit(): Promise<void> {
     <section class="login-intro">
       <BrandMark />
       <div class="login-copy">
-        <p>内容运营，从原文开始</p>
-        <h1>把写作、审核、排期和复盘放在一个工作台里。</h1>
-        <span>面向校园媒体与内容团队的日常运营系统。</span>
+        <p>内容运营工作流</p>
+        <h1>从原文到发布，一处完成。</h1>
+        <ol>
+          <li><b>01</b><span>整理原文与素材</span></li>
+          <li><b>02</b><span>编辑多个平台版本</span></li>
+          <li><b>03</b><span>审核、排期与复盘</span></li>
+        </ol>
       </div>
       <small>SocialFlow · 内容运营系统</small>
     </section>
@@ -97,6 +110,21 @@ async function submit(): Promise<void> {
             进入工作台<ArrowRight v-if="!auth.loading" :size="17" class="ml-2" />
           </el-button>
         </el-form>
+        <div class="account-shortcuts">
+          <span>演示账号</span>
+          <div>
+            <button
+              v-for="account in accounts"
+              :key="account.username"
+              type="button"
+              :data-testid="`demo-${account.username}`"
+              @click="fill(account)"
+            >
+              <b>{{ account.label }}</b
+              ><small>{{ account.username }}</small>
+            </button>
+          </div>
+        </div>
         <p class="login-help">
           账号由系统管理员创建和分配。首次部署请使用初始化管理员账号登录后完成服务配置。
         </p>

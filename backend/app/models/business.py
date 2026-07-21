@@ -115,9 +115,7 @@ class ActivityPrior(Base):
     day_of_week: Mapped[int] = mapped_column(Integer)
     hour_of_day: Mapped[int] = mapped_column(Integer)
     base_score: Mapped[float] = mapped_column(Float)
-    source_description: Mapped[str] = mapped_column(
-        String(255), default="人工维护的发布时间规则"
-    )
+    source_description: Mapped[str] = mapped_column(String(255), default="人工维护的发布时间规则")
     enabled: Mapped[bool] = mapped_column(Boolean, default=True)
     updated_at: Mapped[datetime] = mapped_column(
         DateTime, server_default=func.now(), onupdate=func.now()

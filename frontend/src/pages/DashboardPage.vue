@@ -20,6 +20,7 @@ import { platformNames } from '@/types/business'
 import type { Platform } from '@/types/business'
 const router = useRouter()
 const auth = useAuthStore()
+const canOperate = computed(() => auth.hasRole(['ADMIN', 'OPERATOR']))
 const data = ref<Record<string, any>>()
 const loading = ref(true)
 const dateLabel = new Intl.DateTimeFormat('zh-CN', {
@@ -71,7 +72,7 @@ onMounted(load)
         <h1>早上好，{{ auth.user?.display_name }}</h1>
         <span>今天的原文、审核、排期和数据都在这里。</span>
       </div>
-      <div class="flex gap-2">
+      <div v-if="canOperate" class="flex gap-2">
         <el-button @click="router.push({ name: 'articles' })"
           ><Plus :size="16" class="mr-1" />新建原文</el-button
         ><el-button type="primary" @click="router.push({ name: 'studio' })"
@@ -125,7 +126,7 @@ onMounted(load)
           <button
             v-for="item in data.todaySchedules"
             :key="item.id"
-            @click="router.push({ name: 'publish' })"
+            @click="router.push({ name: canOperate ? 'publish' : 'calendar' })"
           >
             <span class="schedule-time">{{
               new Date(item.scheduledAt).toLocaleTimeString('zh-CN', {

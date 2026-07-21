@@ -49,7 +49,7 @@ onMounted(() => load().catch((e) => ElMessage.error(getApiErrorMessage(e))))
             <el-input
               v-model="item.settingValue"
               :type="item.isSecret ? 'password' : 'text'"
-              show-password
+              :show-password="item.isSecret"
               class="!w-80"
             /><el-button :loading="saving === item.settingKey" @click="save(item)"
               ><Save :size="14" class="mr-1" />保存</el-button

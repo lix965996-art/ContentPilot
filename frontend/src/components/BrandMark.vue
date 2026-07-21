@@ -30,7 +30,7 @@ withDefaults(
         :class="inverse ? 'text-slate-400' : 'text-muted'"
         class="mt-0.5 text-[10px] tracking-[0.14em]"
       >
-        内容运营系统
+        内容运营工作台
       </div>
     </div>
   </div>

@@ -4,9 +4,9 @@ import { ElMessage } from 'element-plus'
 import { Image, Search, Upload } from 'lucide-vue-next'
 import { workflowApi } from '@/api/workflow'
 import { getApiErrorMessage } from '@/api/client'
+import EmptyState from '@/components/EmptyState.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import type { Article } from '@/types/business'
-
 const articles = ref<Article[]>([])
 const articleId = ref<number>()
 const keywords = ref<Array<{ zh: string; en: string; reason: string }>>([])
@@ -16,6 +16,8 @@ const selected = ref<Array<Record<string, unknown>>>([])
 const loading = ref(false)
 const uploading = ref(false)
 const notice = ref('')
+const source = ref('all')
+const ratio = ref('all')
 async function init() {
   const data = await workflowApi.articles({ page_size: 100 })
   articles.value = data.items
@@ -28,7 +30,7 @@ async function extract() {
   try {
     const data = await workflowApi.keywords(articleId.value)
     keywords.value = data.keywords
-    activeKeyword.value = data.keywords[0]?.en || 'creative editorial'
+    activeKeyword.value = data.keywords[0]?.en || 'editorial'
     await search()
   } catch (e) {
     ElMessage.error(getApiErrorMessage(e))
@@ -43,6 +45,10 @@ async function search() {
   notice.value = data.notice
   selected.value = await workflowApi.articleMedia(articleId.value!)
 }
+function chooseKeyword(value: string) {
+  activeKeyword.value = value
+  void search()
+}
 async function upload(options: any) {
   if (!articleId.value) return ElMessage.warning('请先选择关联文章')
   const body = new FormData()
@@ -53,16 +59,12 @@ async function upload(options: any) {
   try {
     await workflowApi.uploadMedia(body)
     selected.value = await workflowApi.articleMedia(articleId.value)
-    ElMessage.success('素材已上传并关联到文章')
+    ElMessage.success('素材已上传')
   } catch (e) {
     ElMessage.error(getApiErrorMessage(e, '上传失败'))
   } finally {
     uploading.value = false
   }
-}
-async function chooseKeyword(keyword: string) {
-  activeKeyword.value = keyword
-  await search()
 }
 async function select(image: Record<string, unknown>, usage: 'COVER' | 'BODY') {
   if (!articleId.value) return
@@ -78,16 +80,14 @@ async function select(image: Record<string, unknown>, usage: 'COVER' | 'BODY') {
     search_keyword: activeKeyword.value,
     usage_type: usage,
   })
-  ElMessage.success(usage === 'COVER' ? '已设为封面' : '已加入正文配图')
   selected.value = await workflowApi.articleMedia(articleId.value)
+  ElMessage.success(usage === 'COVER' ? '已设为封面' : '已加入正文')
 }
 onMounted(init)
 </script>
 <template>
   <div>
-    <PageHeader
-      title="素材管理"
-      description="上传自己的图片，或配置 Unsplash 后按文章关键词检索公开素材。"
+    <PageHeader title="媒体库" description="检索、上传并管理内容使用的封面和正文图片。"
       ><el-upload
         :show-file-list="false"
         :http-request="upload"
@@ -97,58 +97,95 @@ onMounted(init)
         ></el-upload
       ></PageHeader
     >
-    <section class="panel rounded-xl p-5">
-      <div class="flex flex-wrap items-end gap-3">
-        <label class="field-label"
-          >关联文章<el-select v-model="articleId" filterable class="mt-2 !w-80" @change="extract"
+    <div class="media-workspace">
+      <aside class="media-filters">
+        <div>
+          <label>关联内容</label
+          ><el-select v-model="articleId" filterable class="w-full" @change="extract"
             ><el-option
               v-for="item in articles"
               :key="item.id"
               :label="item.title"
-              :value="item.id" /></el-select></label
-        ><el-button :loading="loading" @click="extract"
-          ><Search :size="15" class="mr-2" />提取并搜索</el-button
-        >
-        <div class="ml-auto text-xs text-muted">已选 {{ selected.length }} 张</div>
-      </div>
-      <div class="mt-5 flex flex-wrap gap-2">
-        <button
-          v-for="item in keywords"
-          :key="item.en"
-          class="keyword-pill"
-          :class="{ active: activeKeyword === item.en }"
-          @click="chooseKeyword(item.en)"
-        >
-          <span>{{ item.zh }}</span
-          ><small>{{ item.en }}</small>
-        </button>
-      </div>
-    </section>
-    <section class="mt-4">
-      <div class="mb-3 flex items-center justify-between">
-        <h2 class="section-title">推荐图片</h2>
-        <span class="text-xs text-muted">{{ notice }}</span>
-      </div>
-      <div class="media-grid">
-        <article v-for="item in images" :key="String(item.id)" class="media-card">
-          <img :src="String(item.thumbnailUrl)" :alt="String(item.altText)" />
-          <div class="p-3">
-            <p class="truncate text-sm font-medium text-ink">{{ item.altText }}</p>
-            <p class="mt-1 text-xs text-muted">{{ item.photographerName }} · {{ item.source }}</p>
-            <div class="mt-3 grid grid-cols-2 gap-2">
-              <el-button size="small" @click="select(item, 'BODY')">加入正文</el-button
-              ><el-button size="small" type="primary" plain @click="select(item, 'COVER')"
-                >设为封面</el-button
-              >
-            </div>
+              :value="item.id"
+          /></el-select>
+        </div>
+        <div>
+          <label>关键词</label>
+          <div class="keyword-list">
+            <button
+              v-for="item in keywords"
+              :key="item.en"
+              :class="{ active: activeKeyword === item.en }"
+              @click="chooseKeyword(item.en)"
+            >
+              {{ item.zh }}<small>{{ item.en }}</small>
+            </button>
           </div>
-        </article>
-      </div>
-      <div v-if="!images.length" class="empty-state panel min-h-80 rounded-xl">
-        <Image :size="30" />
-        <p>暂无推荐图片</p>
-        <span>可直接上传本地图片；在线检索需要管理员配置 Unsplash Access Key。</span>
-      </div>
-    </section>
+        </div>
+        <div>
+          <label>图片来源</label
+          ><el-radio-group v-model="source" class="filter-radios"
+            ><el-radio value="all">全部</el-radio><el-radio value="upload">本地上传</el-radio
+            ><el-radio value="unsplash">Unsplash</el-radio></el-radio-group
+          >
+        </div>
+        <div>
+          <label>比例</label
+          ><el-select v-model="ratio" class="w-full"
+            ><el-option label="全部比例" value="all" /><el-option
+              label="横图 16:9"
+              value="16:9" /><el-option label="方图 1:1" value="1:1" /><el-option
+              label="竖图 3:4"
+              value="3:4"
+          /></el-select>
+        </div>
+      </aside>
+      <main class="media-results">
+        <div class="media-results-head">
+          <div class="media-search">
+            <Search :size="15" /><input
+              v-model="activeKeyword"
+              placeholder="输入图片关键词"
+              @keyup.enter="search"
+            /><button @click="search">搜索</button>
+          </div>
+          <span>{{ notice || `${images.length} 张图片` }}</span>
+        </div>
+        <div v-if="images.length" class="media-masonry">
+          <article v-for="item in images" :key="String(item.id)">
+            <img :src="String(item.thumbnailUrl)" :alt="String(item.altText)" />
+            <div>
+              <p>{{ item.altText }}</p>
+              <small>{{ item.photographerName }} · {{ item.source }}</small
+              ><button @click="select(item, 'BODY')">加入正文</button
+              ><button @click="select(item, 'COVER')">设为封面</button>
+            </div>
+          </article>
+        </div>
+        <EmptyState
+          v-else
+          title="没有可显示的在线素材"
+          description="上传本地图片，或由管理员配置 Unsplash 后进行检索。"
+          ><template #icon><Image :size="28" /></template
+        ></EmptyState>
+      </main>
+      <aside class="selected-media">
+        <header>
+          <strong>已选图片</strong><span>{{ selected.length }}</span>
+        </header>
+        <div v-if="selected.length" class="selected-list">
+          <article v-for="item in selected" :key="String(item.id)">
+            <img :src="String(item.thumbnailUrl)" />
+            <div>
+              <b>{{ item.usageType === 'COVER' ? '封面' : '正文插图' }}</b
+              ><span>{{ item.altText || '未填写 Alt 文本' }}</span>
+            </div>
+          </article>
+        </div>
+        <EmptyState v-else title="尚未选择图片" description="从中间素材区选择封面或正文插图。"
+          ><template #icon><Image :size="24" /></template
+        ></EmptyState>
+      </aside>
+    </div>
   </div>
 </template>
