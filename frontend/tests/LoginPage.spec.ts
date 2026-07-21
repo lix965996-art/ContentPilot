@@ -16,7 +16,7 @@ vi.mock('@/api/auth', () => ({
       id: 1,
       username: 'admin',
       display_name: '系统管理员',
-      email: 'admin@socialflow.local',
+      email: 'admin@contentpilot.local',
       avatar_url: null,
       status: 'ACTIVE',
       last_login_at: null,
@@ -57,7 +57,7 @@ describe('LoginPage', () => {
     await fireEvent.click(screen.getByTestId('login-button'))
 
     await waitFor(() => expect(router.currentRoute.value.path).toBe('/'))
-    expect(localStorage.getItem('socialflow_access_token')).toBe('access-token')
+    expect(localStorage.getItem('contentpilot_access_token')).toBe('access-token')
   })
 
   it('shows all three demo roles', async () => {

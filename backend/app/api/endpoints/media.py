@@ -29,7 +29,7 @@ FALLBACK_IMAGES = [
         "imageUrl": f"/media/fallback-{i}.svg",
         "thumbnailUrl": f"/media/fallback-{i}.svg",
         "source": "LOCAL",
-        "photographerName": "SocialFlow AI",
+        "photographerName": "ContentPilot",
         "photographerUrl": None,
     }
     for i in range(1, 11)

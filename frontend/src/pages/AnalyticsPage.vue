@@ -4,8 +4,12 @@ import { ElMessage } from 'element-plus'
 import { Download, FileSpreadsheet, Plus, ScrollText, Upload } from 'lucide-vue-next'
 import PageHeader from '@/components/PageHeader.vue'
 import ChartPanel from '@/components/ChartPanel.vue'
+import EmptyState from '@/components/EmptyState.vue'
 import { workflowApi } from '@/api/workflow'
 import { apiClient, getApiErrorMessage } from '@/api/client'
+import { useAuthStore } from '@/stores/auth'
+const auth = useAuthStore()
+const canOperate = computed(() => auth.hasRole(['ADMIN', 'OPERATOR']))
 const overview = ref<Record<string, number>>({})
 const platforms = ref<Array<any>>([])
 const times = ref<Array<any>>([])
@@ -134,8 +138,8 @@ async function download(path: string) {
     const anchor = document.createElement('a')
     anchor.href = url
     anchor.download = path.endsWith('template')
-      ? 'socialflow-analytics-template.xlsx'
-      : 'socialflow-report.html'
+      ? 'contentpilot-analytics-template.xlsx'
+      : 'contentpilot-report.html'
     anchor.click()
     URL.revokeObjectURL(url)
   } catch (error) {
@@ -171,10 +175,15 @@ onMounted(() => load().catch((e) => ElMessage.error(getApiErrorMessage(e))))
     <PageHeader
       title="数据复盘"
       description="导入经过核验的互动数据，对比平台、内容和发布时间实验。"
-      ><el-button @click="openManual"><Plus :size="15" class="mr-2" />手工录入</el-button
+      ><el-button v-if="canOperate" @click="openManual"
+        ><Plus :size="15" class="mr-2" />手工录入</el-button
       ><el-button @click="download('/analytics/template')"
         ><Download :size="15" class="mr-2" />下载模板</el-button
-      ><el-upload :show-file-list="false" :http-request="upload" accept=".csv,.xlsx"
+      ><el-upload
+        v-if="canOperate"
+        :show-file-list="false"
+        :http-request="upload"
+        accept=".csv,.xlsx"
         ><el-button type="primary" :loading="importing"
           ><Upload :size="15" class="mr-2" />导入数据</el-button
         ></el-upload
@@ -202,76 +211,93 @@ onMounted(() => load().catch((e) => ElMessage.error(getApiErrorMessage(e))))
         ><small>按当前互动率</small>
       </article>
     </section>
-    <section class="mt-4 grid gap-4 lg:grid-cols-[1.35fr_.65fr]">
-      <article class="panel p-5">
-        <p class="section-label">互动趋势</p>
-        <h2 class="section-title mt-1">最近 14 天</h2>
-        <ChartPanel :option="trendOption" />
-      </article>
-      <article class="panel p-5">
-        <p class="section-label">时间实验</p>
-        <h2 class="section-title mt-1">推荐时间与固定时间</h2>
-        <ChartPanel :option="timeOption" />
-      </article>
-    </section>
-    <section class="mt-4 grid gap-4 lg:grid-cols-2">
-      <article class="panel rounded-xl p-5">
-        <p class="section-label">平台对比</p>
-        <h2 class="section-title mt-1">平均互动率</h2>
-        <ChartPanel :option="platformOption" />
-      </article>
-    </section>
-    <section class="mt-4 grid gap-4 lg:grid-cols-[1.3fr_1fr]">
-      <article class="panel rounded-xl p-5">
-        <div class="flex justify-between">
-          <div>
-            <p class="section-label">内容排行</p>
-            <h2 class="section-title mt-1">表现最佳内容</h2>
-          </div>
-          <el-button link @click="download('/analytics/report')">导出 HTML 报告</el-button>
-        </div>
-        <div class="mt-4 divide-y divide-line">
-          <div
-            v-for="(item, index) in ranking"
-            :key="item.scheduleId"
-            class="flex items-center gap-3 py-3"
-          >
-            <span class="rank-number">{{ index + 1 }}</span>
-            <div class="min-w-0 flex-1">
-              <p class="truncate text-sm font-medium">{{ item.title }}</p>
-              <p class="mt-1 text-xs text-muted">{{ item.platform }} · {{ item.dataSource }}</p>
+    <template v-if="overview.sampleCount">
+      <section class="mt-4 grid gap-4 lg:grid-cols-[1.35fr_.65fr]">
+        <article class="panel p-5">
+          <p class="section-label">互动趋势</p>
+          <h2 class="section-title mt-1">最近 14 天</h2>
+          <ChartPanel :option="trendOption" />
+        </article>
+        <article class="panel p-5">
+          <p class="section-label">时间实验</p>
+          <h2 class="section-title mt-1">推荐时间与固定时间</h2>
+          <ChartPanel :option="timeOption" />
+        </article>
+      </section>
+      <section class="mt-4 grid gap-4 lg:grid-cols-2">
+        <article class="panel rounded-xl p-5">
+          <p class="section-label">平台对比</p>
+          <h2 class="section-title mt-1">平均互动率</h2>
+          <ChartPanel :option="platformOption" />
+        </article>
+      </section>
+      <section class="mt-4 grid gap-4 lg:grid-cols-[1.3fr_1fr]">
+        <article class="panel rounded-xl p-5">
+          <div class="flex justify-between">
+            <div>
+              <p class="section-label">内容排行</p>
+              <h2 class="section-title mt-1">表现最佳内容</h2>
             </div>
-            <strong class="text-sm text-brand">{{ item.engagementRate }}%</strong>
+            <el-button link @click="download('/analytics/report')">导出 HTML 报告</el-button>
           </div>
-        </div>
-      </article>
-      <article class="panel rounded-xl p-5">
-        <div class="flex items-start justify-between">
-          <div>
-            <p class="section-label">数据洞察</p>
-            <h2 class="section-title mt-1">复盘摘要</h2>
+          <div class="mt-4 divide-y divide-line">
+            <div
+              v-for="(item, index) in ranking"
+              :key="item.scheduleId"
+              class="flex items-center gap-3 py-3"
+            >
+              <span class="rank-number">{{ index + 1 }}</span>
+              <div class="min-w-0 flex-1">
+                <p class="truncate text-sm font-medium">{{ item.title }}</p>
+                <p class="mt-1 text-xs text-muted">{{ item.platform }} · {{ item.dataSource }}</p>
+              </div>
+              <strong class="text-sm text-brand">{{ item.engagementRate }}%</strong>
+            </div>
           </div>
-          <el-button type="primary" plain @click="aiSummary"
-            ><ScrollText :size="15" class="mr-1" />生成摘要</el-button
+        </article>
+        <article class="panel rounded-xl p-5">
+          <div class="flex items-start justify-between">
+            <div>
+              <p class="section-label">数据洞察</p>
+              <h2 class="section-title mt-1">复盘摘要</h2>
+            </div>
+            <el-button type="primary" plain @click="aiSummary"
+              ><ScrollText :size="15" class="mr-1" />生成摘要</el-button
+            >
+          </div>
+          <template v-if="summary"
+            ><p class="mt-5 text-sm leading-7">{{ summary.summary }}</p>
+            <ul class="mt-4 space-y-2 text-sm text-muted">
+              <li v-for="item in summary.keyFindings" :key="item">• {{ item }}</li>
+              <li v-for="item in summary.recommendations" :key="item">→ {{ item }}</li>
+            </ul>
+            <div class="notice-strip mt-4 !bg-amber-50 !text-amber-800">
+              {{ summary.limitations?.[0] }}
+            </div></template
           >
-        </div>
-        <template v-if="summary"
-          ><p class="mt-5 text-sm leading-7">{{ summary.summary }}</p>
-          <ul class="mt-4 space-y-2 text-sm text-muted">
-            <li v-for="item in summary.keyFindings" :key="item">• {{ item }}</li>
-            <li v-for="item in summary.recommendations" :key="item">→ {{ item }}</li>
-          </ul>
-          <div class="notice-strip mt-4 !bg-amber-50 !text-amber-800">
-            {{ summary.limitations?.[0] }}
-          </div></template
-        >
-        <div v-else class="empty-state min-h-64">
-          <ScrollText :size="27" />
-          <p>生成数据摘要</p>
-          <span>只根据数据库中的当前样本得出结论。</span>
-        </div>
-      </article>
-    </section>
+          <div v-else class="empty-state">
+            <ScrollText :size="27" />
+            <p>生成数据摘要</p>
+          </div>
+        </article>
+      </section>
+    </template>
+    <EmptyState
+      v-else
+      class="analytics-empty"
+      title="还没有互动数据"
+      description="导入发布数据后生成趋势"
+    >
+      <template #icon><FileSpreadsheet :size="23" /></template>
+      <el-upload
+        v-if="canOperate"
+        :show-file-list="false"
+        :http-request="upload"
+        accept=".csv,.xlsx"
+      >
+        <el-button size="small" type="primary" :loading="importing">导入数据</el-button>
+      </el-upload>
+    </EmptyState>
     <el-dialog v-model="manualOpen" title="手工录入互动数据" width="620px">
       <el-form label-position="top">
         <div class="grid grid-cols-2 gap-x-4">

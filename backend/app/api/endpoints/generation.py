@@ -41,10 +41,19 @@ async def generate(
         ids = []
         options = payload.model_dump()
         for index, platform in enumerate(payload.platforms):
-            data, model, duration, tokens = await generate_variant_data(
+            data, model, duration, prompt_tokens, completion_tokens = await generate_variant_data(
                 db, article, platform, options
             )
-            variant = save_variant(db, article, platform, data, model, duration, tokens)
+            variant = save_variant(
+                db,
+                article,
+                platform,
+                data,
+                model,
+                duration,
+                prompt_tokens,
+                completion_tokens,
+            )
             ids.append(variant.id)
             task.progress = int((index + 1) / len(payload.platforms) * 90)
         task.result_variant_ids_json = ids

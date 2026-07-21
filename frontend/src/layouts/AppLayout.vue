@@ -18,9 +18,15 @@ const collapsed = ref(false)
       @toggle="collapsed = !collapsed"
       @close="mobileOpen = false"
     />
-    <div :class="collapsed ? 'lg:pl-[68px]' : 'lg:pl-[220px]'" class="min-h-screen transition-all">
+    <div :class="collapsed ? 'lg:pl-[64px]' : 'lg:pl-[196px]'" class="app-workspace">
       <AppTopbar @menu="mobileOpen = true" />
-      <main class="app-main"><RouterView /></main>
+      <main class="app-main">
+        <RouterView v-slot="{ Component, route }">
+          <Transition name="page" mode="out-in">
+            <component :is="Component" :key="route.path" />
+          </Transition>
+        </RouterView>
+      </main>
     </div>
   </div>
 </template>

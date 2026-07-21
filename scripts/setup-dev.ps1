@@ -5,7 +5,7 @@ $backend = Join-Path $projectRoot 'backend'
 $frontend = Join-Path $projectRoot 'frontend'
 $venvPython = Join-Path $backend '.venv\Scripts\python.exe'
 
-Write-Host 'SocialFlow AI first-time setup / dependency update' -ForegroundColor Cyan
+Write-Host 'ContentPilot first-time setup / dependency update' -ForegroundColor Cyan
 if (-not (Test-Path -LiteralPath $venvPython)) {
   $python = $null
   $candidates = @('F:\anaconda3\python.exe','F:\miniconda3\python.exe','F:\Anaconda\python.exe','F:\Miniconda3\python.exe')

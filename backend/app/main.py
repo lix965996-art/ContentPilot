@@ -21,7 +21,7 @@ async def lifespan(_: FastAPI):
 
 app = FastAPI(
     title=settings.app_name,
-    description="SocialFlow AI 完整业务 API：内容、AI、媒体、排期、发布、分析与实验",
+    description="ContentPilot 多平台内容运营 API：内容、生成、媒体、排期、发布、分析与实验",
     version="1.0.0",
     docs_url="/docs",
     redoc_url="/redoc",

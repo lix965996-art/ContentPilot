@@ -123,6 +123,25 @@ class SettingUpdate(BaseModel):
     value: str = Field(max_length=5000)
 
 
+class LlmConfigUpdate(BaseModel):
+    provider: str = Field(min_length=1, max_length=50)
+    base_url: str = Field(default="", max_length=1000)
+    api_key: str = Field(default="", max_length=5000)
+    model: str = Field(default="", max_length=100)
+    input_price_per_million: float = Field(default=0, ge=0, le=1_000_000)
+    output_price_per_million: float = Field(default=0, ge=0, le=1_000_000)
+    currency: Literal["CNY", "USD"] = "CNY"
+
+    @field_validator("base_url")
+    @classmethod
+    def validate_base_url(cls, value: str, info):
+        if info.data.get("provider", "").lower() != "mock" and not value.startswith(
+            ("http://", "https://")
+        ):
+            raise ValueError("接口地址必须以 http:// 或 https:// 开头")
+        return value.rstrip("/")
+
+
 class UserCreate(BaseModel):
     username: str = Field(pattern=r"^[A-Za-z0-9_.-]{3,50}$")
     password: str = Field(min_length=8, max_length=128)

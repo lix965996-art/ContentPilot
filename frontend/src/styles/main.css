@@ -926,7 +926,7 @@ input:focus-visible {
     font-weight: 650;
     line-height: 1.35;
   }
-  .login-copy span {
+  .login-copy > span {
     display: block;
     margin-top: 28px;
     color: #667069;
@@ -1686,7 +1686,7 @@ body,
 .preview-account span {
   margin-top: 2px;
   color: var(--sf-subtle);
-  font-size: 9px;
+  font-size: 11px;
 }
 .platform-preview h3 {
   margin: 14px 0 7px;
@@ -1723,7 +1723,7 @@ body,
   border-top: 1px solid #eef0f3;
   padding-top: 11px;
   color: var(--sf-subtle);
-  font-size: 10px;
+  font-size: 11px;
 }
 @media (max-width: 1280px) {
   .composer-shell {
@@ -1781,7 +1781,7 @@ body,
 }
 .keyword-list button small {
   color: var(--sf-subtle);
-  font-size: 9px;
+  font-size: 11px;
 }
 .keyword-list button.active {
   background: var(--sf-brand-soft);

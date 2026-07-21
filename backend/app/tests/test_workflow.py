@@ -145,3 +145,36 @@ def test_secret_setting_is_masked(client: TestClient, login_as) -> None:
     rows = client.get("/api/settings", headers=auth).json()["data"]
     secret = next(item for item in rows if item["settingKey"] == "llm.api_key")
     assert secret["settingValue"] == "••••••••"
+
+
+def test_model_service_configuration_and_usage(client: TestClient, login_as) -> None:
+    token = login_as("admin", "Admin@123456")["access_token"]
+    auth = headers(token)
+    payload = {
+        "provider": "mock",
+        "base_url": "",
+        "api_key": "",
+        "model": "contentpilot-local",
+        "input_price_per_million": 2.5,
+        "output_price_per_million": 10,
+        "currency": "CNY",
+    }
+    saved = client.put("/api/settings/model-service", headers=auth, json=payload)
+    assert saved.status_code == 200
+    assert saved.json()["data"]["model"] == "contentpilot-local"
+
+    tested = client.post("/api/settings/model-service/test", headers=auth, json=payload)
+    assert tested.status_code == 200
+    assert tested.json()["data"]["connected"] is True
+    assert tested.json()["data"]["models"] == ["contentpilot-local"]
+
+    usage = client.get("/api/settings/model-service/usage?days=30", headers=auth)
+    assert usage.status_code == 200
+    assert usage.json()["data"]["totalTokens"] >= 0
+    assert usage.json()["data"]["currency"] == "CNY"
+
+
+def test_operator_cannot_manage_model_service(client: TestClient, login_as) -> None:
+    token = login_as("operator", "Operator@123456")["access_token"]
+    response = client.get("/api/settings/model-service", headers=headers(token))
+    assert response.status_code == 403

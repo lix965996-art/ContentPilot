@@ -59,7 +59,9 @@ def template(_: User = Depends(get_current_user)) -> StreamingResponse:
     return StreamingResponse(
         stream,
         media_type="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
-        headers={"Content-Disposition": "attachment; filename=socialflow-analytics-template.xlsx"},
+        headers={
+            "Content-Disposition": "attachment; filename=contentpilot-analytics-template.xlsx"
+        },
     )
 
 
@@ -214,10 +216,10 @@ def report(_: User = Depends(get_current_user), db: Session = Depends(get_db)) -
     )
     html = (
         "<!doctype html><html lang='zh-CN'><meta charset='utf-8'>"
-        "<title>SocialFlow 数据复盘</title><style>body{font:16px/1.7 sans-serif;"
+        "<title>ContentPilot 数据复盘</title><style>body{font:16px/1.7 sans-serif;"
         "max-width:900px;margin:40px auto;color:#172033}table{border-collapse:collapse;"
         "width:100%}td,th{border:1px solid #ddd;padding:8px}</style>"
-        f"<h1>SocialFlow 数据复盘报告</h1><p>生成时间：{datetime.now():%Y-%m-%d %H:%M}</p>"
+        f"<h1>ContentPilot 数据复盘报告</h1><p>生成时间：{datetime.now():%Y-%m-%d %H:%M}</p>"
         f"<p>样本数：{summary['sampleCount']}；互动率：{summary['engagementRate']}%；"
         f"其中 SIMULATED：{summary['simulatedCount']} 条。</p>"
         "<h2>平台对比</h2><table><tr><th>平台</th><th>样本</th><th>互动率</th></tr>"
@@ -226,7 +228,7 @@ def report(_: User = Depends(get_current_user), db: Session = Depends(get_db)) -
     return StreamingResponse(
         iter([html.encode("utf-8")]),
         media_type="text/html; charset=utf-8",
-        headers={"Content-Disposition": "attachment; filename=socialflow-report.html"},
+        headers={"Content-Disposition": "attachment; filename=contentpilot-report.html"},
     )
 
 

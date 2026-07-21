@@ -1,1 +1,1 @@
-"""SocialFlow AI backend package."""
+"""ContentPilot backend package."""

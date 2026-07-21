@@ -1,4 +1,4 @@
-# SocialFlow AI 参考项目分析
+# ContentPilot 参考项目分析
 
 > 分析日期：2026-07-21  
 > 分析范围：四个参考项目的 README、顶层/核心目录、依赖清单、认证/内容/排期/发布/分析核心文件及许可证。  
@@ -159,4 +159,3 @@ Laravel/PHP/Horizon、现有 provider 源码、FFmpeg、Mixpost 品牌素材、P
 - Postiz 为 AGPL-3.0，尤其关注网络交互场景的对应源码义务。本项目仅作功能观察，不复制实现、UI 素材或文本。
 - Mixpost README 明确 Lite/Pro 边界，本项目不接触 Pro 商业代码或标识。
 - 初始只读快照（文件数 / 内容树 SHA-256）：Free 47 / `E067B9...55B9C`；Postiz 923 / `74E438...9F26`；Agent 254 / `0566BA...CB58`；Mixpost 563 / `84548C...B93C7`。阶段 1 完成后将再次计算并比对。
-

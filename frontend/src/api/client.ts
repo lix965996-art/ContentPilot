@@ -3,8 +3,10 @@ import axios, { AxiosError, type InternalAxiosRequestConfig } from 'axios'
 import type { ApiResponse } from '@/types/api'
 import type { AuthData } from '@/types/user'
 
-const ACCESS_TOKEN_KEY = 'socialflow_access_token'
-const REFRESH_TOKEN_KEY = 'socialflow_refresh_token'
+const ACCESS_TOKEN_KEY = 'contentpilot_access_token'
+const REFRESH_TOKEN_KEY = 'contentpilot_refresh_token'
+const LEGACY_ACCESS_TOKEN_KEY = 'socialflow_access_token'
+const LEGACY_REFRESH_TOKEN_KEY = 'socialflow_refresh_token'
 
 interface RetryRequestConfig extends InternalAxiosRequestConfig {
   _retry?: boolean
@@ -17,21 +19,43 @@ export const apiClient = axios.create({
 })
 
 export function readAccessToken(): string | null {
-  return localStorage.getItem(ACCESS_TOKEN_KEY)
+  const token = localStorage.getItem(ACCESS_TOKEN_KEY) || sessionStorage.getItem(ACCESS_TOKEN_KEY)
+  if (token) return token
+  const legacyToken = localStorage.getItem(LEGACY_ACCESS_TOKEN_KEY)
+  if (legacyToken) {
+    localStorage.setItem(ACCESS_TOKEN_KEY, legacyToken)
+    localStorage.removeItem(LEGACY_ACCESS_TOKEN_KEY)
+  }
+  return legacyToken
 }
 
 export function readRefreshToken(): string | null {
-  return localStorage.getItem(REFRESH_TOKEN_KEY)
+  const token = localStorage.getItem(REFRESH_TOKEN_KEY) || sessionStorage.getItem(REFRESH_TOKEN_KEY)
+  if (token) return token
+  const legacyToken = localStorage.getItem(LEGACY_REFRESH_TOKEN_KEY)
+  if (legacyToken) {
+    localStorage.setItem(REFRESH_TOKEN_KEY, legacyToken)
+    localStorage.removeItem(LEGACY_REFRESH_TOKEN_KEY)
+  }
+  return legacyToken
 }
 
-export function persistTokens(accessToken: string, refreshToken: string): void {
-  localStorage.setItem(ACCESS_TOKEN_KEY, accessToken)
-  localStorage.setItem(REFRESH_TOKEN_KEY, refreshToken)
+export function persistTokens(accessToken: string, refreshToken: string, remember = true): void {
+  const storage = remember ? localStorage : sessionStorage
+  const otherStorage = remember ? sessionStorage : localStorage
+  storage.setItem(ACCESS_TOKEN_KEY, accessToken)
+  storage.setItem(REFRESH_TOKEN_KEY, refreshToken)
+  otherStorage.removeItem(ACCESS_TOKEN_KEY)
+  otherStorage.removeItem(REFRESH_TOKEN_KEY)
 }
 
 export function clearTokens(): void {
   localStorage.removeItem(ACCESS_TOKEN_KEY)
   localStorage.removeItem(REFRESH_TOKEN_KEY)
+  localStorage.removeItem(LEGACY_ACCESS_TOKEN_KEY)
+  localStorage.removeItem(LEGACY_REFRESH_TOKEN_KEY)
+  sessionStorage.removeItem(ACCESS_TOKEN_KEY)
+  sessionStorage.removeItem(REFRESH_TOKEN_KEY)
 }
 
 apiClient.interceptors.request.use((config) => {
@@ -51,7 +75,8 @@ async function requestNewAccessToken(): Promise<string> {
   const response = await axios.post<ApiResponse<AuthData>>('/api/auth/refresh', {
     refresh_token: refreshToken,
   })
-  persistTokens(response.data.data.access_token, response.data.data.refresh_token)
+  const remember = Boolean(localStorage.getItem(REFRESH_TOKEN_KEY))
+  persistTokens(response.data.data.access_token, response.data.data.refresh_token, remember)
   return response.data.data.access_token
 }
 
@@ -72,7 +97,7 @@ apiClient.interceptors.response.use(
         return apiClient(original)
       } catch {
         clearTokens()
-        window.dispatchEvent(new CustomEvent('socialflow:session-expired'))
+        window.dispatchEvent(new CustomEvent('contentpilot:session-expired'))
       }
     }
     return Promise.reject(error)

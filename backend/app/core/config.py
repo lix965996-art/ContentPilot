@@ -15,7 +15,7 @@ class Settings(BaseSettings):
         extra="ignore",
     )
 
-    app_name: str = "SocialFlow AI"
+    app_name: str = "ContentPilot"
     app_env: str = "dev"
     app_timezone: str = "Asia/Shanghai"
     api_prefix: str = "/api"

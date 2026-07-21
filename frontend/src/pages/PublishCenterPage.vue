@@ -131,9 +131,7 @@ function selectStatus(value: string) {
             ></template
           ></el-table-column
         ><template #empty
-          ><EmptyState
-            title="当前没有发布任务"
-            description="审核后的平台版本可以在排期日历中创建发布任务。"
+          ><EmptyState title="当前没有发布任务"
             ><template #icon><Inbox :size="25" /></template></EmptyState></template
       ></el-table>
     </section>

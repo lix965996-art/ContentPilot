@@ -37,6 +37,13 @@ for (const viewport of [
         )
         .toBe(true)
       await page.screenshot({ path: `artifacts/ui-audit/${viewport.name}/${name}.png` })
+      if (name === 'settings') {
+        await page.getByRole('tab', { name: '用量与费用' }).click()
+        await page.waitForTimeout(300)
+        await page.screenshot({
+          path: `artifacts/ui-audit/${viewport.name}/settings-usage.png`,
+        })
+      }
     }
   })
 }

@@ -27,9 +27,9 @@ ROLE_DEFINITIONS = {
 }
 
 DEMO_USERS = (
-    ("admin", "Admin@123456", "系统管理员", "admin@socialflow.local", "ADMIN"),
-    ("operator", "Operator@123456", "内容运营者", "operator@socialflow.local", "OPERATOR"),
-    ("viewer", "Viewer@123456", "数据查看者", "viewer@socialflow.local", "VIEWER"),
+    ("admin", "Admin@123456", "系统管理员", "admin@contentpilot.local", "ADMIN"),
+    ("operator", "Operator@123456", "内容运营者", "operator@contentpilot.local", "OPERATOR"),
+    ("viewer", "Viewer@123456", "数据查看者", "viewer@contentpilot.local", "VIEWER"),
 )
 
 
@@ -69,6 +69,9 @@ def seed_system_settings(db: Session) -> None:
         ("llm.base_url", settings.llm_base_url, False, "OpenAI 兼容接口地址"),
         ("llm.api_key", settings.llm_api_key, True, "大模型 API Key"),
         ("llm.model", settings.llm_model, False, "模型名称"),
+        ("llm.input_price_per_million", "0", False, "每百万输入 Token 价格"),
+        ("llm.output_price_per_million", "0", False, "每百万输出 Token 价格"),
+        ("llm.currency", "CNY", False, "计费币种"),
         ("media.unsplash_key", settings.unsplash_access_key, True, "Unsplash Access Key"),
         ("publish.mode", settings.publish_mode, False, "默认发布方式"),
         ("app.timezone", settings.app_timezone, False, "系统时区"),
@@ -212,7 +215,7 @@ def seed_demo_business_data(db: Session, roles: dict[str, Role]) -> None:
                 PlatformAccount(
                     user_id=operator.id,
                     platform=platform,
-                    account_name=f"SocialFlow 演示{platform}",
+                    account_name=f"ContentPilot 演示{platform}",
                     publish_mode="MOCK",
                     status="ACTIVE",
                 )
@@ -342,6 +345,9 @@ def seed_demo_business_data(db: Session, roles: dict[str, Role]) -> None:
         ("llm.base_url", "", False, "OpenAI 兼容接口地址"),
         ("llm.api_key", "", True, "大模型 API Key"),
         ("llm.model", "", False, "模型名称"),
+        ("llm.input_price_per_million", "0", False, "每百万输入 Token 价格"),
+        ("llm.output_price_per_million", "0", False, "每百万输出 Token 价格"),
+        ("llm.currency", "CNY", False, "计费币种"),
         ("media.unsplash_key", "", True, "Unsplash Access Key"),
         ("publish.mode", "mock", False, "默认发布适配器"),
         ("app.timezone", "Asia/Shanghai", False, "系统时区"),
@@ -361,7 +367,7 @@ def main() -> None:
     with SessionLocal() as db:
         seed_database(db)
     mode = "with optional demo data" if settings.app_demo_mode else "without demo business data"
-    print(f"SocialFlow roles, users and settings are ready ({mode}).")
+    print(f"ContentPilot roles, users and settings are ready ({mode}).")
 
 
 if __name__ == "__main__":

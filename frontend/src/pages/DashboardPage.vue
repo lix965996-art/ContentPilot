@@ -2,170 +2,225 @@
 import { computed, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import {
-  AlertTriangle,
-  ArrowRight,
+  AlertCircle,
+  ArrowUpRight,
   CalendarDays,
-  CheckCircle2,
-  FileText,
-  Plus,
+  FilePlus2,
   PenLine,
+  Upload,
 } from 'lucide-vue-next'
 import { ElMessage } from 'element-plus'
-import { workflowApi } from '@/api/workflow'
 import { getApiErrorMessage } from '@/api/client'
+import { workflowApi } from '@/api/workflow'
 import ChartPanel from '@/components/ChartPanel.vue'
+import AnimatedNumber from '@/components/AnimatedNumber.vue'
+import EmptyState from '@/components/EmptyState.vue'
+import PlatformIcon from '@/components/PlatformIcon.vue'
+import Skeleton from '@/components/Skeleton.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import { useAuthStore } from '@/stores/auth'
+import type { Article, Schedule } from '@/types/business'
 import { platformNames } from '@/types/business'
-import type { Platform } from '@/types/business'
+
 const router = useRouter()
 const auth = useAuthStore()
-const canOperate = computed(() => auth.hasRole(['ADMIN', 'OPERATOR']))
-const data = ref<Record<string, any>>()
 const loading = ref(true)
-const dateLabel = new Intl.DateTimeFormat('zh-CN', {
-  month: 'long',
-  day: 'numeric',
-  weekday: 'long',
-}).format(new Date())
+const dashboard = ref<Record<string, any>>({})
+const overview = ref<Record<string, number>>({})
+const recentArticles = ref<Article[]>([])
+const schedules = ref<Schedule[]>([])
+const ranking = ref<Array<Record<string, any>>>([])
+const canOperate = computed(() => auth.hasRole(['ADMIN', 'OPERATOR']))
+const todaySchedules = computed(() => {
+  const today = new Date().toDateString()
+  return schedules.value.filter((item) => new Date(item.scheduledAt).toDateString() === today)
+})
+const tasks = computed(() => [
+  { label: '版本待审核', value: dashboard.value.stats?.pendingReview || 0, route: 'articles' },
+  { label: '内容待排期', value: dashboard.value.stats?.pendingSchedule || 0, route: 'calendar' },
+  {
+    label: '发布失败',
+    value: dashboard.value.stats?.failed || 0,
+    route: canOperate.value ? 'publish' : 'calendar',
+    danger: true,
+  },
+])
 const trendOption = computed(() => ({
-  tooltip: { trigger: 'axis' },
-  grid: { left: 38, right: 16, top: 20, bottom: 30 },
+  animationDuration: 500,
+  grid: { left: 4, right: 4, top: 8, bottom: 4 },
+  tooltip: { trigger: 'axis', confine: true },
   xAxis: {
     type: 'category',
-    data: (data.value?.trend || []).map((x: any) => x.date.slice(5)),
-    axisLine: { lineStyle: { color: '#e6e8ef' } },
+    show: false,
+    data: (dashboard.value.trend || []).map((x: any) => x.date),
   },
-  yAxis: { type: 'value', splitLine: { lineStyle: { color: '#eef0f5' } } },
+  yAxis: { type: 'value', show: false },
   series: [
     {
       type: 'line',
-      smooth: true,
-      symbolSize: 6,
-      data: (data.value?.trend || []).map((x: any) => x.engagement),
-      lineStyle: { color: '#315c4d', width: 2 },
-      itemStyle: { color: '#315c4d' },
-      areaStyle: { color: 'rgba(49,92,77,.08)' },
+      smooth: 0.35,
+      showSymbol: false,
+      data: (dashboard.value.trend || []).map((x: any) => x.engagement),
+      lineStyle: { color: '#007aff', width: 2 },
+      areaStyle: { color: 'rgba(0,122,255,.06)' },
     },
   ],
 }))
+
 async function load() {
   loading.value = true
   try {
-    data.value = await workflowApi.dashboard()
-  } catch (e) {
-    ElMessage.error(getApiErrorMessage(e))
+    const [dashboardData, articlesData, scheduleData, overviewData, rankingData] =
+      await Promise.all([
+        workflowApi.dashboard(),
+        workflowApi.articles({ page_size: 5 }),
+        workflowApi.schedules(),
+        workflowApi.analyticsOverview(),
+        workflowApi.analyticsRanking(),
+      ])
+    dashboard.value = dashboardData
+    recentArticles.value = articlesData.items
+    schedules.value = scheduleData
+    overview.value = overviewData
+    ranking.value = rankingData
+  } catch (error) {
+    ElMessage.error(getApiErrorMessage(error))
   } finally {
     loading.value = false
   }
 }
-function platformLabel(value: string): string {
-  return platformNames[value as Platform] || value
-}
+
 onMounted(load)
 </script>
+
 <template>
-  <div v-loading="loading">
-    <section class="dashboard-hero">
-      <div>
-        <p>{{ dateLabel }}</p>
-        <h1>早上好，{{ auth.user?.display_name }}</h1>
-        <span>今天的原文、审核、排期和数据都在这里。</span>
-      </div>
-      <div v-if="canOperate" class="flex gap-2">
-        <el-button @click="router.push({ name: 'articles' })"
-          ><Plus :size="16" class="mr-1" />新建原文</el-button
-        ><el-button type="primary" @click="router.push({ name: 'studio' })"
-          ><PenLine :size="16" class="mr-1" />生成平台版本</el-button
+  <div class="dashboard-page">
+    <Skeleton v-if="loading" :lines="6" />
+    <template v-else>
+      <section class="task-strip" aria-label="待处理事项">
+        <span class="task-strip-title">待处理</span>
+        <button
+          v-for="task in tasks"
+          :key="task.label"
+          :class="{ danger: task.danger && task.value }"
+          @click="router.push({ name: task.route })"
         >
+          <b><AnimatedNumber :value="task.value" /></b> 个{{ task.label
+          }}<ArrowUpRight :size="14" />
+        </button>
+      </section>
+
+      <div class="dashboard-columns">
+        <section class="workspace-section recent-content">
+          <header>
+            <h2>最近内容</h2>
+            <button @click="router.push({ name: 'articles' })">查看全部</button>
+          </header>
+          <div v-if="recentArticles.length" class="recent-list">
+            <article v-for="item in recentArticles" :key="item.id">
+              <div class="recent-cover">
+                <span>{{ item.title.slice(0, 1) }}</span>
+              </div>
+              <button
+                class="recent-copy"
+                @click="router.push({ name: 'articles', query: { edit: item.id } })"
+              >
+                <b>{{ item.title }}</b
+                ><small>{{ item.summary || item.sourceText }}</small>
+              </button>
+              <div class="recent-platforms">
+                <PlatformIcon
+                  v-for="variant in item.variants || []"
+                  :key="variant.id"
+                  :platform="variant.platform"
+                  size="sm"
+                />
+              </div>
+              <StatusBadge :status="item.status" />
+              <time>{{
+                new Date(item.updatedAt).toLocaleDateString('zh-CN', {
+                  month: 'numeric',
+                  day: 'numeric',
+                })
+              }}</time>
+              <button
+                v-if="canOperate"
+                class="continue-button"
+                @click="router.push({ name: 'studio', query: { article: item.id } })"
+              >
+                <PenLine :size="14" />继续编辑
+              </button>
+            </article>
+          </div>
+          <EmptyState v-else title="还没有内容">
+            <template #icon><FilePlus2 :size="22" /></template>
+            <el-button
+              v-if="canOperate"
+              size="small"
+              type="primary"
+              @click="router.push({ name: 'articles', query: { create: '1' } })"
+              >新建内容</el-button
+            >
+          </EmptyState>
+        </section>
+
+        <section class="workspace-section today-schedule">
+          <header>
+            <h2>今日排期</h2>
+            <button @click="router.push({ name: 'calendar' })">日历</button>
+          </header>
+          <div v-if="todaySchedules.length" class="compact-timeline">
+            <button
+              v-for="item in todaySchedules.slice(0, 5)"
+              :key="item.id"
+              @click="router.push({ name: canOperate ? 'publish' : 'calendar' })"
+            >
+              <time>{{
+                new Date(item.scheduledAt).toLocaleTimeString('zh-CN', {
+                  hour: '2-digit',
+                  minute: '2-digit',
+                })
+              }}</time>
+              <PlatformIcon :platform="item.platform" size="sm" />
+              <span
+                ><b>{{ platformNames[item.platform] }}</b
+                ><small>{{ item.articleTitle }}</small></span
+              >
+              <StatusBadge :status="item.status" />
+            </button>
+          </div>
+          <EmptyState v-else title="今天没有排期">
+            <template #icon><CalendarDays :size="22" /></template>
+            <el-button v-if="canOperate" size="small" @click="router.push({ name: 'calendar' })"
+              >安排内容</el-button
+            >
+          </EmptyState>
+        </section>
       </div>
-    </section>
-    <div class="notice-strip">
-      <CheckCircle2 :size="16" /><span>{{ data?.dataNotice }}</span>
-    </div>
-    <section class="metric-grid">
-      <article>
-        <span>内容资产</span><strong>{{ data?.stats?.articles || 0 }}</strong
-        ><small>篇原文</small><FileText />
-      </article>
-      <article>
-        <span>待审核</span><strong>{{ data?.stats?.pendingReview || 0 }}</strong
-        ><small>个平台版本</small><PenLine />
-      </article>
-      <article>
-        <span>待发布</span><strong>{{ data?.stats?.pendingSchedule || 0 }}</strong
-        ><small>个排期任务</small><CalendarDays />
-      </article>
-      <article :class="{ 'is-alert': data?.stats?.failed }">
-        <span>发布失败</span><strong>{{ data?.stats?.failed || 0 }}</strong
-        ><small>需要处理</small><AlertTriangle />
-      </article>
-    </section>
-    <section class="mt-4 grid gap-4 xl:grid-cols-[1.45fr_.85fr]">
-      <article class="panel rounded-xl p-5">
-        <div class="panel-heading">
-          <div>
-            <p class="section-label">近 14 天</p>
-            <h2 class="section-title mt-1">最近互动趋势</h2>
+
+      <section class="workspace-section performance-strip">
+        <header>
+          <h2>最近表现</h2>
+          <button @click="router.push({ name: 'analytics' })">查看数据</button>
+        </header>
+        <div v-if="dashboard.trend?.length" class="performance-content">
+          <div class="performance-metric">
+            <span>平均互动率</span><strong>{{ overview.engagementRate || 0 }}%</strong
+            ><small>基于 {{ overview.sampleCount || 0 }} 条数据</small>
           </div>
-          <el-button link type="primary" @click="router.push({ name: 'analytics' })"
-            >查看完整复盘<ArrowRight :size="14" class="ml-1"
-          /></el-button>
-        </div>
-        <ChartPanel :option="trendOption" height="270px" />
-      </article>
-      <article class="panel rounded-xl p-5">
-        <div class="panel-heading">
-          <div>
-            <p class="section-label">发布队列</p>
-            <h2 class="section-title mt-1">今日排期</h2>
+          <ChartPanel :option="trendOption" height="112px" />
+          <div class="best-content">
+            <span>最佳内容</span><b>{{ ranking[0]?.title || '—' }}</b
+            ><small>{{ ranking[0]?.engagementRate || 0 }}% 互动率</small>
           </div>
-          <el-button link @click="router.push({ name: 'calendar' })">日历</el-button>
         </div>
-        <div v-if="data?.todaySchedules?.length" class="schedule-list">
-          <button
-            v-for="item in data.todaySchedules"
-            :key="item.id"
-            @click="router.push({ name: canOperate ? 'publish' : 'calendar' })"
+        <EmptyState v-else title="还没有互动数据" description="导入发布数据后生成趋势">
+          <template #icon><AlertCircle :size="22" /></template>
+          <el-button v-if="canOperate" size="small" @click="router.push({ name: 'analytics' })"
+            ><Upload :size="14" class="mr-1" />导入数据</el-button
           >
-            <span class="schedule-time">{{
-              new Date(item.scheduledAt).toLocaleTimeString('zh-CN', {
-                hour: '2-digit',
-                minute: '2-digit',
-              })
-            }}</span>
-            <div>
-              <p>{{ platformLabel(item.platform) }}</p>
-              <small>发布任务 #{{ item.id }}</small>
-            </div>
-            <StatusBadge :status="item.status" />
-          </button>
-        </div>
-        <div v-else class="empty-state min-h-64">
-          <CalendarDays :size="28" />
-          <p>今天没有排期</p>
-          <span>前往日历安排下一条内容。</span>
-        </div>
-      </article>
-    </section>
-    <section class="mt-4 panel rounded-xl p-5">
-      <div class="panel-heading">
-        <div>
-          <p class="section-label">对照结果</p>
-          <h2 class="section-title mt-1">推荐时间与固定时间</h2>
-        </div>
-        <span class="meta-chip">按实际录入指标统计</span>
-      </div>
-      <div class="comparison-bars">
-        <div v-for="item in data?.timeComparison || []" :key="item.name">
-          <div>
-            <span>{{ item.name === 'RECOMMENDED_TIME' ? '推荐时间组' : '固定时间组' }}</span
-            ><b>{{ item.rate }}%</b>
-          </div>
-          <div><i :style="{ width: `${Math.min(item.rate * 8, 100)}%` }" /></div>
-          <small>{{ item.samples }} 个样本</small>
-        </div>
-      </div>
-    </section>
+        </EmptyState>
+      </section>
+    </template>
   </div>
 </template>

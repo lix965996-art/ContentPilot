@@ -29,6 +29,9 @@ export interface Variant {
   promptVersion: string
   generationDurationMs: number
   tokenUsage: number
+  promptTokens: number
+  completionTokens: number
+  estimatedCost: number
   qualityScore: number
   manualEditRatio: number
   reviewStatus: string
@@ -50,6 +53,37 @@ export interface Schedule {
   publishedUrl?: string
   errorMessage?: string
   logs?: Array<Record<string, unknown>>
+}
+
+export interface LlmConfig {
+  provider: string
+  baseUrl: string
+  apiKey: string
+  apiKeyConfigured: boolean
+  model: string
+  inputPricePerMillion: number
+  outputPricePerMillion: number
+  currency: 'CNY' | 'USD'
+}
+
+export interface LlmConnectionResult {
+  connected: boolean
+  latencyMs: number
+  models: string[]
+  message: string
+}
+
+export interface LlmUsage {
+  days: number
+  generations: number
+  promptTokens: number
+  completionTokens: number
+  totalTokens: number
+  estimatedCost: number
+  averageTokens: number
+  currency: 'CNY' | 'USD'
+  byModel: Array<{ model: string; generations: number; tokens: number; cost: number }>
+  daily: Array<{ date: string; tokens: number; cost: number }>
 }
 
 export const platformNames: Record<Platform, string> = {

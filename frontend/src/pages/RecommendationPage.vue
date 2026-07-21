@@ -30,8 +30,8 @@ const option = computed(() => ({
       type: 'line',
       smooth: true,
       symbol: 'none',
-      areaStyle: { color: 'rgba(49,92,77,.12)' },
-      lineStyle: { color: '#315c4d', width: 2 },
+      areaStyle: { color: 'rgba(0,122,255,.06)' },
+      lineStyle: { color: '#007aff', width: 2 },
       data: (result.value?.curve || []).map((x: any) => x.platformPrior),
     },
   ],
@@ -68,48 +68,43 @@ onMounted(loadArticles)
 </script>
 <template>
   <div>
-    <PageHeader
-      title="发布时间推荐"
-      description="根据人工维护的规则和账号历史数据，计算 30 分钟候选时段。"
+    <PageHeader title="发布时间推荐"
       ><el-button type="primary" :loading="loading" @click="calculate"
         ><Gauge :size="16" class="mr-2" />计算推荐时间</el-button
       ></PageHeader
     >
-    <section class="panel rounded-xl p-5">
-      <div class="grid gap-4 md:grid-cols-2">
-        <label class="field-label"
-          >文章<el-select v-model="articleId" filterable class="mt-2 w-full" @change="loadVariants"
-            ><el-option
-              v-for="item in articles"
-              :key="item.id"
-              :label="item.title"
-              :value="item.id" /></el-select></label
-        ><label class="field-label"
-          >平台<el-segmented
-            v-model="platform"
-            :options="Object.entries(platformNames).map(([value, label]) => ({ value, label }))"
-            class="mt-2 w-full"
-        /></label>
-      </div>
+    <section class="recommendation-toolbar">
+      <label class="field-label"
+        >内容<el-select v-model="articleId" filterable class="mt-2 w-full" @change="loadVariants"
+          ><el-option
+            v-for="item in articles"
+            :key="item.id"
+            :label="item.title"
+            :value="item.id" /></el-select></label
+      ><label class="field-label"
+        >平台<el-segmented
+          v-model="platform"
+          :options="Object.entries(platformNames).map(([value, label]) => ({ value, label }))"
+          class="mt-2 w-full"
+      /></label>
     </section>
     <template v-if="result"
-      ><section class="mt-4 grid gap-4 lg:grid-cols-[1.6fr_1fr]">
-        <article class="panel rounded-xl p-5">
-          <div class="flex items-center justify-between">
-            <div>
-              <p class="section-label">24 小时活跃曲线</p>
-              <h2 class="section-title mt-1">{{ platformNames[platform] }} 平台先验得分</h2>
-            </div>
-            <span class="meta-chip">实际数据计算</span>
-          </div>
-          <ChartPanel class="mt-3" :option="option" height="310px" />
+      ><section class="recommendation-layout">
+        <article class="recommendation-curve">
+          <header>
+            <h2>24 小时活跃曲线</h2>
+            <span>{{
+              new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric' })
+            }}</span>
+          </header>
+          <ChartPanel :option="option" height="360px" />
         </article>
-        <aside class="panel rounded-xl p-5">
-          <p class="section-label">最佳时段</p>
-          <div class="mt-5 flex items-center gap-3">
+        <aside class="recommendation-result">
+          <p>最佳时间</p>
+          <div class="best-time">
             <span class="icon-tile"><Clock3 :size="21" /></span>
             <div>
-              <p class="text-2xl font-semibold text-ink">
+              <strong>
                 {{
                   new Date(result.recommendedAt).toLocaleString('zh-CN', {
                     month: '2-digit',
@@ -118,13 +113,12 @@ onMounted(loadArticles)
                     minute: '2-digit',
                   })
                 }}
-              </p>
-              <p class="mt-1 text-sm text-muted">
-                综合得分 {{ result.score }} · 置信度 {{ result.confidence }}
-              </p>
+              </strong>
+              <span>推荐得分 {{ result.score }} · 置信度 {{ result.confidence }}</span>
             </div>
           </div>
-          <div class="mt-6 space-y-3">
+          <div class="recommendation-reasons">
+            <h3>推荐理由</h3>
             <div v-for="reason in result.reasonJson" :key="reason.type" class="reason-card">
               <Lightbulb :size="16" />
               <div>
@@ -133,9 +127,9 @@ onMounted(loadArticles)
               </div>
             </div>
           </div>
-          <div class="mt-6 border-t border-line pt-4">
-            <p class="text-xs font-medium text-muted">备选时段</p>
-            <div class="mt-2 flex flex-wrap gap-2">
+          <div class="alternative-times">
+            <p>备选时间</p>
+            <div>
               <span
                 v-for="item in result.alternativeTimesJson"
                 :key="item.recommendedAt"
@@ -153,10 +147,9 @@ onMounted(loadArticles)
         </aside>
       </section></template
     >
-    <div v-else class="empty-state panel mt-4 min-h-96 rounded-xl">
-      <CalendarPlus :size="30" />
-      <p>选择内容并计算最佳时段</p>
-      <span>需要先录入平台历史数据或由管理员维护时段规则。</span>
+    <div v-else class="empty-state recommendation-empty">
+      <CalendarPlus :size="24" />
+      <p>选择内容，计算发布时间</p>
     </div>
   </div>
 </template>

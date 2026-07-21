@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import { Image, Search, Upload } from 'lucide-vue-next'
 import { workflowApi } from '@/api/workflow'
@@ -7,6 +8,7 @@ import { getApiErrorMessage } from '@/api/client'
 import EmptyState from '@/components/EmptyState.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import type { Article } from '@/types/business'
+const route = useRoute()
 const articles = ref<Article[]>([])
 const articleId = ref<number>()
 const keywords = ref<Array<{ zh: string; en: string; reason: string }>>([])
@@ -16,12 +18,11 @@ const selected = ref<Array<Record<string, unknown>>>([])
 const loading = ref(false)
 const uploading = ref(false)
 const notice = ref('')
-const source = ref('all')
-const ratio = ref('all')
 async function init() {
   const data = await workflowApi.articles({ page_size: 100 })
   articles.value = data.items
-  articleId.value = data.items[0]?.id
+  const queryId = Number(route.query.article)
+  articleId.value = data.items.some((item) => item.id === queryId) ? queryId : data.items[0]?.id
   if (articleId.value) await extract()
 }
 async function extract() {
@@ -122,23 +123,6 @@ onMounted(init)
             </button>
           </div>
         </div>
-        <div>
-          <label>图片来源</label
-          ><el-radio-group v-model="source" class="filter-radios"
-            ><el-radio value="all">全部</el-radio><el-radio value="upload">本地上传</el-radio
-            ><el-radio value="unsplash">Unsplash</el-radio></el-radio-group
-          >
-        </div>
-        <div>
-          <label>比例</label
-          ><el-select v-model="ratio" class="w-full"
-            ><el-option label="全部比例" value="all" /><el-option
-              label="横图 16:9"
-              value="16:9" /><el-option label="方图 1:1" value="1:1" /><el-option
-              label="竖图 3:4"
-              value="3:4"
-          /></el-select>
-        </div>
       </aside>
       <main class="media-results">
         <div class="media-results-head">
@@ -162,10 +146,7 @@ onMounted(init)
             </div>
           </article>
         </div>
-        <EmptyState
-          v-else
-          title="没有可显示的在线素材"
-          description="上传本地图片，或由管理员配置 Unsplash 后进行检索。"
+        <EmptyState v-else title="没有可显示的在线素材"
           ><template #icon><Image :size="28" /></template
         ></EmptyState>
       </main>
@@ -182,7 +163,7 @@ onMounted(init)
             </div>
           </article>
         </div>
-        <EmptyState v-else title="尚未选择图片" description="从中间素材区选择封面或正文插图。"
+        <EmptyState v-else title="尚未选择图片"
           ><template #icon><Image :size="24" /></template
         ></EmptyState>
       </aside>

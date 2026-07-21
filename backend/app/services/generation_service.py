@@ -98,7 +98,7 @@ def _parse_json(text: str) -> dict:
 
 async def generate_variant_data(
     db: Session, article: ContentArticle, platform: str, options: dict
-) -> tuple[dict, str, int, int]:
+) -> tuple[dict, str, int, int, int]:
     started = time.perf_counter()
     provider = setting_value(db, "llm.provider", settings.llm_provider)
     api_key = setting_value(db, "llm.api_key", settings.llm_api_key)
@@ -107,7 +107,9 @@ async def generate_variant_data(
     if provider.lower() == "mock" and settings.app_demo_mode:
         data = _mock_variant(article, platform, options)
         elapsed = int((time.perf_counter() - started) * 1000) + 180
-        return data, "mock-socialflow-v1", elapsed, max(80, len(article.source_text) // 2)
+        prompt_tokens = max(50, len(article.source_text) // 2)
+        completion_tokens = max(30, len(data["content"]) // 2)
+        return data, "contentpilot-local", elapsed, prompt_tokens, completion_tokens
     if provider.lower() == "mock" or not api_key or not base_url or not model_name:
         raise AppException(
             50301,
@@ -136,18 +138,29 @@ async def generate_variant_data(
             response.raise_for_status()
             payload = response.json()
             data = _parse_json(payload["choices"][0]["message"]["content"])
-            tokens = payload.get("usage", {}).get("total_tokens", 0)
+            usage = payload.get("usage", {})
+            prompt_tokens = int(usage.get("prompt_tokens", 0))
+            completion_tokens = int(usage.get("completion_tokens", 0))
+            if not prompt_tokens and not completion_tokens:
+                completion_tokens = int(usage.get("total_tokens", 0))
             return (
                 data,
                 model_name or "openai-compatible",
                 int((time.perf_counter() - started) * 1000),
-                tokens,
+                prompt_tokens,
+                completion_tokens,
             )
     except (httpx.HTTPError, KeyError, ValueError, json.JSONDecodeError) as exc:
         if settings.app_demo_mode:
             data = _mock_variant(article, platform, options)
             data["warnings"].append("真实模型调用失败，演示模式已启用本地规则生成")
-            return data, "mock-fallback-v1", int((time.perf_counter() - started) * 1000), 0
+            return (
+                data,
+                "contentpilot-local-fallback",
+                int((time.perf_counter() - started) * 1000),
+                0,
+                0,
+            )
         raise AppException(50202, f"大模型调用失败：{type(exc).__name__}", 502) from exc
 
 
@@ -158,7 +171,8 @@ def save_variant(
     data: dict,
     model: str,
     duration: int,
-    tokens: int,
+    prompt_tokens: int,
+    completion_tokens: int,
 ) -> ContentVariant:
     version = (
         db.scalar(
@@ -169,6 +183,9 @@ def save_variant(
         or 0
     ) + 1
     content = data["content"]
+    input_price = float(setting_value(db, "llm.input_price_per_million", "0") or 0)
+    output_price = float(setting_value(db, "llm.output_price_per_million", "0") or 0)
+    estimated_cost = (prompt_tokens * input_price + completion_tokens * output_price) / 1_000_000
     variant = ContentVariant(
         article_id=article.id,
         platform=platform,
@@ -182,7 +199,10 @@ def save_variant(
         model_name=model,
         prompt_version=SYSTEM_PROMPT_VERSION,
         generation_duration_ms=duration,
-        token_usage=tokens,
+        token_usage=prompt_tokens + completion_tokens,
+        prompt_tokens=prompt_tokens,
+        completion_tokens=completion_tokens,
+        estimated_cost=round(estimated_cost, 8),
         quality_score=round(min(98, 72 + len(content) / max(1, len(article.source_text)) * 20), 1),
         original_generated_text=content,
     )

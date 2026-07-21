@@ -10,12 +10,16 @@ import { ElMessage } from 'element-plus'
 import { Plus } from 'lucide-vue-next'
 import PageHeader from '@/components/PageHeader.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
+import DetailDrawer from '@/components/DetailDrawer.vue'
 import { workflowApi } from '@/api/workflow'
 import { getApiErrorMessage } from '@/api/client'
 import type { Article, Platform, Schedule, Variant } from '@/types/business'
 import { platformColors, platformNames } from '@/types/business'
+import { useAuthStore } from '@/stores/auth'
 
 const schedules = ref<Schedule[]>([])
+const auth = useAuthStore()
+const canOperate = computed(() => auth.hasRole(['ADMIN', 'OPERATOR']))
 const platformFilter = ref<Platform | ''>('')
 const drawer = ref(false)
 const editing = ref<Schedule>()
@@ -29,15 +33,21 @@ const form = ref<{
   scheduled_at: string
   publish_mode: string
 }>({ platform: 'WEIBO', scheduled_at: '', publish_mode: 'MANUAL' })
+const platformGlyphs: Record<Platform, string> = {
+  WEIBO: '微',
+  XIAOHONGSHU: '红',
+  WECHAT_OFFICIAL: '公',
+}
 const events = computed(() =>
   schedules.value
     .filter((x) => !platformFilter.value || x.platform === platformFilter.value)
     .map((x) => ({
       id: String(x.id),
-      title: `${platformNames[x.platform]} · ${x.articleTitle}`,
+      title: `${platformGlyphs[x.platform]}  ${x.articleTitle}`,
       start: x.scheduledAt,
       backgroundColor: platformColors[x.platform],
       borderColor: platformColors[x.platform],
+      classNames: [`platform-${x.platform.toLowerCase()}`],
       extendedProps: x,
     })),
 )
@@ -51,7 +61,7 @@ const options = computed(() => ({
     right: 'dayGridMonth,timeGridWeek,timeGridDay,listWeek',
   },
   height: 'auto',
-  editable: true,
+  editable: canOperate.value,
   eventDrop: async (info: any) => {
     try {
       await workflowApi.updateSchedule(Number(info.event.id), {
@@ -120,7 +130,7 @@ onMounted(init)
 <template>
   <div>
     <PageHeader title="排期日历" description="查看多平台发布计划，拖拽即可调整发布时间。"
-      ><el-button type="primary" @click="openCreate"
+      ><el-button v-if="canOperate" type="primary" @click="openCreate"
         ><Plus :size="16" class="mr-2" />新建排期</el-button
       ></PageHeader
     >
@@ -141,7 +151,7 @@ onMounted(init)
         <FullCalendar :options="{ ...options, events }" />
       </div>
     </section>
-    <el-drawer v-model="drawer" title="排期详情" size="420px"
+    <DetailDrawer v-model="drawer" title="排期详情" size="420px"
       ><template v-if="editing"
         ><div class="space-y-5">
           <div>
@@ -173,7 +183,7 @@ onMounted(init)
             </div>
           </div>
         </div></template
-      ></el-drawer
+      ></DetailDrawer
     ><el-dialog v-model="dialog" title="新建排期" width="520px"
       ><el-form label-position="top"
         ><el-form-item label="文章" required
@@ -197,10 +207,7 @@ onMounted(init)
             value-format="YYYY-MM-DDTHH:mm"
             class="!w-full" /></el-form-item
         ><el-form-item label="发布方式"
-          ><el-radio-group v-model="form.publish_mode"
-            ><el-radio-button value="MANUAL">人工确认</el-radio-button
-            ><el-radio-button value="MOCK" disabled>演示模式</el-radio-button></el-radio-group
-          ></el-form-item
+          ><span class="setting-value">人工确认</span></el-form-item
         ></el-form
       ><template #footer
         ><el-button @click="dialog = false">取消</el-button

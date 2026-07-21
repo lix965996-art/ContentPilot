@@ -101,11 +101,7 @@ onMounted(load)
           </div>
         </div>
       </article>
-      <EmptyState
-        v-if="!rows.length"
-        class="xl:col-span-2"
-        title="还没有实验"
-        description="创建一个对照实验，系统只统计实际关联或录入的样本。"
+      <EmptyState v-if="!rows.length" class="xl:col-span-2" title="还没有实验"
         ><template #icon><Beaker :size="27" /></template
         ><el-button type="primary" plain @click="dialog = true">新建实验</el-button></EmptyState
       >

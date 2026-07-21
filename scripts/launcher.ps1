@@ -75,6 +75,14 @@ if (-not (Test-Path -LiteralPath $venvPython) -or -not (Test-Path -LiteralPath $
 }
 if (-not $node) { throw 'Node.js was not found.' }
 
+Push-Location $backend
+try {
+  & $venvPython -m alembic upgrade head
+  if ($LASTEXITCODE -ne 0) { throw 'Database migration failed.' }
+} finally {
+  Pop-Location
+}
+
 $existingApi = Get-TrackedProcess $apiState
 if (-not $existingApi) {
   if (Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue) {
@@ -97,5 +105,5 @@ if (-not $existingWeb) {
 
 if (-not (Wait-Url 'http://127.0.0.1:8000/api/health' 30)) { throw 'API failed. See logs\api-error.log.' }
 if (-not (Wait-Url 'http://127.0.0.1:5173' 30)) { throw 'Web failed. See logs\web-error.log.' }
-Write-Host 'SocialFlow AI is ready: http://127.0.0.1:5173' -ForegroundColor Green
+Write-Host 'ContentPilot is ready: http://127.0.0.1:5173' -ForegroundColor Green
 if (-not $NoBrowser) { Start-Process 'http://127.0.0.1:5173' }

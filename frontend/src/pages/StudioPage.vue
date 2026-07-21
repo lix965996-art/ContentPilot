@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
 import {
   Check,
@@ -19,10 +19,13 @@ import EmptyState from '@/components/EmptyState.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import PlatformIcon from '@/components/PlatformIcon.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
+import Toast from '@/components/Toast.vue'
 import type { Article, Platform, Variant } from '@/types/business'
 import { platformNames } from '@/types/business'
 
 const route = useRoute()
+const router = useRouter()
+const editorContent = ref<globalThis.HTMLTextAreaElement>()
 const articles = ref<Article[]>([])
 const selectedArticleId = ref<number>()
 const article = ref<Article>()
@@ -30,6 +33,7 @@ const variants = ref<Variant[]>([])
 const activePlatform = ref<Platform>('WEIBO')
 const generating = ref(false)
 const saved = ref(true)
+const savedToast = ref(false)
 const options = reactive({
   platforms: ['WEIBO', 'XIAOHONGSHU', 'WECHAT_OFFICIAL'] as Platform[],
   style: '专业自然',
@@ -97,7 +101,8 @@ async function save() {
   const value = await workflowApi.updateVariant(current.value.id, editing)
   variants.value = variants.value.map((x) => (x.id === value.id ? value : x))
   saved.value = true
-  ElMessage.success('已保存')
+  savedToast.value = true
+  window.setTimeout(() => (savedToast.value = false), 1800)
 }
 async function approve() {
   if (!current.value) return
@@ -124,11 +129,19 @@ async function copy() {
   )
   ElMessage.success('已复制')
 }
+function focusEditor() {
+  editorContent.value?.focus()
+}
+function openMedia() {
+  if (!selectedArticleId.value) return ElMessage.warning('请先选择原文')
+  void router.push({ name: 'media', query: { article: selectedArticleId.value } })
+}
 onMounted(() => loadArticles().catch((e) => ElMessage.error(getApiErrorMessage(e))))
 </script>
 
 <template>
   <div class="studio-page">
+    <Toast :visible="savedToast" message="内容已保存" @close="savedToast = false" />
     <PageHeader title="内容工作室" description="基于同一篇原文编辑多个平台版本，审核后再进入排期。">
       <span class="save-state">{{ saved ? '已保存' : '有未保存修改' }}</span
       ><el-button :disabled="!current" @click="save"><Save :size="15" class="mr-1" />保存</el-button
@@ -187,13 +200,13 @@ onMounted(() => loadArticles().catch((e) => ElMessage.error(getApiErrorMessage(e
       </aside>
       <main class="composer-editor">
         <div class="editor-toolbar">
-          <button title="正文"><Type :size="16" /></button
-          ><button title="插入图片"><ImagePlus :size="16" /></button><span /><small
-            >{{ editing.content_text.length }} 字</small
-          >
+          <button title="定位到正文" @click="focusEditor"><Type :size="16" /></button
+          ><button title="选择图片" @click="openMedia"><ImagePlus :size="16" /></button
+          ><span /><small>{{ editing.content_text.length }} 字</small>
         </div>
         <div v-if="current" class="editor-body">
           <input v-model="editing.title" class="editor-title" placeholder="标题" /><textarea
+            ref="editorContent"
             v-model="editing.content_text"
             class="editor-content"
             placeholder="在这里编辑平台内容…"
@@ -219,10 +232,7 @@ onMounted(() => loadArticles().catch((e) => ElMessage.error(getApiErrorMessage(e
             </div>
           </div>
         </div>
-        <EmptyState
-          v-else
-          title="还没有平台版本"
-          description="选择目标平台后生成版本，或从已有版本继续编辑。"
+        <EmptyState v-else title="还没有平台版本"
           ><template #icon><FileText /></template
         ></EmptyState>
       </main>
@@ -254,10 +264,7 @@ onMounted(() => loadArticles().catch((e) => ElMessage.error(getApiErrorMessage(e
         </div>
       </aside>
     </div>
-    <EmptyState
-      v-else
-      title="先创建一篇原文"
-      description="内容工作室不会使用示例数据，请从内容库创建或导入真实文稿。"
+    <EmptyState v-else title="先创建一篇原文"
       ><template #icon><FilePlus2 /></template
     ></EmptyState>
   </div>

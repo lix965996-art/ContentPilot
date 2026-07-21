@@ -11,7 +11,7 @@
 
 ## 推荐启动
 
-第一次或依赖有变化时双击 `首次安装或更新依赖.bat`。之后只需双击 `启动 SocialFlow AI.bat`；它不会重复安装依赖，会：
+第一次或依赖有变化时双击 `首次安装或更新依赖.bat`。之后只需双击 `启动 ContentPilot.bat`；它不会重复安装依赖，会：
 
 1. 检查 venv、Node 和 Vite；
 2. 检查端口是否被非本项目进程占用；
@@ -20,7 +20,7 @@
 5. 等待两个健康地址返回 200；
 6. 打开浏览器。
 
-`查看运行状态.bat` 查看精确 PID；`停止 SocialFlow AI.bat` 校验 PID 和启动时间后停止该进程树，不按端口误杀其他程序。
+`查看运行状态.bat` 查看精确 PID；`停止 ContentPilot.bat` 校验 PID 和启动时间后停止该进程树，不按端口误杀其他程序。
 
 兼容命令行入口：`scripts\start-dev.bat`、`scripts\stop-dev.bat`、`scripts\init-db.bat`、`scripts\run-tests.bat`。
 

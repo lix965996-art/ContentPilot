@@ -18,11 +18,11 @@ export const useAuthStore = defineStore('auth', () => {
     return roles.some((role) => roleCodes.value.includes(role))
   }
 
-  async function signIn(payload: LoginPayload): Promise<void> {
+  async function signIn(payload: LoginPayload, remember = true): Promise<void> {
     loading.value = true
     try {
       const data = await authApi.login(payload)
-      persistTokens(data.access_token, data.refresh_token)
+      persistTokens(data.access_token, data.refresh_token, remember)
       user.value = data.user
     } finally {
       loading.value = false

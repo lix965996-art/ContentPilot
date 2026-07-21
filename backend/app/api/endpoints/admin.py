@@ -9,9 +9,15 @@ from app.core.security import hash_password
 from app.db.session import get_db
 from app.models.business import AuditLog, SystemSetting
 from app.models.user import Role, User
-from app.schemas.business import SettingUpdate, UserCreate
+from app.schemas.business import LlmConfigUpdate, SettingUpdate, UserCreate
 from app.schemas.user import UserData
 from app.services.audit_service import record_audit
+from app.services.llm_config_service import (
+    llm_usage,
+    read_llm_config,
+    save_llm_config,
+    test_llm_connection,
+)
 from app.services.serializers import model_dict
 from app.services.setting_service import encrypt_secret
 
@@ -97,6 +103,55 @@ def settings_list(
             data["settingValue"] = "••••••••"
         items.append(data)
     return success_response(request, items)
+
+
+@router.get("/settings/model-service")
+def get_model_service(
+    request: Request, db: Session = Depends(get_db), _: User = Depends(require_roles("ADMIN"))
+) -> dict:
+    return success_response(request, read_llm_config(db))
+
+
+@router.put("/settings/model-service")
+def update_model_service(
+    payload: LlmConfigUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("ADMIN")),
+) -> dict:
+    data = save_llm_config(db, payload)
+    record_audit(
+        db,
+        request,
+        user,
+        "UPDATE",
+        "SETTINGS",
+        "MODEL_SERVICE",
+        payload.provider,
+        {"provider": payload.provider, "model": payload.model},
+    )
+    db.commit()
+    return success_response(request, data, "模型服务配置已保存")
+
+
+@router.post("/settings/model-service/test")
+async def test_model_service(
+    payload: LlmConfigUpdate,
+    request: Request,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_roles("ADMIN")),
+) -> dict:
+    return success_response(request, await test_llm_connection(db, payload))
+
+
+@router.get("/settings/model-service/usage")
+def model_service_usage(
+    request: Request,
+    days: int = Query(30, ge=1, le=365),
+    db: Session = Depends(get_db),
+    _: User = Depends(require_roles("ADMIN")),
+) -> dict:
+    return success_response(request, llm_usage(db, days))
 
 
 @router.put("/settings/{setting_key}")

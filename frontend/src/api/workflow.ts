@@ -1,6 +1,14 @@
 import { apiClient } from '@/api/client'
 import type { ApiResponse } from '@/types/api'
-import type { Article, Platform, Schedule, Variant } from '@/types/business'
+import type {
+  Article,
+  LlmConfig,
+  LlmConnectionResult,
+  LlmUsage,
+  Platform,
+  Schedule,
+  Variant,
+} from '@/types/business'
 
 async function unwrap<T>(promise: Promise<{ data: ApiResponse<T> }>): Promise<T> {
   return (await promise).data.data
@@ -131,5 +139,37 @@ export const workflowApi = {
   },
   updateSetting(key: string, value: string) {
     return unwrap<Record<string, unknown>>(apiClient.put(`/settings/${key}`, { value }))
+  },
+  llmConfig() {
+    return unwrap<LlmConfig>(apiClient.get('/settings/model-service'))
+  },
+  saveLlmConfig(data: LlmConfig) {
+    return unwrap<LlmConfig>(
+      apiClient.put('/settings/model-service', {
+        provider: data.provider,
+        base_url: data.baseUrl,
+        api_key: data.apiKey,
+        model: data.model,
+        input_price_per_million: data.inputPricePerMillion,
+        output_price_per_million: data.outputPricePerMillion,
+        currency: data.currency,
+      }),
+    )
+  },
+  testLlmConnection(data: LlmConfig) {
+    return unwrap<LlmConnectionResult>(
+      apiClient.post('/settings/model-service/test', {
+        provider: data.provider,
+        base_url: data.baseUrl,
+        api_key: data.apiKey,
+        model: data.model,
+        input_price_per_million: data.inputPricePerMillion,
+        output_price_per_million: data.outputPricePerMillion,
+        currency: data.currency,
+      }),
+    )
+  },
+  llmUsage(days = 30) {
+    return unwrap<LlmUsage>(apiClient.get('/settings/model-service/usage', { params: { days } }))
   },
 }
