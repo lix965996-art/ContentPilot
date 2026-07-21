@@ -1,0 +1,25 @@
+# Python
+backend/.venv/
+backend/.env
+backend/__pycache__/
+backend/**/__pycache__/
+backend/.pytest_cache/
+backend/.ruff_cache/
+backend/*.db
+
+# Node
+frontend/node_modules/
+frontend/dist/
+frontend/coverage/
+frontend/playwright-report/
+frontend/test-results/
+
+# Environment and editors
+.env
+.idea/
+.vscode/
+*.log
+.runtime/
+logs/
+Thumbs.db
+.DS_Store

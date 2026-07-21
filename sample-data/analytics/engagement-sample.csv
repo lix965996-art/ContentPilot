@@ -1,0 +1,3 @@
+schedule_id,platform,metric_date,group_type,impressions,likes,comments,collects,shares,followers,data_source
+1,WEIBO,2026-07-08,RECOMMENDED_TIME,1200,86,12,18,9,3000,SIMULATED
+2,XIAOHONGSHU,2026-07-09,FIXED_TIME,980,61,8,26,6,3000,SIMULATED
