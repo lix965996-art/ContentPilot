@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 from app.models.business import ContentArticle
 
-PROMPT_VERSION = "2.0.0"
+PROMPT_VERSION = "3.0.0"
 
 SYSTEM_PROMPT = (
     "你是资深中文内容编辑。只依据用户提供的原文改写，"
@@ -124,3 +124,28 @@ QUALITY_REVIEW_PROMPT = (
 
 KEYWORD_PROMPT = """从文章中提取 3～8 个适合图片检索的核心关键词。优先实体、场景和主题词，
 为每项给出中文 zh、自然英文检索词 en 和简短 reason。只返回 {"keywords":[...]} JSON。"""
+
+CONTENT_BRIEF_PROMPT = """你是严谨的内容研究编辑。只依据原文生成创作简报，不得引入外部事实。
+提取核心论点、不可改变的事实和限定条件、支持信息、目标读者需求、原文信息缺口，以及严禁推断的内容。
+信息缺失就明确列入 content_gaps，绝不能补造。必须只返回符合指定结构的 JSON。"""
+
+
+def build_deep_draft_prompt(
+    article: ContentArticle, platform: str, options: dict, brief: dict
+) -> str:
+    return f"""{build_generation_prompt(article, platform, options)}
+
+本次为深度创作模式，创作目标：{options.get("creative_goal", "知识分享")}。
+已经核验的原文创作简报：
+{brief}
+
+先制定 strategy：angle 必须具体、有辨识度；hook 不得夸张；reader_value 说明读者为何值得读；
+structure 给出清晰结构；cta 符合平台习惯。然后生成恰好 2 个明显不同的候选稿 candidates。
+两个候选必须采用不同切入角度或叙事结构，但都必须遵守原文事实和用户参数。
+返回 JSON：{{"strategy":{{...}},"candidates":[平台稿件1,平台稿件2]}}。"""
+
+
+DEEP_REVIEW_PROMPT = """你是内容主编和事实审核员。对照原文创作简报，审查两个候选稿。
+选择更好的候选，指出问题并实际修正为 final；不能只点评。分别给出事实一致性、信息完整度、
+平台适配度、可读性、格式合规性、非模板化程度 0～100 分。若候选包含简报未支持的事实，
+必须删除或降级为不确定表述。必须只返回符合指定结构的 JSON。"""

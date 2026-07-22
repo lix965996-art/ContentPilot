@@ -29,6 +29,8 @@ class GenerateRequest(BaseModel):
     include_emoji: bool = True
     include_hashtags: bool = True
     preserve_meaning: int = Field(default=90, ge=50, le=100)
+    generation_mode: Literal["QUICK", "DEEP"] = "QUICK"
+    creative_goal: str = Field(default="知识分享", min_length=1, max_length=80)
 
     @field_validator("platforms")
     @classmethod

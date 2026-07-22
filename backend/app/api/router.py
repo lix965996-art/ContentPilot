@@ -13,6 +13,7 @@ from app.api.endpoints import (
     platform_accounts,
     recommendations,
     schedules,
+    trends,
 )
 
 api_router = APIRouter()
@@ -21,6 +22,7 @@ api_router.include_router(auth.router)
 api_router.include_router(dashboard.router)
 api_router.include_router(articles.router)
 api_router.include_router(generation.router)
+api_router.include_router(trends.router)
 api_router.include_router(media.router)
 api_router.include_router(platform_accounts.router)
 api_router.include_router(recommendations.router)

@@ -74,6 +74,17 @@ export interface GenerationPlatformProgress {
   durationMs: number
   tokenUsage: number
   updatedAt?: string
+  brief?: Record<string, unknown>
+  strategy?: {
+    angle: string
+    hook: string
+    reader_value: string
+    structure: string[]
+    cta: string
+  }
+  review?: Record<string, unknown>
+  candidateTitles?: string[]
+  selectedCandidate?: number
 }
 
 export interface GenerationTask {
@@ -93,6 +104,41 @@ export interface GenerationTask {
   errorMessage?: string
   createdAt?: string
   updatedAt?: string
+  optionsJson?: Record<string, unknown>
+}
+
+export interface TrendItem {
+  id: string
+  source: 'BAIDU' | 'HACKER_NEWS'
+  sourceName: string
+  rank: number
+  title: string
+  summary: string
+  url: string
+  imageUrl?: string
+  heat?: number
+  heatLabel: string
+  fetchedAt: string
+  tags: string[]
+}
+
+export interface TrendAngle {
+  title: string
+  audience: string
+  hook: string
+  outline: string[]
+  creative_goal: string
+}
+
+export interface TrendAnalysis {
+  relevance_reason: string
+  recommended_angle_index: number
+  angles: TrendAngle[]
+  risk_notes: string[]
+  verification_questions: string[]
+  provider: string
+  modelName: string
+  tokenUsage: number
 }
 
 export interface MediaAsset {

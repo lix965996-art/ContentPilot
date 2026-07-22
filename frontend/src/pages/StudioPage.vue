@@ -68,6 +68,8 @@ const options = reactive({
   include_emoji: true,
   include_hashtags: true,
   preserve_meaning: 90,
+  generation_mode: 'QUICK' as 'QUICK' | 'DEEP',
+  creative_goal: '知识分享',
 })
 const editing = reactive({ title: '', content_text: '', hashtags: [] as string[] })
 const preferenceKey = (articleId: number) => `contentpilot_studio_preferences:${articleId}`
@@ -250,6 +252,7 @@ async function loadArticle() {
   media.value = mediaData
   options.target_audience = articleData.targetAudience || ''
   restorePreferences(articleData.id)
+  if (route.query.mode === 'deep') options.generation_mode = 'DEEP'
   selectedVersionId.value = undefined
   syncEditor()
 }
@@ -472,7 +475,13 @@ onMounted(() => {
       <span class="save-state">{{ saved ? '已保存' : '有未保存修改' }}</span>
       <el-button :disabled="!current" @click="save"><Save :size="15" class="mr-1" />保存</el-button>
       <el-button type="primary" :loading="generating" @click="generate">
-        <Send :size="15" class="mr-1" />{{ generating ? '正在生成…' : '生成平台版本' }}
+        <Send :size="15" class="mr-1" />{{
+          generating
+            ? '正在生成…'
+            : options.generation_mode === 'DEEP'
+              ? '开始深度创作'
+              : '生成平台版本'
+        }}
       </el-button>
     </PageHeader>
 
@@ -530,6 +539,33 @@ onMounted(() => {
           >
         </article>
       </div>
+      <div
+        v-if="
+          options.generation_mode === 'DEEP' && progressEntries.some((item) => item.state.strategy)
+        "
+        class="deep-insight-grid"
+        data-testid="deep-insights"
+      >
+        <article
+          v-for="item in progressEntries.filter((entry) => entry.state.strategy)"
+          :key="item.platform"
+        >
+          <header>
+            <PlatformIcon :platform="item.platform" size="sm" /><b
+              >{{ platformNames[item.platform] }} 创作策略</b
+            >
+          </header>
+          <p><strong>切入角度：</strong>{{ item.state.strategy?.angle }}</p>
+          <p><strong>开场钩子：</strong>{{ item.state.strategy?.hook }}</p>
+          <p><strong>读者价值：</strong>{{ item.state.strategy?.reader_value }}</p>
+          <small v-if="item.state.candidateTitles?.length">
+            候选：{{ item.state.candidateTitles.join(' / ') }}
+            <template v-if="item.state.selectedCandidate !== undefined">
+              · AI 选择第 {{ item.state.selectedCandidate + 1 }} 稿</template
+            >
+          </small>
+        </article>
+      </div>
     </section>
 
     <div v-if="articles.length" class="composer-shell">
@@ -545,6 +581,33 @@ onMounted(() => {
             />
           </el-select>
           <p v-if="article" class="source-excerpt">{{ article.sourceText }}</p>
+        </div>
+        <div class="composer-section">
+          <label>创作模式</label>
+          <el-segmented
+            v-model="options.generation_mode"
+            :options="[
+              { label: '快速改写', value: 'QUICK' },
+              { label: '深度创作', value: 'DEEP' },
+            ]"
+            data-testid="generation-mode-control"
+          />
+          <p class="mode-description">
+            {{
+              options.generation_mode === 'DEEP'
+                ? '分析事实边界，策划角度，生成两稿并由 AI 主编评审修订。'
+                : '一次生成，适合已有成熟原稿的快速平台适配。'
+            }}
+          </p>
+        </div>
+        <div v-if="options.generation_mode === 'DEEP'" class="composer-section">
+          <label>本次创作目标</label>
+          <el-select v-model="options.creative_goal" class="w-full">
+            <el-option label="知识分享" value="知识分享" />
+            <el-option label="引发讨论" value="引发讨论" />
+            <el-option label="提升收藏" value="提升收藏" />
+            <el-option label="品牌表达" value="品牌表达" />
+          </el-select>
         </div>
         <div class="composer-section">
           <label>目标平台</label>

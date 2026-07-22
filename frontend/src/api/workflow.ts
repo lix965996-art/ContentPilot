@@ -14,6 +14,8 @@ import type {
   MediaAsset,
   WechatFormatProfile,
   WechatThemeProfile,
+  TrendAnalysis,
+  TrendItem,
 } from '@/types/business'
 
 async function unwrap<T>(promise: Promise<{ data: ApiResponse<T> }>): Promise<T> {
@@ -21,6 +23,23 @@ async function unwrap<T>(promise: Promise<{ data: ApiResponse<T> }>): Promise<T>
 }
 
 export const workflowApi = {
+  trends(params: Record<string, unknown> = {}) {
+    return unwrap<{
+      items: TrendItem[]
+      sources: Array<{
+        source: string
+        name: string
+        status: string
+        count: number
+        error?: string
+      }>
+      fetchedAt: string
+      notice: string
+    }>(apiClient.get('/trends', { params }))
+  },
+  analyzeTrend(data: { title: string; summary: string; source: string; url: string }) {
+    return unwrap<TrendAnalysis>(apiClient.post('/trends/analyze', data))
+  },
   articles(params: Record<string, unknown> = {}) {
     return unwrap<{ items: Article[]; total: number }>(apiClient.get('/articles', { params }))
   },

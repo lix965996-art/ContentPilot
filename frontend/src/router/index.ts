@@ -49,6 +49,12 @@ const router = createRouter({
           meta: { roles: ['ADMIN', 'OPERATOR'], title: '创作' },
         },
         {
+          path: 'trends',
+          name: 'trends',
+          component: () => import('@/pages/HotTopicsPage.vue'),
+          meta: { roles: ['ADMIN', 'OPERATOR'], title: '热点选题' },
+        },
+        {
           path: 'media',
           name: 'media',
           component: () => import('@/pages/MediaPage.vue'),

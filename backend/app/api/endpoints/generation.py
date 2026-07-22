@@ -18,6 +18,8 @@ from app.schemas.business import GenerateRequest, KeywordRequest, Platform
 from app.services.audit_service import record_audit
 from app.services.generation_service import (
     extract_keywords_with_llm,
+    generate_content_brief,
+    generate_deep_variant_data,
     generate_variant_data,
     load_llm_runtime,
     review_variant_quality,
@@ -119,17 +121,53 @@ async def _run_generation_task(task_id: str) -> None:
             task.status = "RUNNING"
             db.commit()
 
+            brief: dict[str, Any] | None = None
+            shared_prompt_tokens = 0
+            shared_completion_tokens = 0
+            if options.get("generation_mode") == "DEEP":
+                for platform in task.platforms_json:
+                    await update_platform(
+                        platform,
+                        "RUNNING",
+                        {
+                            "progress": 8,
+                            "stage": "ANALYZING_SOURCE",
+                            "message": "正在提取原文核心论点、事实边界和信息缺口",
+                        },
+                    )
+                (
+                    brief,
+                    shared_prompt_tokens,
+                    shared_completion_tokens,
+                ) = await generate_content_brief(runtime, article, options)
+                for platform in task.platforms_json:
+                    await update_platform(
+                        platform,
+                        "RUNNING",
+                        {
+                            "progress": 18,
+                            "stage": "SOURCE_ANALYZED",
+                            "message": "原文事实简报已完成，准备制定平台策略",
+                            "brief": brief,
+                        },
+                    )
+
             async def run_one(platform: str):
                 async def callback(status: str, detail: dict[str, Any]) -> None:
                     await update_platform(platform, status, detail)
 
+                if options.get("generation_mode") == "DEEP" and brief is not None:
+                    return await generate_deep_variant_data(
+                        db,
+                        article,
+                        platform,
+                        options,
+                        brief,
+                        status_callback=callback,
+                        runtime=runtime,
+                    )
                 return await generate_variant_data(
-                    db,
-                    article,
-                    platform,
-                    options,
-                    status_callback=callback,
-                    runtime=runtime,
+                    db, article, platform, options, status_callback=callback, runtime=runtime
                 )
 
             results = await asyncio.gather(
@@ -139,7 +177,7 @@ async def _run_generation_task(task_id: str) -> None:
 
             variant_ids: list[int] = []
             errors: list[str] = []
-            total_tokens = 0
+            total_tokens = shared_prompt_tokens + shared_completion_tokens
             total_duration = 0
             for platform, result in zip(task.platforms_json, results, strict=True):
                 if isinstance(result, BaseException):
@@ -165,6 +203,10 @@ async def _run_generation_task(task_id: str) -> None:
                         "progress": 90,
                         "stage": "SAVING_RESULT",
                         "message": "模型输出已通过校验，正在保存版本",
+                        "strategy": result.strategy,
+                        "review": result.review_detail,
+                        "candidateTitles": result.candidate_titles,
+                        "selectedCandidate": result.selected_candidate,
                     },
                 )
                 variant = save_variant(db, article, platform, result)

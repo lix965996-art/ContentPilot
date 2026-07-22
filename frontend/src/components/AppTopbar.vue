@@ -23,6 +23,7 @@ const navigation = computed(() =>
     ['工作台', 'dashboard', ['ADMIN', 'OPERATOR', 'VIEWER']],
     ['内容库', 'articles', ['ADMIN', 'OPERATOR', 'VIEWER']],
     ['创作', 'studio', ['ADMIN', 'OPERATOR']],
+    ['热点选题', 'trends', ['ADMIN', 'OPERATOR']],
     ['媒体', 'media', ['ADMIN', 'OPERATOR']],
     ['发布时间', 'recommendation', ['ADMIN', 'OPERATOR']],
     ['日历', 'calendar', ['ADMIN', 'OPERATOR', 'VIEWER']],

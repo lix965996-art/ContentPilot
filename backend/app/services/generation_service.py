@@ -17,15 +17,21 @@ from app.core.config import settings
 from app.core.exceptions import AppException
 from app.models.business import ContentArticle, ContentVariant
 from app.prompts.profiles import (
+    CONTENT_BRIEF_PROMPT,
+    DEEP_REVIEW_PROMPT,
     KEYWORD_PROMPT,
     PLATFORM_PROFILES,
     PROMPT_VERSION,
     QUALITY_REVIEW_PROMPT,
     SYSTEM_PROMPT,
+    build_deep_draft_prompt,
     build_generation_prompt,
 )
 from app.schemas.generation import (
+    DEEP_DRAFT_MODELS,
+    DEEP_FINAL_MODELS,
     OUTPUT_MODELS,
+    ContentBriefOutput,
     KeywordExtractionOutput,
     QualityReviewOutput,
 )
@@ -53,6 +59,10 @@ class GenerationResult:
     prompt_tokens: int
     completion_tokens: int
     attempts: int
+    strategy: dict[str, Any] | None = None
+    review_detail: dict[str, Any] | None = None
+    candidate_titles: list[str] | None = None
+    selected_candidate: int | None = None
 
 
 def load_llm_runtime(db: Session) -> LlmRuntime:
@@ -337,6 +347,146 @@ async def generate_variant_data(
     )
 
 
+async def generate_content_brief(
+    runtime: LlmRuntime,
+    article: ContentArticle,
+    options: dict[str, Any],
+) -> tuple[dict[str, Any], int, int]:
+    prompt = (
+        f"创作目标：{options.get('creative_goal', '知识分享')}\n"
+        f"目标受众：{options.get('target_audience') or article.target_audience or '普通中文读者'}\n"
+        f"原文标题：{article.title}\n原文摘要：{article.summary or '未提供'}\n"
+        f"原文正文：\n{article.source_text}"
+    )
+    brief_schema = json.dumps(ContentBriefOutput.model_json_schema(), ensure_ascii=False)
+    result, prompt_tokens, completion_tokens, _ = await _validated_completion(
+        runtime,
+        CONTENT_BRIEF_PROMPT,
+        f"{prompt}\n输出结构：{brief_schema}",
+        ContentBriefOutput,
+    )
+    return result.model_dump(), prompt_tokens, completion_tokens
+
+
+async def generate_deep_variant_data(
+    db: Session,
+    article: ContentArticle,
+    platform: str,
+    options: dict[str, Any],
+    brief: dict[str, Any],
+    *,
+    status_callback: StatusCallback | None = None,
+    runtime: LlmRuntime | None = None,
+) -> GenerationResult:
+    started = time.perf_counter()
+    runtime = runtime or load_llm_runtime(db)
+    if not all([runtime.api_key, runtime.base_url, runtime.model_name]):
+        raise AppException(50301, "尚未配置真实大模型，请先在系统设置中完成配置", 503)
+
+    async def mapped_callback(status: str, detail: dict[str, Any]) -> None:
+        if not status_callback:
+            return
+        stage = detail.get("stage")
+        mapped = dict(detail)
+        if stage == "REQUESTING_MODEL":
+            mapped.update(
+                progress=35,
+                stage="GENERATING_CANDIDATES",
+                message="正在按策略生成两个不同角度的候选稿",
+            )
+        elif stage == "VALIDATING_OUTPUT":
+            mapped.update(
+                progress=55,
+                stage="VALIDATING_CANDIDATES",
+                message="候选稿已返回，正在校验结构和平台格式",
+            )
+        await status_callback(status, mapped)
+
+    if status_callback:
+        await status_callback(
+            "RUNNING",
+            {
+                "progress": 20,
+                "stage": "PLANNING_STRATEGY",
+                "message": "原文分析完成，正在制定平台创作策略",
+                "brief": brief,
+            },
+        )
+    draft_schema = json.dumps(DEEP_DRAFT_MODELS[platform].model_json_schema(), ensure_ascii=False)
+    draft, p1, c1, attempts1 = await _validated_completion(
+        runtime,
+        SYSTEM_PROMPT,
+        (
+            f"{build_deep_draft_prompt(article, platform, options, brief)}\n"
+            f"完整输出结构：{draft_schema}"
+        ),
+        DEEP_DRAFT_MODELS[platform],
+        status_callback=mapped_callback,
+    )
+    draft_data = draft.model_dump()
+    if status_callback:
+        await status_callback(
+            "RUNNING",
+            {
+                "progress": 65,
+                "stage": "REVIEWING_AND_REFINING",
+                "message": "两个候选稿已生成，AI 主编正在对照事实逐项评审并修订",
+                "strategy": draft_data["strategy"],
+                "candidateTitles": [item["title"] for item in draft_data["candidates"]],
+            },
+        )
+
+    final_schema = json.dumps(DEEP_FINAL_MODELS[platform].model_json_schema(), ensure_ascii=False)
+    review_prompt = (
+        f"目标平台：{PLATFORM_NAMES[platform]}\n"
+        f"用户参数：{json.dumps(options, ensure_ascii=False)}\n"
+        f"原文创作简报：{json.dumps(brief, ensure_ascii=False)}\n"
+        f"创作策略与候选稿：{json.dumps(draft_data, ensure_ascii=False)}"
+        f"\n完整输出结构：{final_schema}"
+    )
+
+    async def review_callback(status: str, detail: dict[str, Any]) -> None:
+        if not status_callback:
+            return
+        mapped = dict(detail)
+        if detail.get("stage") == "REQUESTING_MODEL":
+            mapped.update(
+                progress=72,
+                stage="REVIEWING_AND_REFINING",
+                message="AI 主编正在评分、选择并修订候选稿",
+            )
+        elif detail.get("stage") == "VALIDATING_OUTPUT":
+            mapped.update(
+                progress=88,
+                stage="VALIDATING_FINAL",
+                message="最终稿已返回，正在做最后的结构与字段校验",
+            )
+        await status_callback(status, mapped)
+
+    final, p2, c2, attempts2 = await _validated_completion(
+        runtime,
+        DEEP_REVIEW_PROMPT,
+        review_prompt,
+        DEEP_FINAL_MODELS[platform],
+        status_callback=review_callback,
+    )
+    final_data = final.model_dump()
+    review = {key: value for key, value in final_data.items() if key != "final"}
+    return GenerationResult(
+        data=final_data["final"],
+        model_name=runtime.model_name,
+        provider=runtime.provider,
+        duration_ms=int((time.perf_counter() - started) * 1000),
+        prompt_tokens=p1 + p2,
+        completion_tokens=c1 + c2,
+        attempts=attempts1 + attempts2,
+        strategy=draft_data["strategy"],
+        review_detail=review,
+        candidate_titles=[item["title"] for item in draft_data["candidates"]],
+        selected_candidate=review["selected_candidate"],
+    )
+
+
 def count_emoji(text: str) -> int:
     emoji_pattern = re.compile(
         "["
@@ -517,7 +667,29 @@ def save_variant(
     estimated_cost = (
         result.prompt_tokens * input_price + result.completion_tokens * output_price
     ) / 1_000_000
-    review = rule_quality_review(article, platform, data)
+    rule_review = rule_quality_review(article, platform, data)
+    if result.review_detail:
+        semantic_review = result.review_detail
+        scored_keys = (
+            "factual_consistency",
+            "information_completeness",
+            "platform_fit",
+            "readability",
+            "format_compliance",
+        )
+        review = {
+            key: round(rule_review[key] * 0.35 + float(semantic_review[key]) * 0.65, 1)
+            for key in scored_keys
+        }
+        review.update(
+            issues=list(dict.fromkeys(rule_review["issues"] + semantic_review.get("issues", []))),
+            suggestions=semantic_review.get("improvements", []),
+            ruleReview=rule_review,
+            deepReview=semantic_review,
+            strategy=result.strategy,
+        )
+    else:
+        review = rule_review
     quality_score = (
         sum(
             review[key]

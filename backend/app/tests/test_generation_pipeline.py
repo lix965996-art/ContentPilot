@@ -73,7 +73,7 @@ def test_user_options_are_written_into_prompt() -> None:
     ):
         assert expected in prompt
     assert len(PLATFORM_PROFILES) == 3
-    assert PROMPT_VERSION == "2.0.0"
+    assert PROMPT_VERSION == "3.0.0"
 
 
 @pytest.mark.asyncio
