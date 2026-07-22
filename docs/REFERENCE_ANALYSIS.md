@@ -143,7 +143,7 @@ Laravel/PHP/Horizon、现有 provider 源码、FFmpeg、Mixpost 品牌素材、P
 | 多平台内容版本 | Mixpost / Postiz | `content_article` + `content_variant(platform, version_no)`，公共原文与平台版本解耦 |
 | 排期日历 | Postiz / Mixpost | 后续阶段 Vue 3 + FullCalendar；月/周/日/列表、拖拽和冲突提示 |
 | 发布状态 | Free-AI-Social-Media-Scheduler / Postiz | 后续阶段 APScheduler + MySQL；状态机、重试、事务、幂等键和发布日志 |
-| 平台适配器 | Postiz / Mixpost | 后续阶段 Python `PlatformPublisher` protocol；优先 MockPublisher/ManualConfirmPublisher |
+| 平台适配器 | Postiz / Mixpost | Python `PlatformPublisher` protocol；微博/公众号使用官方接口，小红书保留人工交付 |
 | 媒体库 | Mixpost | 后续阶段本地媒体 + Unsplash，保存来源、摄影师、缩略图和使用类型 |
 | 数据分析 | Mixpost / Postiz | 后续阶段 ECharts + FastAPI；指标表、平台/时间/内容对比与导出 |
 

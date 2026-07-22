@@ -39,7 +39,7 @@ test('studio displays independent real-time progress for all three platforms', a
           platformsJson: ['WEIBO', 'XIAOHONGSHU', 'WECHAT_OFFICIAL'],
           resultVariantIdsJson: [],
           variants: [],
-          provider: 'mock',
+          provider: 'test-transport',
           modelName: 'contentpilot-local',
           promptVersion: '2.0.0',
           tokenUsage: completed ? 360 : 0,

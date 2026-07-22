@@ -9,4 +9,4 @@ Prompt 版本当前为 `1.0.0`，生成版本保存 `prompt_version`、模型、
 - 质量审查：完整度、事实一致性、平台风格、可读性、标签相关性与人工复核；
 - 数据复盘：只根据输入数据，区分相关与因果，提示样本限制。
 
-完整文字来自总任务书，代码入口为 `backend/app/prompts/templates.py`。真实 OpenAI 兼容响应需是 JSON；解析失败或请求超时自动降级 Mock，并在 warnings 中说明。
+完整文字来自总任务书，代码入口为 `backend/app/prompts/templates.py`。真实 OpenAI 兼容响应需是 JSON；结构校验失败会自动重试，连续失败则将对应平台标为 `FAILED`，不会生成本地伪结果。

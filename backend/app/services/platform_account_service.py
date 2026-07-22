@@ -10,7 +10,6 @@ from app.core.credentials import decrypt_json, encrypt_json, encrypt_secret, sec
 from app.models.business import PlatformAccount, PlatformAuthLog
 from app.models.user import User
 from app.publishers.base import PlatformPublisher, PublishResult
-from app.publishers.mock import MockPublisher
 from app.publishers.official import (
     WechatDraftPublisher,
     WeiboPublisher,
@@ -28,6 +27,43 @@ DEFAULT_CAPABILITIES = {
     "WEIBO": ["TEXT_PUBLISH", "IMAGE_PUBLISH", "STATUS_READ"],
     "WECHAT_OFFICIAL": ["MATERIAL_UPLOAD", "DRAFT_CREATE", "SUBMIT_PUBLISH"],
     "XIAOHONGSHU": ["COPYWRITING", "IMAGE_PACKAGE", "MANUAL_CONFIRM"],
+}
+DEFAULT_PUBLISH_MODES = {
+    "WEIBO": "REAL_API",
+    "WECHAT_OFFICIAL": "DRAFT_ONLY",
+    "XIAOHONGSHU": "MANUAL_CONFIRM",
+}
+CONNECTION_GUIDES = {
+    "WEIBO": {
+        "mode": "OFFICIAL_OAUTH",
+        "consoleUrl": "https://open.weibo.com/apps",
+        "callbackPath": "/api/platform-accounts/WEIBO/oauth/callback",
+        "steps": [
+            "在微博开放平台创建并通过审核的网页应用",
+            "复制 App Key 和 App Secret",
+            "将本系统回调地址原样加入应用的 OAuth2 回调地址",
+            "保存配置后点击“前往微博授权”，用要发布内容的微博账号登录授权",
+        ],
+    },
+    "WECHAT_OFFICIAL": {
+        "mode": "APP_SECRET",
+        "consoleUrl": "https://mp.weixin.qq.com/",
+        "steps": [
+            "在公众号后台的开发接口管理中获取 AppID 和 AppSecret",
+            "将运行 ContentPilot 的服务器出口 IP 加入公众号 IP 白名单",
+            "确认公众号具有草稿接口权限；自动发布还需要发布接口权限",
+            "保存后点击“验证真实连接”，系统会向微信官方接口获取 Access Token",
+        ],
+    },
+    "XIAOHONGSHU": {
+        "mode": "MANUAL_ONLY",
+        "consoleUrl": "https://creator.xiaohongshu.com/",
+        "steps": [
+            "当前不保存账号密码或 Cookie，也不伪造官方连接",
+            "系统只生成文案和图片交付包",
+            "运营人员在小红书创作中心完成真实发布后回填公开链接",
+        ],
+    },
 }
 
 
@@ -55,8 +91,8 @@ def public_account(account: PlatformAccount | None, platform: str) -> dict[str, 
             "platformName": PLATFORM_NAMES[platform],
             "accountName": "未配置",
             "authType": "NONE",
-            "publishMode": "MANUAL_CONFIRM" if platform == "XIAOHONGSHU" else "MOCK",
-            "status": "NOT_CONFIGURED",
+            "publishMode": DEFAULT_PUBLISH_MODES[platform],
+            "status": "MANUAL_ONLY" if platform == "XIAOHONGSHU" else "NOT_CONFIGURED",
             "capabilities": DEFAULT_CAPABILITIES[platform],
             "lastTestAt": None,
             "lastError": None,
@@ -68,6 +104,7 @@ def public_account(account: PlatformAccount | None, platform: str) -> dict[str, 
             "tokenHint": "",
             "tokenExpiresAt": None,
             "config": {},
+            "connectionGuide": CONNECTION_GUIDES[platform],
         }
     config = decrypt_json(account.credentials_encrypted)
     safe_config = {
@@ -102,6 +139,7 @@ def public_account(account: PlatformAccount | None, platform: str) -> dict[str, 
         if account.token_expires_at
         else None,
         "config": safe_config,
+        "connectionGuide": CONNECTION_GUIDES[platform],
     }
 
 
@@ -110,6 +148,8 @@ def effective_status(account: PlatformAccount) -> str:
         return "DISABLED"
     if account.token_expires_at and account.token_expires_at <= datetime.now():
         return "TOKEN_EXPIRED"
+    if account.platform == "XIAOHONGSHU":
+        return "MANUAL_ONLY"
     return account.status
 
 
@@ -153,12 +193,7 @@ def upsert_account(
         account.token_expires_at = (
             expires.astimezone(UTC).replace(tzinfo=None) if expires.tzinfo else expires
         )
-    if payload.publish_mode == "MOCK":
-        account.capabilities_json = ["SIMULATED_PUBLISH"]
-    elif platform == "XIAOHONGSHU":
-        account.capabilities_json = DEFAULT_CAPABILITIES[platform]
-    else:
-        account.capabilities_json = DEFAULT_CAPABILITIES[platform]
+    account.capabilities_json = DEFAULT_CAPABILITIES[platform]
     account.status = "NOT_CONFIGURED" if not payload.enabled else _configured_status(account)
     account.last_error = None
     db.flush()
@@ -167,8 +202,8 @@ def upsert_account(
 
 
 def _configured_status(account: PlatformAccount) -> str:
-    if account.publish_mode in {"MOCK", "MANUAL_CONFIRM"}:
-        return "CONNECTED"
+    if account.platform == "XIAOHONGSHU":
+        return "MANUAL_ONLY"
     if account.platform == "WECHAT_OFFICIAL" and account.app_id:
         return "CONNECTING"
     if account.platform == "WEIBO" and account.client_id:
@@ -177,8 +212,6 @@ def _configured_status(account: PlatformAccount) -> str:
 
 
 def account_validator(db: Session, account: PlatformAccount) -> PlatformPublisher:
-    if account.publish_mode == "MOCK":
-        return MockPublisher(account.platform)
     if account.platform == "WEIBO":
         return WeiboPublisher(db, account)
     if account.platform == "WECHAT_OFFICIAL":
@@ -187,6 +220,19 @@ def account_validator(db: Session, account: PlatformAccount) -> PlatformPublishe
 
 
 async def test_account(db: Session, account: PlatformAccount) -> PublishResult:
+    if account.platform == "XIAOHONGSHU":
+        account.status = "MANUAL_ONLY"
+        result = PublishResult(
+            False,
+            account.platform,
+            "MANUAL_CONFIRM",
+            "MANUAL_ONLY",
+            error_code="OFFICIAL_PUBLISH_API_UNAVAILABLE",
+            error_message="当前未配置可供本系统使用的小红书官方内容发布接口。",
+            suggested_action="请使用文案与图片交付包，在小红书创作中心人工发布。",
+        )
+        log_auth(db, account, "TEST_CONNECTION", "SKIPPED", result.error_message)
+        return result
     account.status = "CONNECTING"
     db.flush()
     result = await account_validator(db, account).validate_credentials()

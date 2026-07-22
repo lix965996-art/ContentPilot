@@ -208,9 +208,16 @@ export const workflowApi = {
     return unwrap<PlatformAccount>(apiClient.put(`/platform-accounts/${platform}`, data))
   },
   testPlatformAccount(platform: Platform) {
-    return unwrap<PlatformAccount & { result: Record<string, unknown> }>(
-      apiClient.post(`/platform-accounts/${platform}/test`),
-    )
+    return unwrap<
+      PlatformAccount & {
+        result: {
+          success: boolean
+          error_message: string
+          suggested_action: string
+          error_code: string
+        }
+      }
+    >(apiClient.post(`/platform-accounts/${platform}/test`))
   },
   disconnectPlatformAccount(platform: Platform) {
     return unwrap<PlatformAccount>(apiClient.delete(`/platform-accounts/${platform}`))

@@ -4,12 +4,13 @@ from urllib.parse import urlencode, urlparse
 import httpx
 import jwt
 from fastapi import APIRouter, Depends, Query, Request
+from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import require_roles
 from app.core.config import settings
-from app.core.credentials import encrypt_secret
+from app.core.credentials import decrypt_json, encrypt_secret
 from app.core.exceptions import AppException
 from app.core.responses import success_response
 from app.db.session import get_db
@@ -34,6 +35,13 @@ def _allowed_redirect(uri: str) -> bool:
     parsed = urlparse(uri)
     allowed_hosts = {urlparse(origin).hostname for origin in settings.cors_origin_list}
     return parsed.scheme in {"http", "https"} and parsed.hostname in allowed_hosts
+
+
+def _secret_is_available(account: PlatformAccount | None, submitted_secret: str | None) -> bool:
+    return bool(
+        submitted_secret
+        or (account and decrypt_json(account.credentials_encrypted).get("app_secret"))
+    )
 
 
 @router.get("")
@@ -63,10 +71,21 @@ def save_account(
 ) -> dict:
     if payload.redirect_uri and not _allowed_redirect(str(payload.redirect_uri)):
         raise AppException(40061, "Redirect URI 必须属于当前系统允许的前端来源")
-    if platform == "XIAOHONGSHU" and payload.publish_mode not in {"MANUAL_CONFIRM", "MOCK"}:
-        raise AppException(40062, "小红书仅允许人工确认或 Mock 模式")
+    existing = get_owned_account(db, user, platform)
+    if platform == "XIAOHONGSHU" and payload.publish_mode != "MANUAL_CONFIRM":
+        raise AppException(40062, "小红书当前仅提供人工交付，不会伪装成官方 API 连接")
+    if platform == "WEIBO":
+        if payload.publish_mode != "REAL_API":
+            raise AppException(40062, "微博只允许使用真实 OAuth 官方接口")
+        if not payload.client_id or not _secret_is_available(existing, payload.app_secret):
+            raise AppException(40063, "请填写微博开放平台真实 App Key 和 App Secret")
     if platform == "WECHAT_OFFICIAL" and payload.publish_mode == "REAL_API":
         payload.publish_mode = "SUBMIT_PUBLISH"
+    if platform == "WECHAT_OFFICIAL":
+        if payload.publish_mode not in {"DRAFT_ONLY", "SUBMIT_PUBLISH"}:
+            raise AppException(40062, "微信公众号只允许真实草稿或真实提交发布")
+        if not payload.app_id or not _secret_is_available(existing, payload.app_secret):
+            raise AppException(40063, "请填写微信公众号后台真实 AppID 和 AppSecret")
     account = upsert_account(db, user, platform, payload)
     record_audit(db, request, user, "CONFIGURE", "PLATFORM_ACCOUNT", "ACCOUNT", account.id)
     db.commit()
@@ -111,11 +130,13 @@ def disconnect(
     account = get_owned_account(db, user, platform)
     if not account:
         raise AppException(40411, "平台账号尚未配置", 404)
+    account_id = account.id
     disconnect_account(db, account)
-    record_audit(db, request, user, "DISCONNECT", "PLATFORM_ACCOUNT", "ACCOUNT", account.id)
+    record_audit(db, request, user, "DISCONNECT", "PLATFORM_ACCOUNT", "ACCOUNT", account_id)
+    db.delete(account)
     db.commit()
     return success_response(
-        request, public_account(account, platform), "连接已解除，敏感凭证已清除"
+        request, public_account(None, platform), "连接与账号配置已删除，敏感凭证已清除"
     )
 
 
@@ -150,7 +171,9 @@ def weibo_oauth_start(
         raise AppException(40061, "Redirect URI 不在允许列表中")
     account = get_owned_account(db, user, "WEIBO")
     if not account or not account.client_id:
-        raise AppException(40063, "请先保存微博 App Key / Client ID")
+        raise AppException(40063, "请先保存微博开放平台 App Key")
+    if not decrypt_json(account.credentials_encrypted).get("app_secret"):
+        raise AppException(40063, "请先保存微博开放平台 App Secret")
     now = datetime.now(UTC)
     state = jwt.encode(
         {
@@ -183,7 +206,7 @@ async def weibo_oauth_callback(
     code: str = Query(min_length=1),
     state: str = Query(min_length=20),
     db: Session = Depends(get_db),
-) -> dict:
+) -> RedirectResponse:
     try:
         payload = jwt.decode(state, settings.jwt_secret, algorithms=[settings.jwt_algorithm])
     except jwt.InvalidTokenError as exc:
@@ -193,8 +216,6 @@ async def weibo_oauth_callback(
     account = db.get(PlatformAccount, int(payload["account_id"]))
     if not account or account.user_id != int(payload["sub"]) or account.platform != "WEIBO":
         raise AppException(40302, "平台账号归属校验失败", 403)
-    from app.core.credentials import decrypt_json
-
     config = decrypt_json(account.credentials_encrypted)
     secret = config.get("app_secret")
     if not secret:
@@ -230,4 +251,7 @@ async def weibo_oauth_callback(
         )
     )
     db.commit()
-    return success_response(request, public_account(account, "WEIBO"), "微博授权成功")
+    frontend_origin = settings.cors_origin_list[0].rstrip("/")
+    return RedirectResponse(
+        f"{frontend_origin}/platform-accounts?oauth=weibo_success", status_code=302
+    )

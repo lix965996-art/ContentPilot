@@ -141,11 +141,10 @@ def create_schedule(
             and not decrypt_json(account.credentials_encrypted).get("allow_submit_publish")
         ):
             raise AppException(40076, "公众号配置未明确允许提交发布")
-    if payload.platform == "XIAOHONGSHU" and payload.publish_mode not in {
-        "MANUAL_CONFIRM",
-        "MOCK",
-    }:
-        raise AppException(40077, "小红书只支持人工确认或 Mock 模式")
+    if payload.platform == "XIAOHONGSHU" and payload.publish_mode != "MANUAL_CONFIRM":
+        raise AppException(40077, "小红书当前仅支持真实人工发布确认")
+    if payload.platform != "XIAOHONGSHU" and payload.publish_mode == "MANUAL_CONFIRM":
+        raise AppException(40077, "人工交付目前仅用于小红书")
     scheduled_at = _local_naive(payload.scheduled_at)
     if scheduled_at <= datetime.now():
         raise AppException(40032, "排期时间必须晚于当前时间")
@@ -242,7 +241,7 @@ def delete_schedule(
     if not row:
         raise AppException(40407, "排期任务不存在", 404)
     _ensure_schedule_owner(row, user)
-    if row.status in {"RUNNING", "SUCCESS", "MOCK_SUCCESS"}:
+    if row.status in {"RUNNING", "SUCCESS"}:
         raise AppException(40903, "已执行任务不能删除", 409)
     remove_schedule_job(row.id)
     record_audit(db, request, user, "DELETE", "SCHEDULING", "SCHEDULE", row.id)
@@ -262,7 +261,7 @@ def cancel_schedule(
     if not row:
         raise AppException(40407, "排期任务不存在", 404)
     _ensure_schedule_owner(row, user)
-    if row.status in {"SUCCESS", "MOCK_SUCCESS"}:
+    if row.status == "SUCCESS":
         raise AppException(40903, "已发布任务不能取消", 409)
     row.status = "CANCELLED"
     remove_schedule_job(row.id)

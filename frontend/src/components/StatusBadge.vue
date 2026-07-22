@@ -11,8 +11,6 @@ const labelMap: Record<string, string> = {
   RETRYING: '重试中',
   SUCCESS: '成功',
   PARTIAL_SUCCESS: '部分成功',
-  MOCK_SUCCESS: '模拟成功',
-  MOCK_DRAFT_CREATED: '模拟草稿',
   DRAFT_CREATED: '已进入草稿箱',
   PUBLISH_SUBMITTED: '已提交发布',
   MANUAL_PUBLISHED: '人工发布完成',
@@ -27,8 +25,6 @@ const labelMap: Record<string, string> = {
 const tone = computed(() =>
   [
     'SUCCESS',
-    'MOCK_SUCCESS',
-    'MOCK_DRAFT_CREATED',
     'DRAFT_CREATED',
     'PUBLISH_SUBMITTED',
     'MANUAL_PUBLISHED',

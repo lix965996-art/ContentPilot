@@ -5,9 +5,15 @@ from pydantic import BaseModel, Field, HttpUrl, model_validator
 
 Platform = Literal["WEIBO", "WECHAT_OFFICIAL", "XIAOHONGSHU"]
 AccountStatus = Literal[
-    "NOT_CONFIGURED", "CONNECTING", "CONNECTED", "TOKEN_EXPIRED", "INVALID", "DISABLED"
+    "NOT_CONFIGURED",
+    "CONNECTING",
+    "CONNECTED",
+    "TOKEN_EXPIRED",
+    "INVALID",
+    "DISABLED",
+    "MANUAL_ONLY",
 ]
-PublishMode = Literal["REAL_API", "DRAFT_ONLY", "SUBMIT_PUBLISH", "MANUAL_CONFIRM", "MOCK"]
+PublishMode = Literal["REAL_API", "DRAFT_ONLY", "SUBMIT_PUBLISH", "MANUAL_CONFIRM"]
 
 
 class PlatformAccountUpsert(BaseModel):

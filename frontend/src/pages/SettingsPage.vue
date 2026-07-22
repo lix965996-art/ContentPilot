@@ -33,7 +33,6 @@ const EMPTY_USAGE: LlmUsage = {
 }
 
 const providerOptions = [
-  { value: 'mock', label: '本地规则模型', url: '' },
   { value: 'openai', label: 'OpenAI', url: 'https://api.openai.com/v1' },
   { value: 'siliconflow', label: '硅基流动', url: 'https://api.siliconflow.cn/v1' },
   { value: 'deepseek', label: 'DeepSeek', url: 'https://api.deepseek.com/v1' },
@@ -41,7 +40,7 @@ const providerOptions = [
   { value: 'openai-compatible', label: '自定义 OpenAI 兼容服务', url: '' },
 ]
 const llm = reactive<LlmConfig>({
-  provider: 'mock',
+  provider: 'openai-compatible',
   baseUrl: '',
   apiKey: '',
   apiKeyConfigured: false,
@@ -80,12 +79,6 @@ function formatNumber(value: number) {
 function changeProvider(value: string) {
   const preset = providerOptions.find((item) => item.value === value)
   if (preset?.url) llm.baseUrl = preset.url
-  if (value === 'mock') {
-    llm.baseUrl = ''
-    llm.apiKey = ''
-    llm.model = 'contentpilot-local'
-    models.value = ['contentpilot-local']
-  }
   connection.value = null
 }
 
@@ -193,7 +186,6 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
                 <el-form-item label="API Base URL">
                   <el-input
                     v-model="llm.baseUrl"
-                    :disabled="llm.provider === 'mock'"
                     data-testid="model-base-url"
                     placeholder="https://api.example.com/v1"
                   />
@@ -202,7 +194,6 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
               <el-form-item label="API Key">
                 <el-input
                   v-model="llm.apiKey"
-                  :disabled="llm.provider === 'mock'"
                   type="password"
                   show-password
                   autocomplete="new-password"

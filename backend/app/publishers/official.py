@@ -214,16 +214,6 @@ class WechatDraftPublisher(OfficialPublisher):
         return str(value)
 
     async def publish(self, request: dict[str, Any]) -> PublishResult:
-        if self.account.publish_mode == "MOCK" or request.get("dry_run"):
-            draft_id = f"mock-draft-{request['schedule_id']}"
-            return PublishResult(
-                True,
-                self.platform,
-                "MOCK",
-                "MOCK_DRAFT_CREATED",
-                external_id=draft_id,
-                detail={"draftId": draft_id, "simulated": True},
-            )
         try:
             token = await self._access_token()
             images = [path for value in request.get("images", []) if (path := _local_image(value))]
@@ -322,7 +312,7 @@ class WechatPublishPublisher(WechatDraftPublisher):
                 action="在账号设置中确认接口权限后启用“允许提交发布”。",
             )
         draft = await super().publish(request)
-        if not draft.success or draft.mode == "MOCK":
+        if not draft.success:
             return draft
         try:
             token = await self._access_token()

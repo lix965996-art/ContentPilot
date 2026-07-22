@@ -43,7 +43,7 @@ const form = ref<{
   platform: Platform
   scheduled_at: string
   publish_mode: PublishMode
-}>({ platform: 'WEIBO', scheduled_at: '', publish_mode: 'MOCK' })
+}>({ platform: 'WEIBO', scheduled_at: '', publish_mode: 'REAL_API' })
 const availableAccounts = computed(() =>
   accounts.value.filter((item) => item.platform === form.value.platform && item.id),
 )
@@ -54,10 +54,7 @@ const publishModes = computed<Array<{ value: PublishMode; label: string; disable
   () => {
     const account = selectedAccount.value
     if (form.value.platform === 'XIAOHONGSHU')
-      return [
-        { value: 'MANUAL_CONFIRM', label: '人工确认发布' },
-        { value: 'MOCK', label: 'Mock 演示' },
-      ]
+      return [{ value: 'MANUAL_CONFIRM', label: '人工发布后确认' }]
     if (form.value.platform === 'WECHAT_OFFICIAL')
       return [
         { value: 'DRAFT_ONLY', label: '自动进入草稿箱', disabled: account?.status !== 'CONNECTED' },
@@ -66,13 +63,8 @@ const publishModes = computed<Array<{ value: PublishMode; label: string; disable
           label: '提交发布',
           disabled: account?.status !== 'CONNECTED' || account.publishMode !== 'SUBMIT_PUBLISH',
         },
-        { value: 'MOCK', label: 'Mock 草稿箱' },
       ]
-    return [
-      { value: 'REAL_API', label: '官方 API', disabled: account?.status !== 'CONNECTED' },
-      { value: 'MOCK', label: 'Mock 演示' },
-      { value: 'MANUAL_CONFIRM', label: '人工确认' },
-    ]
+    return [{ value: 'REAL_API', label: '微博官方 API', disabled: account?.status !== 'CONNECTED' }]
   },
 )
 const platformGlyphs: Record<Platform, string> = {
@@ -174,18 +166,14 @@ function choosePlatform() {
     form.value.platform === 'XIAOHONGSHU'
       ? 'MANUAL_CONFIRM'
       : form.value.platform === 'WECHAT_OFFICIAL'
-        ? account?.status === 'CONNECTED'
-          ? 'DRAFT_ONLY'
-          : 'MOCK'
-        : account?.status === 'CONNECTED' && account.publishMode === 'REAL_API'
-          ? 'REAL_API'
-          : 'MOCK'
+        ? 'DRAFT_ONLY'
+        : 'REAL_API'
 }
 function openCreate() {
   form.value = {
     platform: 'WEIBO',
     scheduled_at: formatLocalDateTime(new Date(Date.now() + 3600000)).slice(0, 16),
-    publish_mode: 'MOCK',
+    publish_mode: 'REAL_API',
   }
   dialog.value = true
 }

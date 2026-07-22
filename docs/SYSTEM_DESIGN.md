@@ -22,14 +22,17 @@ SQLAlchemy 2 + Alembic → MySQL 8
 
 - 文章：`DRAFT → GENERATED → APPROVED → ARCHIVED`；
 - 版本审核：`PENDING → APPROVED`；
-- 发布：`PENDING → RUNNING → MOCK_SUCCESS/SUCCESS`，人工模式进入 `WAITING_MANUAL_CONFIRM`，异常进入 `FAILED`，可重试或取消。
+- 微博发布：`PENDING → RUNNING → SUCCESS`；只有通过 OAuth 实测的账号才可创建任务；
+- 公众号发布：`PENDING → RUNNING → DRAFT_CREATED/PUBLISH_SUBMITTED`；创建草稿不等同于公开发布；
+- 小红书人工交付：`PENDING → WAITING_MANUAL_CONFIRM → MANUAL_PUBLISHED`；
+- 异常进入 `FAILED`，可按接口错误决定重试或重新授权。
 
 ## 降级
 
-- LLM 缺少密钥或失败：结构化本地 Mock；
+- LLM 缺少密钥或失败：生成任务明确失败，不生成伪造的模型结果；
 - Unsplash 不可用：10 张本地 SVG；
-- 真实发布不可用：MockPublisher 或 ManualConfirmPublisher；
-- 所有降级均在接口或 UI 标记 MOCK/SIMULATED。
+- 微博或公众号未通过官方验证：禁止创建真实发布排期；
+- 小红书没有可用官方发布权限：只生成文案与图片交付包，等待人工发布确认。
 
 ## 安全
 

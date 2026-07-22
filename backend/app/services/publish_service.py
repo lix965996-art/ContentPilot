@@ -14,7 +14,6 @@ from app.models.business import (
     PublishSchedule,
 )
 from app.publishers.base import PlatformPublisher, PublishResult
-from app.publishers.mock import ManualConfirmPublisher, MockPublisher
 from app.publishers.official import (
     WechatDraftPublisher,
     WechatPublishPublisher,
@@ -25,8 +24,6 @@ from app.services.platform_account_service import effective_status
 
 FINAL_STATUSES = {
     "SUCCESS",
-    "MOCK_SUCCESS",
-    "MOCK_DRAFT_CREATED",
     "DRAFT_CREATED",
     "PUBLISH_SUBMITTED",
     "MANUAL_PUBLISHED",
@@ -38,14 +35,10 @@ def resolve_publisher(
     db: Session, schedule: PublishSchedule, account: PlatformAccount
 ) -> PlatformPublisher:
     mode = schedule.publish_mode
-    if mode == "MOCK":
-        if schedule.platform == "WECHAT_OFFICIAL":
-            return WechatDraftPublisher(db, account)
-        return MockPublisher(schedule.platform)
     if mode == "MANUAL_CONFIRM":
         if schedule.platform == "XIAOHONGSHU":
             return XiaohongshuManualPublisher(account)
-        return ManualConfirmPublisher(schedule.platform)
+        raise AppException(40071, "人工交付目前仅用于小红书")
     if mode == "DRAFT_ONLY" and schedule.platform == "WECHAT_OFFICIAL":
         return WechatDraftPublisher(db, account)
     if mode == "REAL_API" and schedule.platform == "WEIBO":
@@ -126,7 +119,6 @@ async def execute_publish(db: Session, schedule_id: int) -> PublishSchedule:
                 "hashtags": variant.hashtags_json or [],
                 "images": [asset.image_url for asset in assets],
                 "idempotency_key": schedule.idempotency_key,
-                "dry_run": schedule.publish_mode == "MOCK",
             }
         )
         _apply_result(schedule, result)
@@ -183,8 +175,6 @@ def _apply_result(schedule: PublishSchedule, result: PublishResult) -> None:
 
 def _safe_result_summary(result: PublishResult) -> str:
     label = {
-        "MOCK_SUCCESS": "模拟发布完成（SIMULATED）",
-        "MOCK_DRAFT_CREATED": "模拟草稿已创建（SIMULATED）",
         "DRAFT_CREATED": "已进入微信公众号草稿箱，尚未公开发布",
         "PUBLISH_SUBMITTED": "已提交微信公众号发布，等待平台处理",
         "WAITING_MANUAL_CONFIRM": "等待运营人员人工发布并确认",

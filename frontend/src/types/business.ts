@@ -123,10 +123,16 @@ export interface Schedule {
   logs?: Array<Record<string, unknown>>
 }
 
-export type PublishMode = 'REAL_API' | 'DRAFT_ONLY' | 'MANUAL_CONFIRM' | 'MOCK'
+export type PublishMode = 'REAL_API' | 'DRAFT_ONLY' | 'MANUAL_CONFIRM'
 
 export type PlatformAccountStatus =
-  'NOT_CONFIGURED' | 'CONNECTING' | 'CONNECTED' | 'TOKEN_EXPIRED' | 'INVALID' | 'DISABLED'
+  | 'NOT_CONFIGURED'
+  | 'CONNECTING'
+  | 'CONNECTED'
+  | 'TOKEN_EXPIRED'
+  | 'INVALID'
+  | 'DISABLED'
+  | 'MANUAL_ONLY'
 
 export interface PlatformAccount {
   id: number | null
@@ -152,6 +158,12 @@ export interface PlatformAccount {
     default_cover_media_id?: string
     default_cover_url?: string
     allow_submit_publish?: boolean
+  }
+  connectionGuide: {
+    mode: 'OFFICIAL_OAUTH' | 'APP_SECRET' | 'MANUAL_ONLY'
+    consoleUrl: string
+    callbackPath?: string
+    steps: string[]
   }
 }
 

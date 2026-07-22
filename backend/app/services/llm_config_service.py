@@ -32,7 +32,7 @@ def _stored_api_key(db: Session) -> str:
 def read_llm_config(db: Session) -> dict:
     api_key = _stored_api_key(db)
     return {
-        "provider": setting_value(db, "llm.provider", "mock"),
+        "provider": setting_value(db, "llm.provider", "openai-compatible"),
         "baseUrl": setting_value(db, "llm.base_url"),
         "apiKey": MASKED_SECRET if api_key else "",
         "apiKeyConfigured": bool(api_key),
@@ -72,13 +72,6 @@ def save_llm_config(db: Session, payload: LlmConfigUpdate) -> dict:
 
 
 async def test_llm_connection(db: Session, payload: LlmConfigUpdate) -> dict:
-    if payload.provider.lower() == "mock":
-        return {
-            "connected": True,
-            "latencyMs": 0,
-            "models": ["contentpilot-local"],
-            "message": "本地规则模型可用",
-        }
     api_key = _stored_api_key(db) if payload.api_key == MASKED_SECRET else payload.api_key
     if not api_key:
         raise AppException(40061, "请填写 API Key")

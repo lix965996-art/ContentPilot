@@ -313,8 +313,8 @@ def update_workspace() -> dict[str, int]:
                 ).update({"selected": False})
 
         account_names = {
-            "WEIBO": "ContentPilot 微博（本地演示）",
-            "WECHAT_OFFICIAL": "ContentPilot 公众号（草稿演示）",
+            "WEIBO": "微博账号（待真实授权）",
+            "WECHAT_OFFICIAL": "公众号（待真实配置）",
             "XIAOHONGSHU": "ContentPilot 小红书（人工发布）",
         }
         accounts = db.scalars(
@@ -322,58 +322,60 @@ def update_workspace() -> dict[str, int]:
         ).all()
         for account in accounts:
             account.account_name = account_names[account.platform]
-            account.auth_type = "NONE"
-            account.status = "CONNECTED"
-            account.publish_mode = "MANUAL_CONFIRM" if account.platform == "XIAOHONGSHU" else "MOCK"
-            account.capabilities_json = (
-                ["MANUAL_PACKAGE", "COPY_TEXT", "DOWNLOAD_MEDIA"]
-                if account.platform == "XIAOHONGSHU"
-                else ["SIMULATED_PUBLISH", "LOCAL_WORKFLOW_ONLY"]
-            )
-            account.last_error = "本地演示账号：尚未配置官方平台凭证，不会向外部平台发送内容。"
+            if account.platform == "XIAOHONGSHU":
+                account.auth_type = "NONE"
+                account.status = "MANUAL_ONLY"
+                account.publish_mode = "MANUAL_CONFIRM"
+                account.capabilities_json = ["COPYWRITING", "IMAGE_PACKAGE", "MANUAL_CONFIRM"]
+                account.last_error = None
+            elif account.platform == "WEIBO":
+                account.auth_type = "OAUTH2"
+                account.status = "NOT_CONFIGURED"
+                account.publish_mode = "REAL_API"
+                account.capabilities_json = ["TEXT_PUBLISH", "IMAGE_PUBLISH", "STATUS_READ"]
+                account.last_error = "尚未完成微博开放平台 OAuth 授权。"
+            else:
+                account.auth_type = "APP_SECRET"
+                account.status = "NOT_CONFIGURED"
+                account.publish_mode = "DRAFT_ONLY"
+                account.capabilities_json = ["MATERIAL_UPLOAD", "DRAFT_CREATE"]
+                account.last_error = "尚未配置微信公众号 AppID/AppSecret。"
 
             auth_logs = db.scalars(
                 select(PlatformAuthLog).where(PlatformAuthLog.platform_account_id == account.id)
             ).all()
             for auth_log in auth_logs:
-                auth_log.message = "本地演示账号已就绪；未连接官方平台接口。"
-                auth_log.detail_json = {"dataSource": "SIMULATED", "credentials": False}
+                auth_log.message = "未连接官方平台接口，必须配置真实凭证后才能发布。"
+                auth_log.detail_json = {"credentials": False, "connected": False}
 
         schedules = db.scalars(
             select(PublishSchedule).where(PublishSchedule.article_id.in_(article_ids))
         ).all()
         for schedule in schedules:
             article = next(item for item in articles if item.id == schedule.article_id)
-            is_complete = schedule.status != "PENDING"
+            if schedule.platform == "XIAOHONGSHU":
+                schedule.publish_mode = "MANUAL_CONFIRM"
+                schedule.status = "PENDING"
+            elif schedule.platform == "WECHAT_OFFICIAL":
+                schedule.publish_mode = "DRAFT_ONLY"
+                schedule.status = "CANCELLED"
+            else:
+                schedule.publish_mode = "REAL_API"
+                schedule.status = "CANCELLED"
             schedule.publish_package_json = {
                 "title": article.title,
-                "dataNotice": (
-                    "本地模拟发布结果，未连接外部平台"
-                    if is_complete
-                    else "待发布演示排期，执行前需确认平台连接"
-                ),
+                "dataNotice": "示例内容排期；未连接真实平台时不会执行",
                 "mediaCount": 2,
             }
-            if is_complete:
-                schedule.result_mode = "SIMULATED"
-                schedule.published_url = (
-                    f"https://example.invalid/contentpilot/{schedule.platform.lower()}/"
-                    f"{schedule.id}"
-                )
-                schedule.external_id = f"simulated-{schedule.id}"
-            else:
-                schedule.result_mode = None
-                schedule.published_url = None
-                schedule.external_id = None
+            schedule.result_mode = None
+            schedule.published_url = None
+            schedule.external_id = None
+            schedule.actual_publish_at = None
 
             logs = db.scalars(select(PublishLog).where(PublishLog.schedule_id == schedule.id)).all()
             for log in logs:
                 log.request_summary = f"准备《{article.title}》的{schedule.platform}发布包"
-                log.response_summary = (
-                    "本地模拟流程执行完成，未调用外部平台接口。"
-                    if is_complete
-                    else "排期已保存，等待人工确认。"
-                )
+                log.response_summary = "未连接真实平台，发布流程未执行。"
                 log.error_message = None
 
             recommendations = db.scalars(

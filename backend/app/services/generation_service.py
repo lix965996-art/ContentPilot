@@ -43,10 +43,6 @@ class LlmRuntime:
     base_url: str
     model_name: str
 
-    @property
-    def is_mock(self) -> bool:
-        return self.provider.lower() == "mock"
-
 
 @dataclass(frozen=True)
 class GenerationResult:
@@ -101,7 +97,7 @@ def _source_points(article: ContentArticle) -> list[str]:
     return points[:8] or [source[:160]]
 
 
-def _mock_variant(
+def _baseline_variant(
     article: ContentArticle, platform: str, options: dict[str, Any]
 ) -> dict[str, Any]:
     points = _source_points(article)
@@ -121,7 +117,7 @@ def _mock_variant(
             "title": article.title[:60],
             "content": content[:2000],
             "hashtags": [f"#{item}#" for item in keywords[:3]] if include_tags else [],
-            "warnings": [f"MOCK：本地规则按“{style}”风格生成"],
+            "warnings": [f"Prompt 回归基线：本地规则按“{style}”风格生成"],
         }
     if platform == "XIAOHONGSHU":
         sections = "\n\n".join(f"{index + 1}. {point}" for index, point in enumerate(selected))
@@ -130,7 +126,7 @@ def _mock_variant(
             "content": f"给{audience}的重点整理{emoji}\n\n{sections}\n\n以上内容均来自原文。",
             "hashtags": [f"#{item}" for item in keywords[:6]] if include_tags else [],
             "cover_text": article.title[:20],
-            "warnings": [f"MOCK：本地规则按“{style}”风格生成"],
+            "warnings": [f"Prompt 回归基线：本地规则按“{style}”风格生成"],
         }
     sections = "\n\n".join(f"## {point[:22]}\n\n{point}。" for point in selected)
     wechat_content = (
@@ -144,7 +140,7 @@ def _mock_variant(
         "author": "",
         "hashtags": [f"#{item}" for item in keywords[:5]] if include_tags else [],
         "cover_prompt": f"{article.topic or article.title}，简洁编辑配图",
-        "warnings": [f"MOCK：本地规则按“{style}”风格生成"],
+        "warnings": [f"Prompt 回归基线：本地规则按“{style}”风格生成"],
     }
 
 
@@ -262,19 +258,6 @@ async def generate_variant_data(
     runtime = runtime or load_llm_runtime(db)
     if status_callback:
         await status_callback("RUNNING", {"attempt": 1})
-    if runtime.is_mock:
-        await asyncio.sleep(0.03)
-        data = (
-            OUTPUT_MODELS[platform]
-            .model_validate(_mock_variant(article, platform, options))
-            .model_dump()
-        )
-        elapsed = int((time.perf_counter() - started) * 1000)
-        prompt_tokens = max(50, len(build_generation_prompt(article, platform, options)) // 2)
-        completion_tokens = max(30, len(data["content"]) // 2)
-        return GenerationResult(
-            data, "contentpilot-local", "mock", elapsed, prompt_tokens, completion_tokens, 1
-        )
     if not runtime.api_key or not runtime.base_url or not runtime.model_name:
         raise AppException(
             50301,
@@ -413,7 +396,7 @@ async def review_variant_quality(
         },
     )
     runtime = load_llm_runtime(db)
-    if runtime.is_mock or not all([runtime.api_key, runtime.base_url, runtime.model_name]):
+    if not all([runtime.api_key, runtime.base_url, runtime.model_name]):
         return {**rule_result, "ruleReview": rule_result}, "RULE_FALLBACK"
     prompt = (
         f"平台：{PLATFORM_NAMES[variant.platform]}\n原文：\n{article.source_text}\n\n"
@@ -448,7 +431,7 @@ async def review_variant_quality(
 
 async def extract_keywords_with_llm(db: Session, text: str) -> tuple[list[dict[str, str]], str]:
     runtime = load_llm_runtime(db)
-    if runtime.is_mock or not all([runtime.api_key, runtime.base_url, runtime.model_name]):
+    if not all([runtime.api_key, runtime.base_url, runtime.model_name]):
         return extract_keywords(text), "RULE_FALLBACK"
     try:
         result, _, _, _ = await _validated_completion(

@@ -4,7 +4,7 @@ export interface ServiceStatus {
   api: string
   database: string
   auth: string
-  mockMode: boolean
+  demoMode: boolean
 }
 
 export interface DashboardSummary {

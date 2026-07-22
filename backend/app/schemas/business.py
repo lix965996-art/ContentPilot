@@ -87,13 +87,13 @@ class ScheduleCreate(BaseModel):
     account_id: int | None = None
     platform: Platform
     scheduled_at: datetime
-    publish_mode: Literal["REAL_API", "DRAFT_ONLY", "MANUAL_CONFIRM", "MOCK"] = "MANUAL_CONFIRM"
+    publish_mode: Literal["REAL_API", "DRAFT_ONLY", "MANUAL_CONFIRM"] = "MANUAL_CONFIRM"
 
 
 class ScheduleUpdate(BaseModel):
     scheduled_at: datetime | None = None
     account_id: int | None = None
-    publish_mode: Literal["REAL_API", "DRAFT_ONLY", "MANUAL_CONFIRM", "MOCK"] | None = None
+    publish_mode: Literal["REAL_API", "DRAFT_ONLY", "MANUAL_CONFIRM"] | None = None
 
 
 class MetricCreate(BaseModel):
@@ -161,11 +161,17 @@ class LlmConfigUpdate(BaseModel):
     @field_validator("base_url")
     @classmethod
     def validate_base_url(cls, value: str, info):
-        if info.data.get("provider", "").lower() != "mock" and not value.startswith(
-            ("http://", "https://")
-        ):
+        if not value.startswith(("http://", "https://")):
             raise ValueError("接口地址必须以 http:// 或 https:// 开头")
         return value.rstrip("/")
+
+    @field_validator("provider")
+    @classmethod
+    def reject_local_mock_provider(cls, value: str) -> str:
+        normalized = value.strip()
+        if normalized.lower() == "mock":
+            raise ValueError("不再支持本地模拟模型，请配置真实的大模型服务")
+        return normalized
 
 
 class UserCreate(BaseModel):

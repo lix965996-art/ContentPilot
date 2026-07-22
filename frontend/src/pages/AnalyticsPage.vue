@@ -28,8 +28,7 @@ const timeLift = computed(() => {
 const publishRate = computed(() =>
   schedules.value.length
     ? Math.round(
-        (schedules.value.filter((x) => ['SUCCESS', 'MOCK_SUCCESS'].includes(x.status)).length /
-          schedules.value.length) *
+        (schedules.value.filter((x) => x.status === 'SUCCESS').length / schedules.value.length) *
           100,
       )
     : 0,

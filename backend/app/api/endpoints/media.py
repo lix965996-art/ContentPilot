@@ -58,7 +58,6 @@ def _project_generated_items(keyword: str) -> list[dict]:
             "photographerUrl": None,
             "altText": alt_text,
             "searchKeyword": keyword,
-            "isMock": False,
         }
         for item_id, filename, alt_text in PROJECT_GENERATED_IMAGES
     ]
@@ -92,7 +91,6 @@ async def search_media(
                         "photographerUrl": item["user"]["links"]["html"],
                         "altText": item.get("alt_description") or keyword,
                         "searchKeyword": keyword,
-                        "isMock": False,
                     }
                     for item in response.json().get("results", [])
                 ]
@@ -130,8 +128,7 @@ async def search_media(
             },
         )
     items = [
-        {**item, "altText": f"{keyword} 配图", "searchKeyword": keyword, "isMock": True}
-        for item in FALLBACK_IMAGES
+        {**item, "altText": f"{keyword} 配图", "searchKeyword": keyword} for item in FALLBACK_IMAGES
     ]
     return success_response(
         request,

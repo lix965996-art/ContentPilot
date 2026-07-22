@@ -180,9 +180,7 @@ def seed_demo_business_data(db: Session, roles: dict[str, Role]) -> None:
                 ("XIAOHONGSHU", "实用清单"),
                 ("WECHAT_OFFICIAL", "深度整理"),
             ):
-                content = (
-                    f"{title}\n\n{text}\n\n这是 {platform} 的 MOCK 演示版本，发布前请人工核验。"
-                )
+                content = f"{title}\n\n{text}\n\n这是本地示例版本，发布前请人工核验。"
                 db.add(
                     ContentVariant(
                         article_id=article.id,
@@ -193,7 +191,7 @@ def seed_demo_business_data(db: Session, roles: dict[str, Role]) -> None:
                         hashtags_json=[f"#{topic}", "#校园新媒体"],
                         emoji_count=0,
                         word_count=len(content),
-                        model_name="mock-socialflow-v1",
+                        model_name="demo-baseline-v1",
                         prompt_version="1.0.0",
                         generation_duration_ms=320 + index * 7,
                         token_usage=180 + index * 5,
@@ -205,7 +203,22 @@ def seed_demo_business_data(db: Session, roles: dict[str, Role]) -> None:
                 )
         db.commit()
 
-    for platform in ("WEIBO", "XIAOHONGSHU", "WECHAT_OFFICIAL"):
+    account_defaults = {
+        "WEIBO": ("REAL_API", "OAUTH2", "NOT_CONFIGURED", ["TEXT_PUBLISH", "IMAGE_PUBLISH"]),
+        "WECHAT_OFFICIAL": (
+            "DRAFT_ONLY",
+            "APP_SECRET",
+            "NOT_CONFIGURED",
+            ["MATERIAL_UPLOAD", "DRAFT_CREATE"],
+        ),
+        "XIAOHONGSHU": (
+            "MANUAL_CONFIRM",
+            "NONE",
+            "MANUAL_ONLY",
+            ["COPYWRITING", "IMAGE_PACKAGE", "MANUAL_CONFIRM"],
+        ),
+    }
+    for platform, (publish_mode, auth_type, status, capabilities) in account_defaults.items():
         if not db.scalar(
             select(PlatformAccount).where(
                 PlatformAccount.user_id == operator.id, PlatformAccount.platform == platform
@@ -216,10 +229,10 @@ def seed_demo_business_data(db: Session, roles: dict[str, Role]) -> None:
                     user_id=operator.id,
                     platform=platform,
                     account_name=f"ContentPilot 演示{platform}",
-                    publish_mode="MOCK",
-                    auth_type="NONE",
-                    capabilities_json=["SIMULATED_PUBLISH"],
-                    status="CONNECTED",
+                    publish_mode=publish_mode,
+                    auth_type=auth_type,
+                    capabilities_json=capabilities,
+                    status=status,
                 )
             )
     db.commit()
@@ -262,12 +275,23 @@ def seed_demo_business_data(db: Session, roles: dict[str, Role]) -> None:
                 else None,
                 platform=variant.platform,
                 scheduled_at=now + timedelta(hours=index + 2),
-                publish_mode="MOCK",
-                status="PENDING" if index > 5 else "MOCK_SUCCESS",
+                publish_mode=(
+                    "MANUAL_CONFIRM"
+                    if variant.platform == "XIAOHONGSHU"
+                    else "DRAFT_ONLY"
+                    if variant.platform == "WECHAT_OFFICIAL"
+                    else "REAL_API"
+                ),
+                status="PENDING" if variant.platform == "XIAOHONGSHU" else "CANCELLED",
                 retry_count=0,
                 max_retry_count=3,
-                actual_publish_at=now - timedelta(days=index) if index <= 5 else None,
-                published_url=f"mock://socialflow/published/seed-{index}" if index <= 5 else None,
+                actual_publish_at=None,
+                published_url=None,
+                error_message=(
+                    None
+                    if variant.platform == "XIAOHONGSHU"
+                    else "尚未连接真实平台，示例排期未执行"
+                ),
                 idempotency_key=str(uuid.uuid4()),
                 created_by=operator.id,
             )
@@ -343,7 +367,7 @@ def seed_demo_business_data(db: Session, roles: dict[str, Role]) -> None:
         db.commit()
 
     setting_defs = [
-        ("llm.provider", "mock", False, "大模型提供方"),
+        ("llm.provider", "openai-compatible", False, "大模型提供方"),
         ("llm.base_url", "", False, "OpenAI 兼容接口地址"),
         ("llm.api_key", "", True, "大模型 API Key"),
         ("llm.model", "", False, "模型名称"),
@@ -351,7 +375,7 @@ def seed_demo_business_data(db: Session, roles: dict[str, Role]) -> None:
         ("llm.output_price_per_million", "0", False, "每百万输出 Token 价格"),
         ("llm.currency", "CNY", False, "计费币种"),
         ("media.unsplash_key", "", True, "Unsplash Access Key"),
-        ("publish.mode", "mock", False, "默认发布适配器"),
+        ("publish.mode", "official", False, "默认发布适配器"),
         ("app.timezone", "Asia/Shanghai", False, "系统时区"),
         ("logs.retention_days", "90", False, "日志保留天数"),
     ]

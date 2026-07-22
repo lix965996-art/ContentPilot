@@ -36,7 +36,7 @@ services:
       JWT_SECRET: ${JWT_SECRET:?Copy .env.example to .env and set JWT_SECRET}
       PLATFORM_CREDENTIAL_KEY: ${PLATFORM_CREDENTIAL_KEY:?Copy .env.example to .env and set PLATFORM_CREDENTIAL_KEY}
       CORS_ORIGINS: http://localhost:${CONTENTPILOT_PORT:-8080},http://127.0.0.1:${CONTENTPILOT_PORT:-8080}
-      APP_DEMO_MODE: ${APP_DEMO_MODE:-true}
+      APP_DEMO_MODE: ${APP_DEMO_MODE:-false}
       LLM_PROVIDER: ${LLM_PROVIDER:-openai-compatible}
       LLM_BASE_URL: ${LLM_BASE_URL:-}
       LLM_API_KEY: ${LLM_API_KEY:-}

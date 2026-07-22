@@ -51,7 +51,7 @@ def _create_task(db: Session, payload: GenerateRequest) -> GenerationTask:
         progress=0,
         platforms_json=payload.platforms,
         result_variant_ids_json=[],
-        model_name=runtime.model_name or ("contentpilot-local" if runtime.is_mock else ""),
+        model_name=runtime.model_name,
         provider=runtime.provider,
         prompt_version=PROMPT_VERSION,
         token_usage=0,

@@ -319,7 +319,7 @@ def test_history_delete_reject_and_single_platform_retry(client: TestClient, log
     ).json()["data"]
     assert retry_task["platformsJson"] == ["WEIBO"]
     assert retry_task["status"] == "SUCCESS"
-    assert retry_task["provider"] == "mock"
+    assert retry_task["provider"] == "openai-compatible"
     assert retry_task["promptVersion"] == PROMPT_VERSION
     assert retry_task["tokenUsage"] > 0
     assert retry_task["durationMs"] >= 0

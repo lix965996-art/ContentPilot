@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, reactive, ref } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import { CheckCircle2, Link2, RefreshCw, Settings2, ShieldAlert, Unlink } from 'lucide-vue-next'
 import PageHeader from '@/components/PageHeader.vue'
@@ -9,6 +10,8 @@ import { getApiErrorMessage } from '@/api/client'
 import type { Platform, PlatformAccount } from '@/types/business'
 
 const accounts = ref<PlatformAccount[]>([])
+const route = useRoute()
+const router = useRouter()
 const loading = ref(false)
 const testing = ref<Platform | ''>('')
 const drawer = ref(false)
@@ -19,7 +22,7 @@ const current = ref<PlatformAccount>()
 const form = reactive({
   account_name: '',
   auth_type: 'NONE',
-  publish_mode: 'MOCK',
+  publish_mode: 'REAL_API',
   app_id: '',
   client_id: '',
   app_secret: '',
@@ -44,7 +47,6 @@ const capabilityNames: Record<string, string> = {
   COPYWRITING: '文案生成',
   IMAGE_PACKAGE: '图片打包',
   MANUAL_CONFIRM: '人工确认',
-  SIMULATED_PUBLISH: '模拟发布',
 }
 const statusNames: Record<string, string> = {
   NOT_CONFIGURED: '未配置',
@@ -53,10 +55,21 @@ const statusNames: Record<string, string> = {
   TOKEN_EXPIRED: 'Token 已过期',
   INVALID: '连接无效',
   DISABLED: '已停用',
+  MANUAL_ONLY: '仅人工交付',
 }
 const statusType = (status: string) =>
-  status === 'CONNECTED' ? 'success' : status === 'CONNECTING' ? 'warning' : 'danger'
+  status === 'CONNECTED'
+    ? 'success'
+    : ['CONNECTING', 'MANUAL_ONLY'].includes(status)
+      ? 'warning'
+      : 'danger'
 const title = computed(() => current.value?.platformName || '平台配置')
+const publishModeNames: Record<string, string> = {
+  REAL_API: '微博官方 API',
+  DRAFT_ONLY: '真实草稿箱',
+  SUBMIT_PUBLISH: '真实提交发布',
+  MANUAL_CONFIRM: '人工发布交付',
+}
 
 async function load() {
   loading.value = true
@@ -78,7 +91,11 @@ function edit(account: PlatformAccount) {
           ? 'APP_SECRET'
           : 'NONE',
     publish_mode:
-      account.platform === 'XIAOHONGSHU' ? 'MANUAL_CONFIRM' : account.publishMode || 'MOCK',
+      account.platform === 'XIAOHONGSHU'
+        ? 'MANUAL_CONFIRM'
+        : account.platform === 'WECHAT_OFFICIAL'
+          ? account.publishMode || 'DRAFT_ONLY'
+          : 'REAL_API',
     app_id: account.appId,
     client_id: account.clientId,
     app_secret: '',
@@ -97,8 +114,8 @@ function edit(account: PlatformAccount) {
   drawer.value = true
 }
 
-async function save() {
-  if (!current.value) return
+async function save(closeDrawer = true): Promise<boolean> {
+  if (!current.value) return false
   try {
     const payload: Record<string, unknown> = { ...form }
     if (!form.app_secret) delete payload.app_secret
@@ -109,10 +126,12 @@ async function save() {
     if (!form.default_cover_url) delete payload.default_cover_url
     await workflowApi.savePlatformAccount(current.value.platform, payload)
     ElMessage.success('平台账号配置已保存')
-    drawer.value = false
+    if (closeDrawer) drawer.value = false
     await load()
+    return true
   } catch (error) {
     ElMessage.error(getApiErrorMessage(error))
+    return false
   }
 }
 
@@ -120,7 +139,13 @@ async function test(account: PlatformAccount) {
   testing.value = account.platform
   try {
     const result = await workflowApi.testPlatformAccount(account.platform)
-    ElMessage.success(result.result.success ? '连接测试通过' : '连接测试未通过')
+    if (result.result.success) {
+      ElMessage.success('官方接口验证通过')
+    } else {
+      ElMessage.error(
+        [result.result.error_message, result.result.suggested_action].filter(Boolean).join(' '),
+      )
+    }
   } catch (error) {
     ElMessage.error(getApiErrorMessage(error))
   } finally {
@@ -131,11 +156,15 @@ async function test(account: PlatformAccount) {
 
 async function disconnect(account: PlatformAccount) {
   try {
-    await ElMessageBox.confirm('将清除该账号保存的所有 Token 和密钥，确定继续吗？', '解除连接', {
-      type: 'warning',
-    })
+    await ElMessageBox.confirm(
+      '将删除该平台配置及保存的所有 Token 和密钥，确定继续吗？',
+      '解除连接',
+      {
+        type: 'warning',
+      },
+    )
     await workflowApi.disconnectPlatformAccount(account.platform)
-    ElMessage.success('连接已解除，敏感凭证已清除')
+    ElMessage.success('平台配置已删除，敏感凭证已清除')
     await load()
   } catch (error) {
     if (error !== 'cancel') ElMessage.error(getApiErrorMessage(error))
@@ -144,7 +173,7 @@ async function disconnect(account: PlatformAccount) {
 
 async function oauth() {
   try {
-    await save()
+    if (!(await save(false))) return
     if (!form.redirect_uri) return
     const result = await workflowApi.startWeiboOAuth(form.redirect_uri)
     window.location.assign(result.authorizationUrl)
@@ -159,7 +188,13 @@ async function showLogs(account: PlatformAccount) {
   logDrawer.value = true
 }
 
-onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error))))
+onMounted(async () => {
+  await load()
+  if (route.query.oauth === 'weibo_success') {
+    ElMessage.success('微博官方 OAuth 授权成功，已取得真实 Access Token')
+    await router.replace({ name: 'platform-accounts' })
+  }
+})
 </script>
 
 <template>
@@ -188,13 +223,16 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
           <ShieldAlert :size="16" />授权已过期，请重新授权后再创建真实发布任务。
         </div>
         <div v-if="account.platform === 'XIAOHONGSHU'" class="account-notice">
-          小红书当前采用人工确认发布，不属于服务器无人值守自动发布。
+          小红书没有在这里伪装成已连接：当前只生成真实交付包，由运营人员前往创作中心发布并回填链接。
+        </div>
+        <div v-else-if="account.status !== 'CONNECTED'" class="account-notice account-notice--real">
+          尚未通过官方接口验证。保存真实平台凭证并完成授权前，系统不会创建发布任务。
         </div>
 
         <dl class="account-meta">
           <div>
             <dt>发布方式</dt>
-            <dd>{{ account.publishMode }}</dd>
+            <dd>{{ publishModeNames[account.publishMode] || account.publishMode }}</dd>
           </div>
           <div>
             <dt>最近检测</dt>
@@ -215,7 +253,7 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
         </dl>
 
         <section class="capability-list">
-          <p>发布能力</p>
+          <p>目标能力（最终以平台审核和接口权限为准）</p>
           <span v-for="capability in account.capabilities" :key="capability">
             <CheckCircle2 :size="13" />{{ capabilityNames[capability] || capability }}
           </span>
@@ -224,10 +262,17 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
 
         <footer>
           <el-button
-            :disabled="!account.id"
+            v-if="account.platform !== 'XIAOHONGSHU'"
+            :disabled="
+              !account.id || (account.platform === 'WEIBO' && !account.accessTokenConfigured)
+            "
             :loading="testing === account.platform"
             @click="test(account)"
-            ><Link2 :size="14" />测试连接</el-button
+            ><Link2 :size="14" />{{
+              account.platform === 'WEIBO' && !account.accessTokenConfigured
+                ? '请先完成 OAuth'
+                : '验证真实连接'
+            }}</el-button
           >
           <el-button type="primary" @click="edit(account)"
             ><Settings2 :size="14" />编辑配置</el-button
@@ -249,6 +294,17 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
 
     <el-drawer v-model="drawer" :title="`${title}配置`" size="520px">
       <el-form v-if="current" label-position="top" data-testid="platform-account-form">
+        <section class="connection-guide">
+          <div>
+            <b>真实连接步骤</b>
+            <a :href="current.connectionGuide.consoleUrl" target="_blank" rel="noopener noreferrer"
+              >打开官方平台</a
+            >
+          </div>
+          <ol>
+            <li v-for="step in current.connectionGuide.steps" :key="step">{{ step }}</li>
+          </ol>
+        </section>
         <el-form-item label="账号名称" required>
           <el-input v-model="form.account_name" placeholder="用于 ContentPilot 内部识别" />
         </el-form-item>
@@ -285,10 +341,7 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
               class="!w-full"
           /></el-form-item>
           <el-form-item label="发布方式"
-            ><el-radio-group v-model="form.publish_mode"
-              ><el-radio-button value="MOCK">Mock</el-radio-button
-              ><el-radio-button value="REAL_API">官方 API</el-radio-button></el-radio-group
-            ></el-form-item
+            ><el-tag type="success">微博官方 OAuth API</el-tag></el-form-item
           >
           <el-alert
             title="真实发布权限取决于微博开放平台应用审核和账号授权范围。"
@@ -315,10 +368,8 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
           /></el-form-item>
           <el-form-item label="发布方式"
             ><el-select v-model="form.publish_mode" class="w-full"
-              ><el-option label="Mock 草稿箱" value="MOCK" /><el-option
-                label="自动进入草稿箱"
-                value="DRAFT_ONLY" /><el-option
-                label="提交发布"
+              ><el-option label="真实创建公众号草稿" value="DRAFT_ONLY" /><el-option
+                label="真实提交发布"
                 value="SUBMIT_PUBLISH" /></el-select
           ></el-form-item>
           <el-checkbox v-model="form.allow_submit_publish"
@@ -333,12 +384,7 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
         </template>
 
         <template v-else>
-          <el-form-item label="发布方式"
-            ><el-radio-group v-model="form.publish_mode"
-              ><el-radio-button value="MANUAL_CONFIRM">人工确认</el-radio-button
-              ><el-radio-button value="MOCK">Mock</el-radio-button></el-radio-group
-            ></el-form-item
-          >
+          <el-form-item label="发布方式"><el-tag type="warning">人工发布交付</el-tag></el-form-item>
           <el-alert
             title="不会保存小红书 Cookie 或密码，也不会执行 Selenium、Playwright 或浏览器注入。排期到点后生成文案与图片发布包。"
             type="warning"
@@ -352,9 +398,9 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
           <el-button
             v-if="current?.platform === 'WEIBO' && form.publish_mode === 'REAL_API'"
             @click="oauth"
-            >保存并前往微博授权</el-button
+            >保存并前往微博官方授权</el-button
           >
-          <el-button type="primary" data-testid="save-platform-account" @click="save"
+          <el-button type="primary" data-testid="save-platform-account" @click="save()"
             >保存配置</el-button
           >
         </div>
@@ -421,6 +467,10 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
   background: #f8fafc;
   color: #475569;
 }
+.account-notice--real {
+  background: #fff7ed;
+  color: #9a3412;
+}
 .account-meta {
   display: grid;
   gap: 10px;
@@ -469,6 +519,30 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
   display: flex;
   justify-content: flex-end;
   gap: 8px;
+}
+.connection-guide {
+  margin-bottom: 20px;
+  border: 1px solid #bfdbfe;
+  border-radius: 12px;
+  background: #eff6ff;
+  padding: 14px 16px;
+  color: #1e3a5f;
+  font-size: 12px;
+  line-height: 1.65;
+}
+.connection-guide > div {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+.connection-guide a {
+  color: #1677ff;
+  font-weight: 600;
+}
+.connection-guide ol {
+  margin: 9px 0 0;
+  padding-left: 20px;
 }
 @media (max-width: 1100px) {
   .account-grid {

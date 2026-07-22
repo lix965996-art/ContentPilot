@@ -7,7 +7,7 @@ from typing import Any
 
 from app.models.business import ContentArticle
 from app.prompts.profiles import build_generation_prompt
-from app.services.generation_service import _mock_variant, edit_ratio
+from app.services.generation_service import _baseline_variant, edit_ratio
 
 CASES_PATH = Path(__file__).with_name("cases.json")
 PLATFORMS = ("WEIBO", "XIAOHONGSHU", "WECHAT_OFFICIAL")
@@ -59,7 +59,7 @@ def _new_output(case: dict[str, Any], platform: str) -> tuple[dict[str, Any], in
         "include_hashtags": True,
     }
     prompt = build_generation_prompt(article, platform, options)
-    return _mock_variant(article, platform, options), max(1, len(prompt) // 2)
+    return _baseline_variant(article, platform, options), max(1, len(prompt) // 2)
 
 
 def _is_compliant(platform: str, output: dict[str, Any]) -> bool:

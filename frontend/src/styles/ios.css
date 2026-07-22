@@ -692,8 +692,7 @@ button:active:not(:disabled),
 }
 
 .meta-chip,
-.security-chip,
-.mock-chip {
+.security-chip {
   border: 0;
   border-radius: 7px;
   background: #f2f2f7;
@@ -2627,8 +2626,7 @@ button:active:not(:disabled),
 .app-workspace .status-badge,
 .app-workspace .meta-chip,
 .app-workspace .security-chip,
-.app-workspace .secret-note,
-.app-workspace .mock-chip {
+.app-workspace .secret-note {
   font-size: 12px;
 }
 .app-workspace small {
