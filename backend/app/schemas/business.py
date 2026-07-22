@@ -76,6 +76,22 @@ class MediaSelectRequest(BaseModel):
     usage_type: Literal["COVER", "BODY"] = "BODY"
 
 
+class MediaImageGenerateRequest(BaseModel):
+    article_id: int
+    prompt: str = Field(min_length=5, max_length=1500)
+    model: str = Field(min_length=2, max_length=150)
+    image_size: Literal["1328x1328", "1664x928", "928x1664", "1472x1140", "1140x1472"] = "1328x1328"
+    usage_type: Literal["COVER", "BODY"] = "COVER"
+
+
+class MediaImageTransformRequest(BaseModel):
+    article_id: int
+    asset_id: int
+    prompt: str = Field(min_length=5, max_length=1500)
+    model: str = Field(default="Qwen/Qwen-Image-Edit-2509", min_length=2, max_length=150)
+    usage_type: Literal["COVER", "BODY"] = "COVER"
+
+
 class RecommendationRequest(BaseModel):
     article_id: int
     variant_id: int | None = None

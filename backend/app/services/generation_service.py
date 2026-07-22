@@ -505,6 +505,14 @@ def count_emoji(text: str) -> int:
     return len(emoji_pattern.findall(text))
 
 
+def normalize_visible_markdown(text: str) -> str:
+    """Remove model-emitted Markdown markers that are ugly in plain-text editors."""
+    cleaned = re.sub(r"\*\*([^*\n]+)\*\*", r"\1", text)
+    cleaned = re.sub(r"(?m)^\s*\*\s+", "• ", cleaned)
+    cleaned = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"\1", cleaned)
+    return cleaned
+
+
 def _inline_markdown(value: str) -> str:
     escaped = html.escape(value, quote=True)
     escaped = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", escaped)
@@ -660,8 +668,10 @@ def save_variant(
         )
         or 0
     ) + 1
-    data = result.data
-    content = data["content"]
+    data = dict(result.data)
+    content = normalize_visible_markdown(data["content"])
+    data["content"] = content
+    data["title"] = normalize_visible_markdown(data.get("title") or article.title)
     input_price = float(setting_value(db, "llm.input_price_per_million", "0") or 0)
     output_price = float(setting_value(db, "llm.output_price_per_million", "0") or 0)
     estimated_cost = (

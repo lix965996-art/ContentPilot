@@ -9,13 +9,16 @@ import {
   FilePlus2,
   FileText,
   ImagePlus,
+  Images,
   LayoutTemplate,
   RefreshCw,
   Save,
   Send,
+  Sparkles,
   Trash2,
   Type,
   X,
+  WandSparkles,
 } from 'lucide-vue-next'
 import { getApiErrorMessage } from '@/api/client'
 import { workflowApi } from '@/api/workflow'
@@ -55,6 +58,18 @@ const reviewResult = ref<Record<string, unknown>>()
 const saved = ref(true)
 const savedToast = ref(false)
 const showWechatFormatter = ref(false)
+const visualMode = ref<'SEARCH' | 'GENERATE' | 'TRANSFORM'>('SEARCH')
+const visualLoading = ref(false)
+const visualNotice = ref('')
+const visualKeyword = ref('')
+const visualPrompt = ref('')
+const imageSearchResults = ref<Array<Record<string, unknown>>>([])
+const textImageModels = ref<string[]>([])
+const editImageModels = ref<string[]>([])
+const textImageModel = ref('Qwen/Qwen-Image')
+const editImageModel = ref('Qwen/Qwen-Image-Edit-2509')
+const imageSize = ref('1328x1328')
+const transformAssetId = ref<number>()
 const clock = ref(Date.now())
 const operationStartedAt = ref<number>()
 let pollingSequence = 0
@@ -87,15 +102,38 @@ const current = computed(
 const comparisonVersion = computed(() =>
   activeVersions.value.find((item) => item.id === comparisonVersionId.value),
 )
-const previewText = computed(
-  () => editing.content_text || '生成或编辑内容后，平台预览会显示在这里。',
-)
+function cleanVisibleMarkdown(value: string) {
+  return value
+    .replace(/\*\*([^*\n]+)\*\*/g, '$1')
+    .replace(/^\s*\*\s+/gm, '• ')
+    .replace(/(^|[^*])\*([^*\n]+)\*(?!\*)/g, '$1$2')
+}
+
+function escapeHtml(value: string) {
+  return value
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#039;')
+}
+
+const previewHtml = computed(() => {
+  const content = editing.content_text || '生成或编辑内容后，平台预览会显示在这里。'
+  return escapeHtml(content)
+    .replace(/^###\s+(.+)$/gm, '<h5>$1</h5>')
+    .replace(/^##\s+(.+)$/gm, '<h4>$1</h4>')
+    .replace(/^#\s+(.+)$/gm, '<h3>$1</h3>')
+    .replace(/^•\s+(.+)$/gm, '<div class="preview-list-item">• $1</div>')
+    .replace(/\n{2,}/g, '</p><p>')
+    .replace(/\n/g, '<br>')
+})
 const currentAccount = computed(() =>
   accounts.value.find((item) => item.platform === activePlatform.value),
 )
 const previewMedia = computed(() => [
-  ...media.value.filter((item) => item.usageType === 'COVER'),
-  ...media.value.filter((item) => item.usageType === 'BODY'),
+  ...media.value.filter((item) => item.selected !== false && item.usageType === 'COVER'),
+  ...media.value.filter((item) => item.selected !== false && item.usageType === 'BODY'),
 ])
 const terminalTask = computed(() =>
   generationTask.value
@@ -250,6 +288,10 @@ async function loadArticle() {
   variants.value = articleData.variants || (await workflowApi.variants(selectedArticleId.value))
   accounts.value = accountData
   media.value = mediaData
+  transformAssetId.value = mediaData[0]?.id
+  visualKeyword.value = articleData.topic || articleData.title
+  visualPrompt.value = `为文章《${articleData.title}》创作一张专业、真实、具有编辑感的配图，无文字、无水印、无品牌 Logo。${articleData.summary || articleData.topic || ''}`
+  void searchVisuals()
   options.target_audience = articleData.targetAudience || ''
   restorePreferences(articleData.id)
   if (route.query.mode === 'deep') options.generation_mode = 'DEEP'
@@ -258,8 +300,8 @@ async function loadArticle() {
 }
 
 function syncEditor() {
-  editing.title = current.value?.title || ''
-  editing.content_text = current.value?.contentText || ''
+  editing.title = cleanVisibleMarkdown(current.value?.title || '')
+  editing.content_text = cleanVisibleMarkdown(current.value?.contentText || '')
   editing.hashtags = [...(current.value?.hashtagsJson || [])]
   reviewResult.value = current.value?.reviewDetailJson
   if (!comparisonVersionId.value || comparisonVersionId.value === current.value?.id) {
@@ -433,6 +475,109 @@ function openMedia() {
     query: { article: selectedArticleId.value, returnTo: 'studio' },
   })
 }
+
+async function loadImageModels() {
+  if (textImageModels.value.length || editImageModels.value.length) return
+  try {
+    const data = await workflowApi.imageModels()
+    textImageModels.value = data.textToImage
+    editImageModels.value = data.imageToImage
+    if (!data.textToImage.includes(textImageModel.value) && data.textToImage[0])
+      textImageModel.value = data.textToImage[0]
+    if (!data.imageToImage.includes(editImageModel.value) && data.imageToImage[0])
+      editImageModel.value = data.imageToImage[0]
+  } catch (error) {
+    visualNotice.value = getApiErrorMessage(error, '读取图片模型失败')
+  }
+}
+
+async function searchVisuals() {
+  if (!visualKeyword.value.trim()) return
+  visualLoading.value = true
+  try {
+    const data = await workflowApi.searchMedia(visualKeyword.value.trim())
+    imageSearchResults.value = data.items.slice(0, 6)
+    visualNotice.value = data.notice
+  } catch (error) {
+    visualNotice.value = getApiErrorMessage(error, '图片搜索失败')
+  } finally {
+    visualLoading.value = false
+  }
+}
+
+async function selectVisual(item: Record<string, unknown>, usageType: 'COVER' | 'BODY') {
+  if (!selectedArticleId.value) return
+  visualLoading.value = true
+  try {
+    await workflowApi.selectMedia({
+      article_id: selectedArticleId.value,
+      variant_id: current.value?.id,
+      source: item.source,
+      source_id: item.id,
+      image_url: item.imageUrl,
+      thumbnail_url: item.thumbnailUrl,
+      photographer_name: item.photographerName,
+      photographer_url: item.photographerUrl,
+      alt_text: item.altText,
+      search_keyword: visualKeyword.value,
+      usage_type: usageType,
+    })
+    media.value = await workflowApi.articleMedia(selectedArticleId.value)
+    transformAssetId.value = media.value[0]?.id
+    ElMessage.success(usageType === 'COVER' ? '已设为封面' : '已加入正文')
+  } catch (error) {
+    ElMessage.error(getApiErrorMessage(error, '选择图片失败'))
+  } finally {
+    visualLoading.value = false
+  }
+}
+
+async function generateVisual() {
+  if (!selectedArticleId.value || !visualPrompt.value.trim()) return
+  visualLoading.value = true
+  try {
+    await workflowApi.generateImage({
+      article_id: selectedArticleId.value,
+      prompt: visualPrompt.value.trim(),
+      model: textImageModel.value,
+      image_size: imageSize.value,
+      usage_type: 'COVER',
+    })
+    media.value = await workflowApi.articleMedia(selectedArticleId.value)
+    transformAssetId.value = media.value[0]?.id
+    ElMessage.success('AI 配图已生成并设为封面')
+  } catch (error) {
+    ElMessage.error(getApiErrorMessage(error, 'AI 图片生成失败'))
+  } finally {
+    visualLoading.value = false
+  }
+}
+
+async function transformVisual() {
+  if (!selectedArticleId.value || !transformAssetId.value || !visualPrompt.value.trim()) return
+  visualLoading.value = true
+  try {
+    await workflowApi.transformImage({
+      article_id: selectedArticleId.value,
+      asset_id: transformAssetId.value,
+      prompt: visualPrompt.value.trim(),
+      model: editImageModel.value,
+      usage_type: 'COVER',
+    })
+    media.value = await workflowApi.articleMedia(selectedArticleId.value)
+    transformAssetId.value = media.value[0]?.id
+    ElMessage.success('AI 图片改造完成并设为封面')
+  } catch (error) {
+    ElMessage.error(getApiErrorMessage(error, 'AI 图片改造失败'))
+  } finally {
+    visualLoading.value = false
+  }
+}
+
+watch(visualMode, (mode) => {
+  if (mode === 'SEARCH' && !imageSearchResults.value.length) void searchVisuals()
+  if (mode !== 'SEARCH') void loadImageModels()
+})
 
 function scheduleCurrent() {
   if (!article.value || !current.value) return
@@ -799,7 +944,9 @@ onMounted(() => {
               </div>
             </div>
             <h3 v-if="editing.title">{{ editing.title }}</h3>
-            <p>{{ previewText }}</p>
+            <!-- 内容先经过 escapeHtml，再转换受限 Markdown；不接受原始 HTML。 -->
+            <!-- eslint-disable-next-line vue/no-v-html -->
+            <div class="preview-content" v-html="previewHtml" />
             <div v-if="editing.hashtags.length" class="preview-tags">
               {{ editing.hashtags.join(' ') }}
             </div>
@@ -815,6 +962,99 @@ onMounted(() => {
             <footer><span>喜欢</span><span>评论</span><span>分享</span></footer>
           </div>
         </div>
+        <section class="visual-assistant" data-testid="visual-assistant">
+          <header><Images :size="17" /><b>智能配图</b></header>
+          <el-segmented
+            v-model="visualMode"
+            :options="[
+              { label: '相关图片', value: 'SEARCH' },
+              { label: 'AI 生成', value: 'GENERATE' },
+              { label: 'AI 改造', value: 'TRANSFORM' },
+            ]"
+          />
+          <template v-if="visualMode === 'SEARCH'">
+            <div class="visual-search-row">
+              <el-input
+                v-model="visualKeyword"
+                placeholder="输入图片关键词"
+                @keyup.enter="searchVisuals"
+              />
+              <el-button :loading="visualLoading" @click="searchVisuals">搜索</el-button>
+            </div>
+            <small v-if="visualNotice">{{ visualNotice }}</small>
+            <div class="visual-result-grid">
+              <article v-for="item in imageSearchResults" :key="String(item.id)">
+                <img :src="String(item.thumbnailUrl)" :alt="String(item.altText || '相关图片')" />
+                <div>
+                  <button @click="selectVisual(item, 'COVER')">封面</button
+                  ><button @click="selectVisual(item, 'BODY')">正文</button>
+                </div>
+              </article>
+            </div>
+          </template>
+          <template v-else-if="visualMode === 'GENERATE'">
+            <el-input
+              v-model="visualPrompt"
+              type="textarea"
+              :rows="4"
+              placeholder="描述希望生成的图片"
+            />
+            <el-select v-model="textImageModel" class="w-full" placeholder="选择真实生图模型">
+              <el-option
+                v-for="model in textImageModels"
+                :key="model"
+                :label="model"
+                :value="model"
+              />
+            </el-select>
+            <el-select v-model="imageSize" class="w-full">
+              <el-option label="方形 1:1" value="1328x1328" />
+              <el-option label="横版 16:9" value="1664x928" />
+              <el-option label="竖版 9:16" value="928x1664" />
+            </el-select>
+            <el-button
+              type="primary"
+              :loading="visualLoading"
+              :disabled="!textImageModels.length"
+              @click="generateVisual"
+            >
+              <Sparkles :size="15" class="mr-1" />生成并设为封面
+            </el-button>
+          </template>
+          <template v-else>
+            <el-select v-model="transformAssetId" class="w-full" placeholder="选择要改造的图片">
+              <el-option
+                v-for="item in media"
+                :key="item.id"
+                :label="item.altText || `图片 ${item.id}`"
+                :value="item.id"
+              />
+            </el-select>
+            <el-input
+              v-model="visualPrompt"
+              type="textarea"
+              :rows="4"
+              placeholder="例如：改成清爽蓝色科技风，保留主体，不要文字"
+            />
+            <el-select v-model="editImageModel" class="w-full" placeholder="选择真实改图模型">
+              <el-option
+                v-for="model in editImageModels"
+                :key="model"
+                :label="model"
+                :value="model"
+              />
+            </el-select>
+            <el-button
+              type="primary"
+              :loading="visualLoading"
+              :disabled="!transformAssetId || !editImageModels.length"
+              @click="transformVisual"
+            >
+              <WandSparkles :size="15" class="mr-1" />生成改造版本
+            </el-button>
+          </template>
+          <el-button text @click="openMedia">打开完整媒体库</el-button>
+        </section>
       </aside>
     </div>
     <EmptyState v-else title="先创建一篇原文"

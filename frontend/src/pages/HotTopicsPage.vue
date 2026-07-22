@@ -98,6 +98,24 @@ async function createFromAngle(angle: TrendAngle) {
       tone: '专业自然',
       keywords: selected.value.tags,
     })
+    if (selected.value.imageUrl) {
+      try {
+        await workflowApi.selectMedia({
+          article_id: article.id,
+          source: 'HOT_TREND_REFERENCE',
+          source_id: selected.value.id,
+          image_url: selected.value.imageUrl,
+          thumbnail_url: selected.value.imageUrl,
+          photographer_name: selected.value.sourceName,
+          photographer_url: selected.value.url,
+          alt_text: `${selected.value.title} · 热点来源参考图，发布前请确认版权`,
+          search_keyword: selected.value.title,
+          usage_type: 'COVER',
+        })
+      } catch (error) {
+        ElMessage.warning(getApiErrorMessage(error, '热点文章已创建，但来源参考图保存失败'))
+      }
+    }
     drawerOpen.value = false
     await router.push({ name: 'studio', query: { article: article.id, mode: 'deep' } })
   } catch (error) {

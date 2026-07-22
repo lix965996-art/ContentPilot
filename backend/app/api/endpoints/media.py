@@ -1,5 +1,4 @@
 import uuid
-from pathlib import Path
 
 import httpx
 from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
@@ -13,15 +12,26 @@ from app.core.responses import success_response
 from app.db.session import get_db
 from app.models.business import ContentArticle, MediaAsset
 from app.models.user import User
-from app.schemas.business import KeywordRequest, MediaSelectRequest
+from app.schemas.business import (
+    KeywordRequest,
+    MediaImageGenerateRequest,
+    MediaImageTransformRequest,
+    MediaSelectRequest,
+)
 from app.services.audit_service import record_audit
-from app.services.generation_service import extract_keywords_with_llm
+from app.services.generation_service import extract_keywords_with_llm, load_llm_runtime
+from app.services.image_service import (
+    MEDIA_UPLOAD_DIR,
+    generate_provider_image,
+    list_image_models,
+    save_generated_asset,
+)
 from app.services.serializers import model_dict
 from app.services.setting_service import setting_value
 
 router = APIRouter(tags=["素材管理"])
 
-UPLOAD_DIR = Path(__file__).resolve().parents[4] / "uploads" / "media"
+UPLOAD_DIR = MEDIA_UPLOAD_DIR
 
 FALLBACK_IMAGES = [
     {
@@ -61,6 +71,119 @@ def _project_generated_items(keyword: str) -> list[dict]:
         }
         for item_id, filename, alt_text in PROJECT_GENERATED_IMAGES
     ]
+
+
+def _select_generated_asset(db: Session, asset: MediaAsset) -> None:
+    if asset.usage_type == "COVER":
+        db.query(MediaAsset).filter(
+            MediaAsset.article_id == asset.article_id, MediaAsset.usage_type == "COVER"
+        ).update({"selected": False})
+    db.add(asset)
+    db.flush()
+
+
+@router.get("/media/image-models")
+async def image_models(
+    request: Request,
+    db: Session = Depends(get_db),
+    _: User = Depends(require_roles("ADMIN", "OPERATOR")),
+) -> dict:
+    runtime = load_llm_runtime(db)
+    try:
+        models = await list_image_models(runtime)
+    except httpx.HTTPError as exc:
+        raise AppException(50220, f"读取图片模型失败：{exc}", 502) from exc
+    return success_response(
+        request,
+        {
+            "models": models,
+            "textToImage": [model for model in models if "Edit" not in model],
+            "imageToImage": [model for model in models if "Edit" in model],
+            "provider": runtime.provider,
+        },
+    )
+
+
+@router.post("/media/generate")
+async def generate_media_image(
+    payload: MediaImageGenerateRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+) -> dict:
+    if not db.get(ContentArticle, payload.article_id):
+        raise AppException(40401, "文章不存在", 404)
+    runtime = load_llm_runtime(db)
+    suffix, content, metadata = await generate_provider_image(
+        runtime,
+        prompt=payload.prompt,
+        model=payload.model,
+        image_size=payload.image_size,
+    )
+    asset = save_generated_asset(
+        article_id=payload.article_id,
+        variant_id=None,
+        prompt=payload.prompt,
+        model=payload.model,
+        usage_type=payload.usage_type,
+        source="AI_GENERATED",
+        suffix=suffix,
+        content=content,
+        base_url=str(request.base_url),
+    )
+    _select_generated_asset(db, asset)
+    record_audit(db, request, user, "GENERATE", "MEDIA", "MEDIA_ASSET", asset.id, metadata)
+    db.commit()
+    db.refresh(asset)
+    data = model_dict(asset, camel=True)
+    data["generationMetadata"] = metadata
+    return success_response(request, data, "AI 图片已生成并保存")
+
+
+@router.post("/media/transform")
+async def transform_media_image(
+    payload: MediaImageTransformRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+) -> dict:
+    source_asset = db.get(MediaAsset, payload.asset_id)
+    if not source_asset or source_asset.article_id != payload.article_id:
+        raise AppException(40404, "待改造图片不存在", 404)
+    runtime = load_llm_runtime(db)
+    suffix, content, metadata = await generate_provider_image(
+        runtime,
+        prompt=payload.prompt,
+        model=payload.model,
+        source_asset=source_asset,
+    )
+    asset = save_generated_asset(
+        article_id=payload.article_id,
+        variant_id=source_asset.variant_id,
+        prompt=payload.prompt,
+        model=payload.model,
+        usage_type=payload.usage_type,
+        source="AI_TRANSFORMED",
+        suffix=suffix,
+        content=content,
+        base_url=str(request.base_url),
+    )
+    _select_generated_asset(db, asset)
+    record_audit(
+        db,
+        request,
+        user,
+        "TRANSFORM",
+        "MEDIA",
+        "MEDIA_ASSET",
+        asset.id,
+        {**metadata, "sourceAssetId": source_asset.id},
+    )
+    db.commit()
+    db.refresh(asset)
+    data = model_dict(asset, camel=True)
+    data["generationMetadata"] = metadata
+    return success_response(request, data, "AI 图片改造完成并保存")
 
 
 @router.get("/media/search")

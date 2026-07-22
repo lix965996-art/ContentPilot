@@ -16,6 +16,7 @@ from app.services.generation_service import (
     edit_ratio,
     extract_keywords_with_llm,
     markdown_to_safe_html,
+    normalize_visible_markdown,
     review_variant_quality,
 )
 from app.services.wechat_formatting import format_wechat_html
@@ -74,6 +75,13 @@ def test_user_options_are_written_into_prompt() -> None:
         assert expected in prompt
     assert len(PLATFORM_PROFILES) == 3
     assert PROMPT_VERSION == "3.0.0"
+
+
+def test_visible_markdown_markers_are_cleaned() -> None:
+    value = "🌍 **两地高温：成因各异**\n* **吐鲁番**：沙漠边缘\n* 重庆：盆地"
+    assert normalize_visible_markdown(value) == (
+        "🌍 两地高温：成因各异\n• 吐鲁番：沙漠边缘\n• 重庆：盆地"
+    )
 
 
 @pytest.mark.asyncio

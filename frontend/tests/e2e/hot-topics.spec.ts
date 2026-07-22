@@ -90,6 +90,7 @@ test('a real-source trend angle enters deep creation mode', async ({ page }) => 
   await page.getByRole('button', { name: '用这个角度进入深度创作' }).click()
   await expect(page).toHaveURL(/\/studio\?article=41&mode=deep/)
   await expect(page.getByTestId('generation-mode-control').getByText('深度创作')).toBeVisible()
+  await expect(page.getByTestId('visual-assistant')).toBeVisible()
 })
 
 test('trend analysis failure shows a retry action instead of an empty drawer', async ({ page }) => {

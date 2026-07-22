@@ -111,6 +111,20 @@ export const workflowApi = {
       apiClient.get('/media/search', { params: { keyword } }),
     )
   },
+  imageModels() {
+    return unwrap<{
+      models: string[]
+      textToImage: string[]
+      imageToImage: string[]
+      provider: string
+    }>(apiClient.get('/media/image-models', { timeout: 45_000 }))
+  },
+  generateImage(data: Record<string, unknown>) {
+    return unwrap<MediaAsset>(apiClient.post('/media/generate', data, { timeout: 240_000 }))
+  },
+  transformImage(data: Record<string, unknown>) {
+    return unwrap<MediaAsset>(apiClient.post('/media/transform', data, { timeout: 240_000 }))
+  },
   uploadMedia(data: FormData) {
     return unwrap<Record<string, unknown>>(
       apiClient.post('/media/upload', data, { headers: { 'Content-Type': 'multipart/form-data' } }),

@@ -2158,7 +2158,8 @@ body,
   color: var(--sf-ink);
   font-size: 15px;
 }
-.platform-preview > p {
+.platform-preview > p,
+.preview-content {
   max-height: 200px;
   overflow: auto;
   margin: 14px 0;
@@ -2166,6 +2167,22 @@ body,
   font-size: 12px;
   line-height: 1.75;
   white-space: pre-wrap;
+}
+
+.preview-content p {
+  margin: 8px 0;
+}
+
+.preview-content h3,
+.preview-content h4,
+.preview-content h5 {
+  margin: 12px 0 6px;
+  color: var(--sf-ink);
+  font-size: 13px;
+}
+
+.preview-list-item {
+  margin: 5px 0;
 }
 .preview-tags {
   color: var(--sf-brand);
@@ -2201,6 +2218,77 @@ body,
   padding-top: 11px;
   color: var(--sf-subtle);
   font-size: 11px;
+}
+
+.visual-assistant {
+  display: grid;
+  gap: 10px;
+  margin: 0 16px 18px;
+  border: 1px solid var(--sf-line);
+  border-radius: 10px;
+  background: white;
+  padding: 13px;
+}
+
+.visual-assistant > header {
+  display: flex;
+  align-items: center;
+  gap: 7px;
+  color: var(--sf-ink);
+}
+
+.visual-assistant > small {
+  color: var(--sf-muted);
+  font-size: 10px;
+  line-height: 1.5;
+}
+
+.visual-search-row {
+  display: flex;
+  gap: 6px;
+}
+
+.visual-result-grid {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 6px;
+}
+
+.visual-result-grid article {
+  position: relative;
+  overflow: hidden;
+  min-height: 72px;
+  border-radius: 6px;
+  background: #f0f2f5;
+}
+
+.visual-result-grid img {
+  width: 100%;
+  height: 82px;
+  object-fit: cover;
+}
+
+.visual-result-grid article > div {
+  position: absolute;
+  right: 3px;
+  bottom: 3px;
+  left: 3px;
+  display: flex;
+  justify-content: center;
+  gap: 3px;
+  opacity: 0;
+}
+
+.visual-result-grid article:hover > div {
+  opacity: 1;
+}
+
+.visual-result-grid button {
+  border-radius: 4px;
+  background: rgba(17, 24, 39, 0.82);
+  padding: 3px 6px;
+  color: white;
+  font-size: 9px;
 }
 @media (max-width: 1280px) {
   .composer-shell {

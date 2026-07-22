@@ -14,6 +14,7 @@ frontend/coverage/
 frontend/playwright-report/
 frontend/test-results/
 frontend/artifacts/
+uploads/
 
 # Environment and editors
 .env

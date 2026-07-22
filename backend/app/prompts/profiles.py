@@ -36,6 +36,7 @@ PLATFORM_PROFILES = {
             "使用短段落，不编造热门话题、数据或亲身经历",
             "标签放入 hashtags 数组，最多 5 个；关闭标签时必须返回空数组",
             "Emoji 应克制，关闭 Emoji 时正文与标题不得出现 Emoji",
+            "正文使用纯文本，不要输出 **加粗**、* 列表等 Markdown 标记",
         ),
         output_schema=('{"title":"...","content":"...","hashtags":["#话题#"],"warnings":["..."]}'),
     ),
@@ -48,6 +49,7 @@ PLATFORM_PROFILES = {
             "标签放入 hashtags 数组，最多 10 个；关闭标签时必须返回空数组",
             "cover_text 是可选封面短句，最多 30 字",
             "关闭 Emoji 时标题、正文和封面短句不得出现 Emoji",
+            "正文使用纯文本，不要输出 **加粗**、* 列表等 Markdown 标记",
         ),
         output_schema=(
             '{"title":"...","content":"...","hashtags":["#标签"],'
@@ -63,6 +65,7 @@ PLATFORM_PROFILES = {
             "不要输出不安全 HTML；不要编造引用、数据和案例",
             "hashtags 仅作为后台关键词；关闭标签时必须返回空数组",
             "cover_prompt 用于配图检索，不得包含品牌侵权或虚构人物",
+            "可以使用 Markdown 二级标题，但不要使用 **加粗** 或以 * 开头的列表",
         ),
         output_schema=(
             '{"title":"...","summary":"...","content":"## 小标题\\n\\n正文",'
