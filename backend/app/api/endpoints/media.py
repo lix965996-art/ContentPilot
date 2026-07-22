@@ -26,51 +26,13 @@ from app.services.image_service import (
     list_image_models,
     save_generated_asset,
 )
+from app.services.media_search_service import search_unsplash, search_wikimedia_commons
 from app.services.serializers import model_dict
 from app.services.setting_service import setting_value
 
 router = APIRouter(tags=["素材管理"])
 
 UPLOAD_DIR = MEDIA_UPLOAD_DIR
-
-FALLBACK_IMAGES = [
-    {
-        "id": f"local-{i}",
-        "imageUrl": f"/media/fallback-{i}.svg",
-        "thumbnailUrl": f"/media/fallback-{i}.svg",
-        "source": "LOCAL",
-        "photographerName": "ContentPilot",
-        "photographerUrl": None,
-    }
-    for i in range(1, 11)
-]
-
-PROJECT_GENERATED_IMAGES = [
-    ("content-adaptation", "content-adaptation.webp", "多平台内容适配与分发"),
-    ("ai-brand-meaning", "ai-brand-meaning.webp", "AI 写作与品牌原意保护"),
-    ("content-calendar", "content-calendar.webp", "内容日历与团队协作"),
-    ("longform-reading", "longform-reading.webp", "长文章排版与阅读体验"),
-    ("visual-selection", "visual-selection.webp", "内容配图选择与裁切"),
-    ("team-workflow", "team-workflow.webp", "内容团队协作流程"),
-    ("content-experiment", "content-experiment.webp", "内容策略对照实验"),
-    ("publishing-schedule", "publishing-schedule.webp", "内容发布排期与时段规划"),
-]
-
-
-def _project_generated_items(keyword: str) -> list[dict]:
-    return [
-        {
-            "id": item_id,
-            "imageUrl": f"/media/generated/{filename}",
-            "thumbnailUrl": f"/media/generated/{filename}",
-            "source": "AI_GENERATED",
-            "photographerName": "ContentPilot AI",
-            "photographerUrl": None,
-            "altText": alt_text,
-            "searchKeyword": keyword,
-        }
-        for item_id, filename, alt_text in PROJECT_GENERATED_IMAGES
-    ]
 
 
 def _select_generated_asset(db: Session, asset: MediaAsset) -> None:
@@ -195,72 +157,36 @@ async def search_media(
     _: User = Depends(get_current_user),
 ) -> dict:
     access_key = setting_value(db, "media.unsplash_key", settings.unsplash_access_key)
+    providers: list[str] = []
+    warnings: list[str] = []
+    try:
+        items = await search_wikimedia_commons(keyword)
+        providers.append("Wikimedia Commons")
+    except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+        items = []
+        warnings.append(f"Wikimedia Commons 搜索失败：{type(exc).__name__}")
+
     if access_key:
         try:
-            async with httpx.AsyncClient(timeout=10) as client:
-                response = await client.get(
-                    "https://api.unsplash.com/search/photos",
-                    params={"query": keyword, "page": page, "per_page": 15},
-                    headers={"Authorization": f"Client-ID {access_key}"},
-                )
-                response.raise_for_status()
-                items = [
-                    {
-                        "id": item["id"],
-                        "imageUrl": item["urls"]["regular"],
-                        "thumbnailUrl": item["urls"]["small"],
-                        "source": "UNSPLASH",
-                        "photographerName": item["user"]["name"],
-                        "photographerUrl": item["user"]["links"]["html"],
-                        "altText": item.get("alt_description") or keyword,
-                        "searchKeyword": keyword,
-                    }
-                    for item in response.json().get("results", [])
-                ]
-                if items:
-                    return success_response(
-                        request,
-                        {
-                            "items": [*_project_generated_items(keyword), *items],
-                            "page": page,
-                            "source": "MIXED",
-                            "notice": "项目 AI 素材与 Unsplash 搜索结果",
-                        },
-                    )
-        except (httpx.HTTPError, KeyError, ValueError):
-            pass
-    generated_items = _project_generated_items(keyword)
-    if generated_items:
-        return success_response(
-            request,
-            {
-                "items": generated_items,
-                "page": page,
-                "source": "AI_GENERATED",
-                "notice": "8 张项目内置 AI 生成素材",
-            },
-        )
-    if not (settings.app_demo_mode and settings.media_fallback_enabled):
-        return success_response(
-            request,
-            {
-                "items": [],
-                "page": page,
-                "source": "UNCONFIGURED",
-                "notice": "未配置 Unsplash，您仍可上传本地图片作为真实素材。",
-            },
-        )
-    items = [
-        {**item, "altText": f"{keyword} 配图", "searchKeyword": keyword} for item in FALLBACK_IMAGES
-    ]
+            items.extend(await search_unsplash(keyword, access_key, page=page))
+            providers.append("Unsplash")
+        except (httpx.HTTPError, KeyError, TypeError, ValueError) as exc:
+            warnings.append(f"Unsplash 搜索失败：{type(exc).__name__}")
+
+    if not providers:
+        raise AppException(50222, "联网图片搜索失败，请检查网络后重试", 502)
+
+    source = (
+        "MIXED"
+        if len(providers) > 1
+        else ("UNSPLASH" if providers[0] == "Unsplash" else "WIKIMEDIA_COMMONS")
+    )
+    notice = f"已联网搜索 {' + '.join(providers)} · {len(items)} 张图片"
+    if warnings:
+        notice += f"；{'；'.join(warnings)}"
     return success_response(
         request,
-        {
-            "items": items,
-            "page": page,
-            "source": "LOCAL_FALLBACK",
-            "notice": "演示模式：当前展示本地备用图库",
-        },
+        {"items": items, "page": page, "source": source, "notice": notice, "online": True},
     )
 
 

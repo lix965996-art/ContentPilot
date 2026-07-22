@@ -2268,6 +2268,17 @@ body,
   object-fit: cover;
 }
 
+.visual-source {
+  position: absolute;
+  top: 4px;
+  left: 4px;
+  border-radius: 999px;
+  background: rgba(17, 24, 39, 0.76);
+  padding: 2px 5px;
+  color: white;
+  font-size: 8px;
+}
+
 .visual-result-grid article > div {
   position: absolute;
   right: 3px;
@@ -2283,7 +2294,8 @@ body,
   opacity: 1;
 }
 
-.visual-result-grid button {
+.visual-result-grid button,
+.visual-result-grid a {
   border-radius: 4px;
   background: rgba(17, 24, 39, 0.82);
   padding: 3px 6px;

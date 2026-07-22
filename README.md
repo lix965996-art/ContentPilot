@@ -144,7 +144,7 @@ Copy-Item backend\.env.example backend\.env
 ## 素材与数据说明
 
 - 项目内置 8 张由 AI 生成的 WebP 编辑素材，位于 `frontend/public/media/generated/`；
-- 配置 `UNSPLASH_ACCESS_KEY` 后可同时搜索 Unsplash；
+- “相关图片”默认联网搜索无需密钥的 Wikimedia Commons，并显示来源入口；配置 `UNSPLASH_ACCESS_KEY` 后会同时合并 Unsplash 结果；网络失败时会明确报错，不会用本地素材冒充搜索结果；
 - 硅基流动配置完成后，智能配图会实时读取账号可用的文生图和图生图模型；图片生成与改造会产生服务商费用；
 - 从热点榜单带入的图片只作为来源参考图，正式发布前需要自行确认版权和使用许可；
 - 仅在主动开启演示数据时写入的互动样本会标记为 `SIMULATED`，不参与真实发布状态；

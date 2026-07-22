@@ -984,10 +984,24 @@ onMounted(() => {
             <small v-if="visualNotice">{{ visualNotice }}</small>
             <div class="visual-result-grid">
               <article v-for="item in imageSearchResults" :key="String(item.id)">
-                <img :src="String(item.thumbnailUrl)" :alt="String(item.altText || '相关图片')" />
+                <img
+                  :src="String(item.thumbnailUrl)"
+                  :alt="String(item.altText || '相关图片')"
+                  :title="String(item.altText || '')"
+                />
+                <span class="visual-source">
+                  联网 · {{ item.source === 'UNSPLASH' ? 'Unsplash' : 'Commons' }}
+                </span>
                 <div>
                   <button @click="selectVisual(item, 'COVER')">封面</button
-                  ><button @click="selectVisual(item, 'BODY')">正文</button>
+                  ><button @click="selectVisual(item, 'BODY')">正文</button
+                  ><a
+                    v-if="item.photographerUrl"
+                    :href="String(item.photographerUrl)"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    >来源</a
+                  >
                 </div>
               </article>
             </div>
