@@ -7,25 +7,31 @@ $venvPython = Join-Path $backend '.venv\Scripts\python.exe'
 
 Write-Host 'ContentPilot first-time setup / dependency update' -ForegroundColor Cyan
 if (-not (Test-Path -LiteralPath $venvPython)) {
-  $python = $null
-  $candidates = @('F:\anaconda3\python.exe','F:\miniconda3\python.exe','F:\Anaconda\python.exe','F:\Miniconda3\python.exe')
+  $pythonExe = $null
+  $pythonArgs = @()
   $py = Get-Command py.exe -ErrorAction SilentlyContinue
   if ($py) {
     & $py.Source -3.12 -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3,12) else 1)" 2>$null
-    if ($LASTEXITCODE -eq 0) { $python = "$($py.Source) -3.12" }
+    if ($LASTEXITCODE -eq 0) {
+      $pythonExe = $py.Source
+      $pythonArgs = @('-3.12')
+    }
   }
-  if (-not $python) {
-    foreach ($candidate in $candidates) {
-      if (Test-Path -LiteralPath $candidate) {
-        & $candidate -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3,12) else 1)" 2>$null
-        if ($LASTEXITCODE -eq 0) { $python = $candidate; break }
+  if (-not $pythonExe) {
+    foreach ($commandName in @('python.exe', 'python3.exe')) {
+      $candidate = Get-Command $commandName -ErrorAction SilentlyContinue
+      if (-not $candidate) { continue }
+      & $candidate.Source -c "import sys; raise SystemExit(0 if sys.version_info[:2] == (3,12) else 1)" 2>$null
+      if ($LASTEXITCODE -eq 0) {
+        $pythonExe = $candidate.Source
+        break
       }
     }
   }
-  if (-not $python) { throw 'Python 3.12 was not found (py launcher and common F drive Conda paths checked).' }
+  if (-not $pythonExe) { throw 'Python 3.12 was not found. Install it or expose it through py/python.' }
   Write-Host '[1/5] Creating Python 3.12 virtual environment...'
-  if ($python -match ' -3.12$') { & ($python -replace ' -3.12$','') -3.12 -m venv (Join-Path $backend '.venv') }
-  else { & $python -m venv (Join-Path $backend '.venv') }
+  & $pythonExe @pythonArgs -m venv (Join-Path $backend '.venv')
+  if ($LASTEXITCODE -ne 0) { throw 'Python virtual environment creation failed.' }
 }
 
 Write-Host '[2/5] Syncing backend dependencies...'
@@ -53,4 +59,4 @@ finally { Pop-Location }
 $runtime = Join-Path $projectRoot '.runtime'
 New-Item -ItemType Directory -Force -Path $runtime | Out-Null
 Set-Content -LiteralPath (Join-Path $runtime 'setup.complete') -Value (Get-Date -Format o) -Encoding UTF8
-Write-Host 'Setup complete. Use the root start shortcut for future launches.' -ForegroundColor Green
+Write-Host 'Setup complete. Run .\contentpilot.ps1 start from the project root.' -ForegroundColor Green

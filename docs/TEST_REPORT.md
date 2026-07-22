@@ -14,7 +14,7 @@
 | Alembic MySQL | `d7bc40428afb (head)` |
 | MySQL seed | 12 篇文章、36 个平台版本、20 个排期、14 天指标、2 个实验、平台规则与 10 张本地图 |
 | API/Web 健康 | 8000/5173 HTTP 200，数据库 connected |
-| Windows 启动器 | stop/status/start/status 实测通过 |
+| 启动与部署 | 单一 PowerShell 入口的 stop/status/start/status 实测通过；Compose 配置纳入仓库 |
 
 ## 集成覆盖
 

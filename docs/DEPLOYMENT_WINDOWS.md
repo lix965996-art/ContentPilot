@@ -1,48 +1,63 @@
-# Windows 部署与启动
+# ContentPilot 启动与部署
 
-## 前置环境
+## 正式环境：Docker Compose
 
-- Windows 10/11；
-- Python 3.12；项目已有 `.venv` 时不依赖当前 Conda 激活状态；
-- Node.js 20+；
-- MySQL 8，默认 `root / 123456 @ 127.0.0.1:3306`。
+正式环境使用 `compose.yaml` 管理三个服务：
 
-用户的 Conda 位于 F 盘时无需移动。首次安装脚本会依次检查 `py -3.12` 和 `F:\anaconda3`、`F:\miniconda3` 等常见路径。若 F 盘环境不是 Python 3.12，请保留项目现有 `.venv` 或安装 3.12 环境。
+- `web`：Nginx 提供前端静态文件，并反向代理 `/api` 与 `/uploads`；
+- `backend`：FastAPI API、数据库迁移、初始化和任务调度；
+- `db`：MySQL 8.4，数据写入命名卷 `mysql_data`。
 
-## 推荐启动
+首次部署：
 
-第一次或依赖有变化时双击 `首次安装或更新依赖.bat`。之后只需双击 `启动 ContentPilot.bat`；它不会重复安装依赖，会：
-
-1. 检查 venv、Node 和 Vite；
-2. 检查端口是否被非本项目进程占用；
-3. 后台启动 API 与 Web；
-4. 写日志到 `logs/api*.log` 和 `logs/web*.log`；
-5. 等待两个健康地址返回 200；
-6. 打开浏览器。
-
-`查看运行状态.bat` 查看精确 PID；`停止 ContentPilot.bat` 校验 PID 和启动时间后停止该进程树，不按端口误杀其他程序。
-
-兼容命令行入口：`scripts\start-dev.bat`、`scripts\stop-dev.bat`、`scripts\init-db.bat`、`scripts\run-tests.bat`。
-
-## 环境变量
-
-复制 `backend/.env.example` 为 `backend/.env`。生产或联网演示至少修改：
-
-```env
-DATABASE_URL=mysql+pymysql://user:password@127.0.0.1:3306/socialflow?charset=utf8mb4
-JWT_SECRET=至少32位随机字符串
-LLM_PROVIDER=mock
-PUBLISH_MODE=mock
+```powershell
+Copy-Item .env.example .env
+# 修改 .env 中的数据库密码、JWT_SECRET 和 PLATFORM_CREDENTIAL_KEY
+docker compose up -d --build
+docker compose ps
 ```
 
-OpenAI 兼容模型还需要 `LLM_BASE_URL`、`LLM_API_KEY`、`LLM_MODEL`。无密钥保持 mock 即可完全离线运行。
+`backend` 每次启动都会幂等执行 Alembic migration 和基础数据 seed。`web` 只会在 API 健康检查通过后启动。MySQL 数据与用户上传文件保存在 Docker 卷中，普通的 `docker compose down` 不会删除它们。
 
-## 常见错误
+更新与排障：
 
-- 端口 5173/8000 占用：查看提示，不要直接杀未知进程；关闭占用程序或修改启动端口及 Vite 代理。
-- MySQL 连接失败：确认 MySQL80 服务、账号密码和数据库端口；运行 `scripts\init-db.bat`。
-- 首次没有 Chromium：在 `frontend` 执行 `npx playwright install chromium`。
-- 启动失败：查看 `logs/api-error.log` 或 `logs/web-error.log`。
-- 页面提示外部模型失败：系统会回退 Mock；核对 Base URL 是否包含正确版本路径和 Key。
+```powershell
+docker compose up -d --build
+docker compose logs -f backend
+docker compose logs -f web
+docker compose logs -f db
+docker compose down
+```
 
-正式公开部署前必须修改演示账号、JWT 密钥、数据库密码和 CORS 白名单，并使用 HTTPS 反向代理。
+不要在生产环境提交 `.env`，不要使用示例密钥，也不要轻易执行 `docker compose down --volumes`。
+
+## Windows 本地开发
+
+本地模式需要 Python 3.12、Node.js 20+ 和 MySQL 8。所有用户操作统一通过根目录的 `contentpilot.ps1`：
+
+```powershell
+.\contentpilot.ps1 setup
+.\contentpilot.ps1 start
+.\contentpilot.ps1 status
+.\contentpilot.ps1 logs -Follow
+.\contentpilot.ps1 stop
+```
+
+启动器会：
+
+1. 检查后端虚拟环境和前端依赖；
+2. 执行 Alembic migration；
+3. 分别启动 API 与 Vite 开发服务器；
+4. 将 PID 和启动时间写入 `.runtime/`；
+5. 将日志写入 `logs/`；
+6. 等待健康检查通过后打开浏览器。
+
+本地 Web 为 `http://127.0.0.1:5173`，API 文档为 `http://127.0.0.1:8000/docs`。
+
+## 常见问题
+
+- PowerShell 拒绝执行脚本：先运行 `Set-ExecutionPolicy -Scope Process Bypass`；
+- 端口 5173/8000 被占用：运行 `.\contentpilot.ps1 status`，不要直接结束未知进程；
+- MySQL 连接失败：检查 `backend/.env`，需要时运行 `.\contentpilot.ps1 db`；
+- 本地启动失败：运行 `.\contentpilot.ps1 logs`；
+- Docker 启动失败：运行 `docker compose ps` 和 `docker compose logs` 查看具体服务。

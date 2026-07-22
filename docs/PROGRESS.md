@@ -15,7 +15,7 @@
 | 8 实验 | 已完成 | 两类实验、状态、分组样本、统计、结果和报告 API | 创建→开始→结束集成测试 |
 | 9 测试与文档 | 已完成 | 需求/系统/数据库/API/Prompt/实验/部署/测试/答辩文档 | Ruff、pytest 14、ESLint、TS build、Vitest 3、Playwright 3 |
 | UI 重构 | 已完成 | GitHub 开源 UI 调研；工作台、登录和全部业务页重构；路由懒加载 | 1280×720 截图复核，无横向溢出 |
-| 启动体验 | 已完成 | 首次安装与日常启动分离；后台进程、日志、健康等待、精确 PID 树停止、状态脚本 | 实际 stop→status→start→status |
+| 启动体验 | 已完成 | Docker Compose 正式部署；单一 PowerShell 本地入口；后台进程、日志、健康等待和精确 PID 管理 | Compose 配置审查；本地 stop→status→start→status |
 
 ## 当前结论
 
