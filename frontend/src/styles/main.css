@@ -1488,24 +1488,66 @@ body,
 }
 .generation-progress {
   margin-bottom: 14px;
-  border: 1px solid var(--sf-line);
+  border: 1px solid #dbe8f8;
   border-radius: var(--sf-radius);
-  background: white;
-  padding: 14px;
+  background: linear-gradient(180deg, #f8fbff 0, #fff 112px);
+  padding: 16px;
 }
-.generation-progress > header,
-.generation-progress > header > div {
+.generation-progress > header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 12px;
 }
 .generation-progress > header > div {
-  justify-content: flex-start;
+  display: flex;
+  align-items: flex-start;
+  flex-direction: column;
+  gap: 3px;
 }
 .generation-progress header span {
   color: var(--sf-muted);
   font-size: 12px;
+}
+.generation-percentage {
+  color: var(--sf-blue);
+  font-size: 18px;
+  font-variant-numeric: tabular-nums;
+}
+.generation-overall-track,
+.platform-progress-track {
+  overflow: hidden;
+  height: 5px;
+  border-radius: 999px;
+  background: #e8eef6;
+}
+.generation-overall-track {
+  margin-top: 12px;
+}
+.generation-overall-track > span,
+.platform-progress-track > span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: linear-gradient(90deg, #2f80ed, #66a9ff);
+  transition: width 300ms ease;
+}
+.generation-wait-hint {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 16px;
+  margin-top: 10px;
+  border-radius: 7px;
+  background: #eef6ff;
+  padding: 8px 10px;
+  color: #31597e;
+  font-size: 12px;
+}
+.generation-wait-hint small {
+  flex-shrink: 0;
+  color: #6e89a5;
+  font-size: 10px;
 }
 .generation-progress-grid {
   display: grid;
@@ -1515,12 +1557,13 @@ body,
 }
 .generation-progress-grid article {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: 9px;
   min-width: 0;
   border: 1px solid #edf0f3;
   border-radius: 7px;
   padding: 9px;
+  background: #fff;
 }
 .generation-progress-grid article > div {
   min-width: 0;
@@ -1530,6 +1573,53 @@ body,
 .generation-progress-grid span,
 .generation-progress-grid small {
   display: block;
+}
+.platform-progress-heading {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+}
+.platform-progress-heading > span {
+  flex-shrink: 0;
+  border-radius: 999px;
+  padding: 2px 6px;
+  background: #eef2f6;
+  font-variant-numeric: tabular-nums;
+}
+.platform-progress-heading > .status-running,
+.platform-progress-heading > .status-retrying {
+  background: #e8f2ff;
+  color: #1769c2;
+}
+.platform-progress-heading > .status-success {
+  background: #eaf8ef;
+  color: #23864b;
+}
+.platform-progress-heading > .status-failed {
+  background: #fff0f0;
+  color: #c64242;
+}
+.generation-progress-grid .platform-stage {
+  min-height: 30px;
+  margin-top: 6px;
+  overflow: visible;
+  color: #566575;
+  line-height: 1.45;
+  text-overflow: unset;
+  white-space: normal;
+}
+.platform-progress-track {
+  height: 4px;
+  margin: 7px 0 5px;
+}
+.generation-progress-grid .platform-error {
+  margin-top: 4px;
+  overflow: visible;
+  color: #c64242;
+  line-height: 1.4;
+  text-overflow: unset;
+  white-space: normal;
 }
 .generation-progress-grid b {
   font-size: 12px;
@@ -1863,6 +1953,14 @@ body,
   }
 }
 @media (max-width: 1024px) {
+  .generation-progress-grid {
+    grid-template-columns: 1fr;
+  }
+  .generation-wait-hint {
+    align-items: flex-start;
+    flex-direction: column;
+    gap: 3px;
+  }
   .composer-shell {
     grid-template-columns: 210px 1fr;
   }

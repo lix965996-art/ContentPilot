@@ -106,6 +106,46 @@ async def test_structured_output_validation_retries(monkeypatch) -> None:
     assert completion_tokens == 10
 
 
+@pytest.mark.asyncio
+async def test_generation_reports_concrete_processing_stages(monkeypatch) -> None:
+    events: list[tuple[str, dict]] = []
+    responses = iter(
+        [
+            ('{"title":"缺少正文"}', 10, 2),
+            (
+                '{"title":"有效标题","content":"校验修正后的正文内容。",'
+                '"hashtags":[],"warnings":[]}',
+                12,
+                8,
+            ),
+        ]
+    )
+
+    async def fake_chat(*_args, **_kwargs):
+        return next(responses)
+
+    async def capture(status: str, detail: dict) -> None:
+        events.append((status, detail))
+
+    monkeypatch.setattr(generation_service, "_chat_completion", fake_chat)
+    await _validated_completion(
+        LlmRuntime("openai-compatible", "key", "https://example.test", "model"),
+        "system",
+        "user",
+        WeiboGenerationOutput,
+        status_callback=capture,
+    )
+
+    assert [detail["stage"] for _, detail in events] == [
+        "REQUESTING_MODEL",
+        "VALIDATING_OUTPUT",
+        "REQUESTING_MODEL",
+        "VALIDATING_OUTPUT",
+    ]
+    assert events[2][0] == "RETRYING"
+    assert events[2][1]["message"] == "第 2 次请求模型修正输出"
+
+
 def test_three_platforms_generate_in_parallel(client: TestClient, login_as, monkeypatch) -> None:
     token = login_as("operator", "Operator@123456")["access_token"]
     auth = headers(token)
@@ -147,6 +187,8 @@ def test_three_platforms_generate_in_parallel(client: TestClient, login_as, monk
     assert task["status"] == "SUCCESS"
     assert len(task["variants"]) == 3
     assert all(item["status"] == "SUCCESS" for item in task["platformStatusJson"].values())
+    assert all(item["stage"] == "COMPLETED" for item in task["platformStatusJson"].values())
+    assert all(item["message"] == "平台版本已生成" for item in task["platformStatusJson"].values())
     assert elapsed < 0.32
 
 

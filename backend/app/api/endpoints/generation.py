@@ -1,6 +1,7 @@
 import asyncio
 import time
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Request
@@ -32,11 +33,14 @@ def _initial_platform_status(platforms: list[str]) -> dict[str, dict[str, Any]]:
         platform: {
             "status": "PENDING",
             "progress": 0,
+            "stage": "QUEUED",
+            "message": "已进入队列，等待开始处理",
             "attempt": 0,
             "variantId": None,
             "error": None,
             "durationMs": 0,
             "tokenUsage": 0,
+            "updatedAt": datetime.now(UTC).isoformat(),
         }
         for platform in platforms
     }
@@ -76,21 +80,26 @@ async def _run_generation_task(task_id: str) -> None:
                     return
                 states = dict(task.platform_status_json or {})
                 state = dict(states.get(platform, {}))
+                previous_progress = int(state.get("progress", 0))
                 state.update(detail)
                 state["status"] = status
-                state["progress"] = {
+                fallback_progress = {
                     "PENDING": 0,
                     "RUNNING": 35,
                     "RETRYING": 65,
                     "SUCCESS": 100,
                     "FAILED": 100,
                 }[status]
+                state["progress"] = max(
+                    previous_progress, int(detail.get("progress", fallback_progress))
+                )
+                state["updatedAt"] = datetime.now(UTC).isoformat()
                 states[platform] = state
                 task.platform_status_json = states
-                terminal = sum(
-                    1 for item in states.values() if item.get("status") in {"SUCCESS", "FAILED"}
+                task.progress = int(
+                    sum(int(item.get("progress", 0)) for item in states.values())
+                    / max(1, len(states))
                 )
-                task.progress = int(terminal / max(1, len(states)) * 100)
                 task.status = "RUNNING"
                 state_db.commit()
 
@@ -138,8 +147,26 @@ async def _run_generation_task(task_id: str) -> None:
                         getattr(result, "message", None) or str(result) or type(result).__name__
                     )
                     errors.append(f"{platform}: {message}")
-                    await update_platform(platform, "FAILED", {"error": message})
+                    await update_platform(
+                        platform,
+                        "FAILED",
+                        {
+                            "progress": 100,
+                            "stage": "FAILED",
+                            "message": "生成失败，可单独重试此平台",
+                            "error": message,
+                        },
+                    )
                     continue
+                await update_platform(
+                    platform,
+                    "RUNNING",
+                    {
+                        "progress": 90,
+                        "stage": "SAVING_RESULT",
+                        "message": "模型输出已通过校验，正在保存版本",
+                    },
+                )
                 variant = save_variant(db, article, platform, result)
                 db.commit()
                 db.refresh(variant)
@@ -152,6 +179,9 @@ async def _run_generation_task(task_id: str) -> None:
                     "SUCCESS",
                     {
                         "variantId": variant.id,
+                        "progress": 100,
+                        "stage": "COMPLETED",
+                        "message": "平台版本已生成",
                         "attempt": result.attempts,
                         "error": None,
                         "durationMs": result.duration_ms,

@@ -55,7 +55,10 @@ const reviewResult = ref<Record<string, unknown>>()
 const saved = ref(true)
 const savedToast = ref(false)
 const showWechatFormatter = ref(false)
+const clock = ref(Date.now())
+const operationStartedAt = ref<number>()
 let pollingSequence = 0
+let clockTimer: number | undefined
 
 const options = reactive({
   platforms: ['WEIBO', 'XIAOHONGSHU', 'WECHAT_OFFICIAL'] as Platform[],
@@ -97,8 +100,9 @@ const terminalTask = computed(() =>
     ? ['SUCCESS', 'PARTIAL_SUCCESS', 'FAILED'].includes(generationTask.value.status)
     : true,
 )
+const taskPlatforms = computed(() => generationTask.value?.platformsJson || options.platforms)
 const progressEntries = computed(() =>
-  options.platforms.map((platform) => ({
+  taskPlatforms.value.map((platform) => ({
     platform,
     state: generationTask.value?.platformStatusJson?.[platform] || {
       status: 'PENDING' as const,
@@ -109,6 +113,55 @@ const progressEntries = computed(() =>
     },
   })),
 )
+const completedPlatformCount = computed(
+  () =>
+    progressEntries.value.filter((item) => ['SUCCESS', 'FAILED'].includes(item.state.status))
+      .length,
+)
+const taskElapsedMs = computed(() => {
+  if (terminalTask.value) return generationTask.value?.durationMs || 0
+  const createdAt = generationTask.value?.createdAt
+    ? Date.parse(generationTask.value.createdAt)
+    : Number.NaN
+  const startedAt = Number.isNaN(createdAt) ? operationStartedAt.value : createdAt
+  return startedAt ? Math.max(0, clock.value - startedAt) : 0
+})
+const lastProgressAt = computed(() => {
+  const timestamps = progressEntries.value
+    .map((item) => item.state.updatedAt)
+    .filter((value): value is string => Boolean(value))
+    .map((value) => Date.parse(value))
+    .filter((value) => !Number.isNaN(value))
+  const taskUpdatedAt = generationTask.value?.updatedAt
+    ? Date.parse(generationTask.value.updatedAt)
+    : Number.NaN
+  if (!Number.isNaN(taskUpdatedAt)) timestamps.push(taskUpdatedAt)
+  return timestamps.length ? Math.max(...timestamps) : undefined
+})
+const taskStatusLabel = computed(() => {
+  const labels: Record<GenerationTask['status'], string> = {
+    PENDING: '等待开始',
+    RUNNING: '正在生成',
+    SUCCESS: '全部完成',
+    PARTIAL_SUCCESS: '部分完成',
+    FAILED: '生成失败',
+  }
+  return generationTask.value ? labels[generationTask.value.status] : '等待开始'
+})
+const waitHint = computed(() => {
+  if (!generationTask.value) return ''
+  if (generationTask.value.status === 'PARTIAL_SUCCESS')
+    return '成功的平台结果已经保留；失败的平台可以单独重试。'
+  if (generationTask.value.status === 'FAILED') return '任务已结束，请查看各平台失败原因后重试。'
+  if (generationTask.value.status === 'SUCCESS') return '平台结果已自动刷新，可以继续编辑和审核。'
+  if (progressEntries.value.some((item) => item.state.status === 'RETRYING'))
+    return '有平台输出未通过校验，系统正在自动修正并重试。'
+  if (taskElapsedMs.value >= 45_000)
+    return '模型响应时间较长，系统仍在等待；无需重复提交，失败时会显示具体原因。'
+  if (progressEntries.value.some((item) => item.state.stage === 'REQUESTING_MODEL'))
+    return '模型正在生成内容，耗时会受文章长度和服务商负载影响。'
+  return '任务会自动刷新每个平台的处理阶段，无需重复点击生成。'
+})
 const qualityDimensions = computed<Array<[string, string | number]>>(() => {
   const detail = reviewResult.value || {}
   const value = (camelCase: string, snakeCase: string): string | number => {
@@ -127,6 +180,24 @@ const qualityDimensions = computed<Array<[string, string | number]>>(() => {
 function formatDuration(milliseconds: number) {
   if (!milliseconds) return '计算中'
   return milliseconds >= 1000 ? `${(milliseconds / 1000).toFixed(1)} 秒` : `${milliseconds} 毫秒`
+}
+
+function platformStatusLabel(status: string) {
+  return (
+    {
+      PENDING: '排队中',
+      RUNNING: '处理中',
+      RETRYING: '自动重试',
+      SUCCESS: '已完成',
+      FAILED: '失败',
+    }[status] || status
+  )
+}
+
+function formatLastUpdate(timestamp?: number) {
+  if (!timestamp) return '等待首次进度'
+  const seconds = Math.max(0, Math.floor((clock.value - timestamp) / 1000))
+  return seconds < 2 ? '刚刚更新' : `${seconds} 秒前更新`
 }
 
 function persistPreferences() {
@@ -198,7 +269,7 @@ function syncEditor() {
 
 async function pollTask(taskId: string) {
   const sequence = ++pollingSequence
-  for (let attempt = 0; attempt < 240 && sequence === pollingSequence; attempt += 1) {
+  for (let attempt = 0; attempt < 1200 && sequence === pollingSequence; attempt += 1) {
     const result = await workflowApi.task(taskId)
     generationTask.value = result
     if (result.variants?.length) {
@@ -225,6 +296,7 @@ async function generate() {
   }
   generating.value = true
   generationTask.value = undefined
+  operationStartedAt.value = Date.now()
   try {
     const task = await workflowApi.generate({ article_id: selectedArticleId.value, ...options })
     const result = await pollTask(task.taskId)
@@ -243,6 +315,7 @@ async function generate() {
 async function retryFailed(platform: Platform) {
   if (!generationTask.value) return
   generating.value = true
+  operationStartedAt.value = Date.now()
   try {
     const task = await workflowApi.retryTaskPlatform(generationTask.value.id, platform)
     options.platforms = [platform]
@@ -295,6 +368,7 @@ async function deleteVersion() {
 async function regenerate() {
   if (!current.value) return
   generating.value = true
+  operationStartedAt.value = Date.now()
   try {
     const task = await workflowApi.regenerate(current.value.id)
     options.platforms = [current.value.platform]
@@ -380,8 +454,12 @@ watch(
 )
 onBeforeUnmount(() => {
   pollingSequence += 1
+  if (clockTimer) window.clearInterval(clockTimer)
 })
-onMounted(() => loadArticles().catch((error) => ElMessage.error(getApiErrorMessage(error))))
+onMounted(() => {
+  clockTimer = window.setInterval(() => (clock.value = Date.now()), 1000)
+  loadArticles().catch((error) => ElMessage.error(getApiErrorMessage(error)))
+})
 </script>
 
 <template>
@@ -394,21 +472,32 @@ onMounted(() => loadArticles().catch((error) => ElMessage.error(getApiErrorMessa
       <span class="save-state">{{ saved ? '已保存' : '有未保存修改' }}</span>
       <el-button :disabled="!current" @click="save"><Save :size="15" class="mr-1" />保存</el-button>
       <el-button type="primary" :loading="generating" @click="generate">
-        <Send :size="15" class="mr-1" />生成平台版本
+        <Send :size="15" class="mr-1" />{{ generating ? '正在生成…' : '生成平台版本' }}
       </el-button>
     </PageHeader>
 
     <section v-if="generationTask" class="generation-progress" data-testid="generation-progress">
       <header>
         <div>
-          <strong>生成进度 · {{ generationTask.status }}</strong>
-          <span>{{ generationTask.provider }} / {{ generationTask.modelName }}</span>
+          <strong>{{ taskStatusLabel }}</strong>
+          <span>
+            {{ completedPlatformCount }}/{{ progressEntries.length }} 个平台处理完成 · 已用时
+            {{ formatDuration(taskElapsedMs) }}
+          </span>
           <small v-if="terminalTask" class="generation-metrics">
-            {{ generationTask.tokenUsage }} Token · {{ formatDuration(generationTask.durationMs) }}
+            {{ generationTask.provider }} / {{ generationTask.modelName }} ·
+            {{ generationTask.tokenUsage }} Token
           </small>
         </div>
-        <span>{{ generationTask.progress }}%</span>
+        <strong class="generation-percentage">{{ generationTask.progress }}%</strong>
       </header>
+      <div class="generation-overall-track" aria-label="任务总进度">
+        <span :style="{ width: `${generationTask.progress}%` }" />
+      </div>
+      <div class="generation-wait-hint" data-testid="generation-wait-hint">
+        <span>{{ waitHint }}</span>
+        <small>{{ formatLastUpdate(lastProgressAt) }} · 进度按真实处理阶段计算</small>
+      </div>
       <div class="generation-progress-grid">
         <article
           v-for="item in progressEntries"
@@ -416,10 +505,22 @@ onMounted(() => loadArticles().catch((error) => ElMessage.error(getApiErrorMessa
           :data-testid="`platform-progress-${item.platform}`"
         >
           <PlatformIcon :platform="item.platform" size="sm" />
-          <div>
-            <b>{{ platformNames[item.platform] }}</b>
-            <span>{{ item.state.status }} · {{ item.state.progress }}%</span>
-            <small v-if="item.state.error">{{ item.state.error }}</small>
+          <div class="platform-progress-content">
+            <div class="platform-progress-heading">
+              <b>{{ platformNames[item.platform] }}</b>
+              <span :class="`status-${item.state.status.toLowerCase()}`">
+                {{ platformStatusLabel(item.state.status) }} · {{ item.state.progress }}%
+              </span>
+            </div>
+            <span class="platform-stage">{{ item.state.message || '等待开始处理' }}</span>
+            <div class="platform-progress-track">
+              <span :style="{ width: `${item.state.progress}%` }" />
+            </div>
+            <small v-if="item.state.attempt > 1">第 {{ item.state.attempt }} 次尝试</small>
+            <small v-if="item.state.status === 'SUCCESS'">
+              {{ formatDuration(item.state.durationMs) }} · {{ item.state.tokenUsage }} Token
+            </small>
+            <small v-if="item.state.error" class="platform-error">{{ item.state.error }}</small>
           </div>
           <el-button
             v-if="item.state.status === 'FAILED' && terminalTask"

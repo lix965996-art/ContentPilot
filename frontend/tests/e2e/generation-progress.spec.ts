@@ -48,6 +48,8 @@ test('studio displays independent real-time progress for all three platforms', a
             WEIBO: {
               status: completed ? 'SUCCESS' : 'RUNNING',
               progress: completed ? 100 : 35,
+              stage: completed ? 'COMPLETED' : 'REQUESTING_MODEL',
+              message: completed ? '平台版本已生成' : '已发送请求，等待模型生成内容',
               attempt: 1,
               durationMs: 120,
               tokenUsage: 120,
@@ -55,6 +57,8 @@ test('studio displays independent real-time progress for all three platforms', a
             XIAOHONGSHU: {
               status: completed ? 'SUCCESS' : 'RETRYING',
               progress: completed ? 100 : 65,
+              stage: completed ? 'COMPLETED' : 'REQUESTING_MODEL',
+              message: completed ? '平台版本已生成' : '第 2 次请求模型修正输出',
               attempt: 2,
               durationMs: 140,
               tokenUsage: 120,
@@ -62,6 +66,8 @@ test('studio displays independent real-time progress for all three platforms', a
             WECHAT_OFFICIAL: {
               status: completed ? 'SUCCESS' : 'PENDING',
               progress: completed ? 100 : 0,
+              stage: completed ? 'COMPLETED' : 'QUEUED',
+              message: completed ? '平台版本已生成' : '已进入队列，等待开始处理',
               attempt: completed ? 1 : 0,
               durationMs: 160,
               tokenUsage: 120,
@@ -75,12 +81,15 @@ test('studio displays independent real-time progress for all three platforms', a
   await page.goto('/studio')
   await page.getByRole('button', { name: '生成平台版本' }).click()
   await expect(page.getByTestId('generation-progress')).toBeVisible()
-  await expect(page.getByTestId('platform-progress-WEIBO')).toContainText('RUNNING')
-  await expect(page.getByTestId('platform-progress-XIAOHONGSHU')).toContainText('RETRYING')
-  await expect(page.getByTestId('platform-progress-WECHAT_OFFICIAL')).toContainText('PENDING')
-  await expect(page.getByTestId('generation-progress')).toContainText('SUCCESS', {
+  await expect(page.getByTestId('platform-progress-WEIBO')).toContainText('等待模型生成内容')
+  await expect(page.getByTestId('platform-progress-XIAOHONGSHU')).toContainText('自动重试')
+  await expect(page.getByTestId('platform-progress-XIAOHONGSHU')).toContainText('第 2 次尝试')
+  await expect(page.getByTestId('platform-progress-WECHAT_OFFICIAL')).toContainText('排队中')
+  await expect(page.getByTestId('generation-wait-hint')).toContainText('自动修正并重试')
+  await expect(page.getByTestId('generation-progress')).toContainText('全部完成', {
     timeout: 5_000,
   })
+  await expect(page.getByTestId('generation-progress')).toContainText('进度按真实处理阶段计算')
   await expect(page.getByTestId('style-control')).toBeVisible()
   await expect(page.getByTestId('length-control')).toBeVisible()
   await expect(page.getByTestId('preserve-control')).toBeVisible()

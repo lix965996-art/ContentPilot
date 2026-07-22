@@ -210,10 +210,22 @@ async def _validated_completion(
     completion_tokens = 0
     last_error: Exception | None = None
     for attempt in range(1, max_attempts + 1):
-        if attempt > 1 and status_callback:
+        current_status = "RETRYING" if attempt > 1 else "RUNNING"
+        if status_callback:
             await status_callback(
-                "RETRYING",
-                {"attempt": attempt, "maxAttempts": max_attempts, "error": str(last_error)},
+                current_status,
+                {
+                    "progress": 80 if attempt > 1 else 35,
+                    "stage": "REQUESTING_MODEL",
+                    "message": (
+                        f"第 {attempt} 次请求模型修正输出"
+                        if attempt > 1
+                        else "已发送请求，等待模型生成内容"
+                    ),
+                    "attempt": attempt,
+                    "maxAttempts": max_attempts,
+                    "error": str(last_error) if last_error else None,
+                },
             )
         try:
             raw, used_prompt, used_completion = await _chat_completion(
@@ -221,6 +233,18 @@ async def _validated_completion(
             )
             prompt_tokens += used_prompt
             completion_tokens += used_completion
+            if status_callback:
+                await status_callback(
+                    current_status,
+                    {
+                        "progress": 85 if attempt > 1 else 75,
+                        "stage": "VALIDATING_OUTPUT",
+                        "message": "模型已返回，正在校验结构与平台格式",
+                        "attempt": attempt,
+                        "maxAttempts": max_attempts,
+                        "error": None,
+                    },
+                )
             parsed = _parse_json_object(raw)
             return output_model.model_validate(parsed), prompt_tokens, completion_tokens, attempt
         except (ValidationError, ValueError, json.JSONDecodeError) as exc:
@@ -240,6 +264,18 @@ async def _validated_completion(
         except (httpx.HTTPError, KeyError, TypeError) as exc:
             last_error = exc
             if attempt < max_attempts:
+                if status_callback:
+                    await status_callback(
+                        "RETRYING",
+                        {
+                            "progress": 78,
+                            "stage": "WAITING_TO_RETRY",
+                            "message": "模型请求异常，准备自动重试",
+                            "attempt": attempt + 1,
+                            "maxAttempts": max_attempts,
+                            "error": str(exc),
+                        },
+                    )
                 await asyncio.sleep(0)
                 continue
     raise AppException(50201, f"结构化输出连续 {max_attempts} 次校验失败：{last_error}", 502)
@@ -257,7 +293,15 @@ async def generate_variant_data(
     started = time.perf_counter()
     runtime = runtime or load_llm_runtime(db)
     if status_callback:
-        await status_callback("RUNNING", {"attempt": 1})
+        await status_callback(
+            "RUNNING",
+            {
+                "progress": 10,
+                "stage": "PREPARING_PROMPT",
+                "message": "正在整理原文、风格、长度和平台参数",
+                "attempt": 1,
+            },
+        )
     if not runtime.api_key or not runtime.base_url or not runtime.model_name:
         raise AppException(
             50301,
@@ -265,6 +309,16 @@ async def generate_variant_data(
             503,
         )
     prompt = build_generation_prompt(article, platform, options)
+    if status_callback:
+        await status_callback(
+            "RUNNING",
+            {
+                "progress": 25,
+                "stage": "PROMPT_READY",
+                "message": "平台提示词已准备完成",
+                "attempt": 1,
+            },
+        )
     validated, prompt_tokens, completion_tokens, attempts = await _validated_completion(
         runtime,
         SYSTEM_PROMPT,

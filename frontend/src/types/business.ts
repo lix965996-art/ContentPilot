@@ -65,11 +65,15 @@ export type GenerationPlatformStatus = 'PENDING' | 'RUNNING' | 'RETRYING' | 'SUC
 export interface GenerationPlatformProgress {
   status: GenerationPlatformStatus
   progress: number
+  stage?: string
+  message?: string
   attempt: number
+  maxAttempts?: number
   variantId?: number
   error?: string
   durationMs: number
   tokenUsage: number
+  updatedAt?: string
 }
 
 export interface GenerationTask {
@@ -87,6 +91,8 @@ export interface GenerationTask {
   tokenUsage: number
   durationMs: number
   errorMessage?: string
+  createdAt?: string
+  updatedAt?: string
 }
 
 export interface MediaAsset {
