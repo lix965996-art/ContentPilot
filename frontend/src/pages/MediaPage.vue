@@ -1,20 +1,21 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Image, Search, Upload } from 'lucide-vue-next'
+import { ArrowLeft, Image, Search, Upload } from 'lucide-vue-next'
 import { workflowApi } from '@/api/workflow'
 import { getApiErrorMessage } from '@/api/client'
 import EmptyState from '@/components/EmptyState.vue'
 import PageHeader from '@/components/PageHeader.vue'
-import type { Article } from '@/types/business'
+import type { Article, MediaAsset } from '@/types/business'
 const route = useRoute()
+const router = useRouter()
 const articles = ref<Article[]>([])
 const articleId = ref<number>()
 const keywords = ref<Array<{ zh: string; en: string; reason: string }>>([])
 const activeKeyword = ref('')
 const images = ref<Array<Record<string, unknown>>>([])
-const selected = ref<Array<Record<string, unknown>>>([])
+const selected = ref<MediaAsset[]>([])
 const loading = ref(false)
 const uploading = ref(false)
 const notice = ref('')
@@ -23,7 +24,12 @@ async function init() {
   articles.value = data.items
   const queryId = Number(route.query.article)
   articleId.value = data.items.some((item) => item.id === queryId) ? queryId : data.items[0]?.id
-  if (articleId.value) await extract()
+  if (articleId.value) {
+    selected.value = await workflowApi.articleMedia(articleId.value)
+    activeKeyword.value = 'editorial content'
+    await search()
+    void extract()
+  }
 }
 async function extract() {
   if (!articleId.value) return
@@ -84,11 +90,17 @@ async function select(image: Record<string, unknown>, usage: 'COVER' | 'BODY') {
   selected.value = await workflowApi.articleMedia(articleId.value)
   ElMessage.success(usage === 'COVER' ? '已设为封面' : '已加入正文')
 }
+function returnToStudio() {
+  if (!articleId.value) return
+  void router.push({ name: 'studio', query: { article: articleId.value } })
+}
 onMounted(init)
 </script>
 <template>
   <div>
     <PageHeader title="媒体库" description="检索、上传并管理内容使用的封面和正文图片。"
+      ><el-button v-if="route.query.returnTo === 'studio'" @click="returnToStudio"
+        ><ArrowLeft :size="15" class="mr-2" />完成并返回内容工作室</el-button
       ><el-upload
         :show-file-list="false"
         :http-request="upload"

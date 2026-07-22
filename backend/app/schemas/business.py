@@ -24,10 +24,16 @@ class GenerateRequest(BaseModel):
     article_id: int
     platforms: list[Platform] = Field(min_length=1)
     style: str = "专业自然"
-    length: str = "MEDIUM"
+    length: Literal["SHORT", "MEDIUM", "LONG"] = "MEDIUM"
+    target_audience: str | None = Field(default=None, max_length=150)
     include_emoji: bool = True
     include_hashtags: bool = True
     preserve_meaning: int = Field(default=90, ge=50, le=100)
+
+    @field_validator("platforms")
+    @classmethod
+    def unique_platforms(cls, value: list[Platform]) -> list[Platform]:
+        return list(dict.fromkeys(value))
 
 
 class VariantUpdate(BaseModel):
@@ -67,12 +73,13 @@ class ScheduleCreate(BaseModel):
     account_id: int | None = None
     platform: Platform
     scheduled_at: datetime
-    publish_mode: Literal["MOCK", "MANUAL"] = "MANUAL"
+    publish_mode: Literal["REAL_API", "DRAFT_ONLY", "MANUAL_CONFIRM", "MOCK"] = "MANUAL_CONFIRM"
 
 
 class ScheduleUpdate(BaseModel):
     scheduled_at: datetime | None = None
-    publish_mode: Literal["MOCK", "MANUAL"] | None = None
+    account_id: int | None = None
+    publish_mode: Literal["REAL_API", "DRAFT_ONLY", "MANUAL_CONFIRM", "MOCK"] | None = None
 
 
 class MetricCreate(BaseModel):
@@ -131,6 +138,11 @@ class LlmConfigUpdate(BaseModel):
     input_price_per_million: float = Field(default=0, ge=0, le=1_000_000)
     output_price_per_million: float = Field(default=0, ge=0, le=1_000_000)
     currency: Literal["CNY", "USD"] = "CNY"
+
+    @field_validator("api_key")
+    @classmethod
+    def normalize_api_key(cls, value: str) -> str:
+        return value.strip()
 
     @field_validator("base_url")
     @classmethod

@@ -35,9 +35,10 @@ const EMPTY_USAGE: LlmUsage = {
 const providerOptions = [
   { value: 'mock', label: '本地规则模型', url: '' },
   { value: 'openai', label: 'OpenAI', url: 'https://api.openai.com/v1' },
+  { value: 'siliconflow', label: '硅基流动', url: 'https://api.siliconflow.cn/v1' },
   { value: 'deepseek', label: 'DeepSeek', url: 'https://api.deepseek.com/v1' },
   { value: 'moonshot', label: 'Moonshot', url: 'https://api.moonshot.cn/v1' },
-  { value: 'openai-compatible', label: 'OpenAI 兼容服务', url: '' },
+  { value: 'openai-compatible', label: '自定义 OpenAI 兼容服务', url: '' },
 ]
 const llm = reactive<LlmConfig>({
   provider: 'mock',
@@ -66,6 +67,11 @@ const generalSettings = computed(() =>
 )
 const currencySymbol = computed(() => (usage.value.currency === 'USD' ? '$' : '¥'))
 const maxDailyTokens = computed(() => Math.max(1, ...usage.value.daily.map((item) => item.tokens)))
+const apiKeyState = computed(() => {
+  if (llm.apiKeyConfigured) return '已配置'
+  if (llm.apiKey.trim()) return '待保存'
+  return '未配置'
+})
 
 function formatNumber(value: number) {
   return new Intl.NumberFormat('zh-CN').format(value || 0)
@@ -162,7 +168,7 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
             <header class="model-section-heading">
               <div>
                 <h2>模型服务</h2>
-                <p>连接 OpenAI 兼容接口，选择内容生成使用的模型。</p>
+                <p>选择常用服务商预设，或自定义任意 OpenAI 兼容接口。</p>
               </div>
               <span class="secret-note"><ShieldCheck :size="14" />密钥加密保存</span>
             </header>
@@ -298,7 +304,7 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
               </div>
               <div>
                 <dt>密钥</dt>
-                <dd>{{ llm.apiKeyConfigured ? '已配置' : '未配置' }}</dd>
+                <dd>{{ apiKeyState }}</dd>
               </div>
             </dl>
           </aside>

@@ -217,7 +217,9 @@ def seed_demo_business_data(db: Session, roles: dict[str, Role]) -> None:
                     platform=platform,
                     account_name=f"ContentPilot 演示{platform}",
                     publish_mode="MOCK",
-                    status="ACTIVE",
+                    auth_type="NONE",
+                    capabilities_json=["SIMULATED_PUBLISH"],
+                    status="CONNECTED",
                 )
             )
     db.commit()

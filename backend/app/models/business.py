@@ -71,6 +71,7 @@ class ContentVariant(TimestampMixin, Base):
     quality_score: Mapped[float] = mapped_column(Float, default=0)
     manual_edit_ratio: Mapped[float] = mapped_column(Float, default=0)
     review_status: Mapped[str] = mapped_column(String(30), default="PENDING", index=True)
+    review_detail_json: Mapped[dict] = mapped_column(JSON, default=dict)
     original_generated_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     article: Mapped[ContentArticle] = relationship(back_populates="variants")
 
@@ -99,13 +100,41 @@ class MediaAsset(Base):
 
 class PlatformAccount(TimestampMixin, Base):
     __tablename__ = "platform_account"
+    __table_args__ = (UniqueConstraint("user_id", "platform", name="uq_platform_account_user"),)
     id: Mapped[int] = mapped_column(primary_key=True)
     user_id: Mapped[int] = mapped_column(ForeignKey("sys_user.id"), index=True)
     platform: Mapped[str] = mapped_column(String(30))
     account_name: Mapped[str] = mapped_column(String(100))
+    auth_type: Mapped[str] = mapped_column(String(30), default="NONE")
     publish_mode: Mapped[str] = mapped_column(String(30), default="MANUAL")
+    app_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    client_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     credential_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
-    status: Mapped[str] = mapped_column(String(30), default="ACTIVE")
+    credentials_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    access_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    refresh_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
+    token_expires_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    capabilities_json: Mapped[list] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(30), default="NOT_CONFIGURED")
+    last_test_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    auth_logs: Mapped[list[PlatformAuthLog]] = relationship(
+        back_populates="account", cascade="all, delete-orphan"
+    )
+
+
+class PlatformAuthLog(Base):
+    __tablename__ = "platform_auth_log"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    platform_account_id: Mapped[int] = mapped_column(
+        ForeignKey("platform_account.id", ondelete="CASCADE"), index=True
+    )
+    action: Mapped[str] = mapped_column(String(50), index=True)
+    status: Mapped[str] = mapped_column(String(30))
+    message: Mapped[str] = mapped_column(String(500), default="")
+    detail_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
+    account: Mapped[PlatformAccount] = relationship(back_populates="auth_logs")
 
 
 class ActivityPrior(Base):
@@ -179,6 +208,9 @@ class PublishSchedule(TimestampMixin, Base):
     max_retry_count: Mapped[int] = mapped_column(Integer, default=3)
     actual_publish_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     published_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    external_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    result_mode: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    publish_package_json: Mapped[dict] = mapped_column(JSON, default=dict)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     idempotency_key: Mapped[str] = mapped_column(String(100), unique=True)
     created_by: Mapped[int] = mapped_column(ForeignKey("sys_user.id"))
@@ -291,6 +323,12 @@ class GenerationTask(TimestampMixin, Base):
     result_variant_ids_json: Mapped[list] = mapped_column(JSON, default=list)
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     model_name: Mapped[str] = mapped_column(String(100), default="")
+    provider: Mapped[str] = mapped_column(String(50), default="")
+    prompt_version: Mapped[str] = mapped_column(String(30), default="")
+    token_usage: Mapped[int] = mapped_column(Integer, default=0)
+    duration_ms: Mapped[int] = mapped_column(Integer, default=0)
+    platform_status_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    options_json: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
 class SystemSetting(TimestampMixin, Base):

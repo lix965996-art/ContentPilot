@@ -18,7 +18,10 @@ test('primary navigation actions respond for an operator', async ({ page }) => {
   await searchDialog.getByRole('button', { name: '内容库' }).click()
   await expect(page).toHaveURL(/\/articles/)
 
-  await page.getByRole('button', { name: /新建内容/ }).click()
+  await page
+    .getByRole('main')
+    .getByRole('button', { name: /新建内容/ })
+    .click()
   await expect(page.getByRole('dialog').getByText('新建内容', { exact: true })).toBeVisible()
   await page.getByRole('dialog').getByRole('button', { name: '取消' }).click()
 

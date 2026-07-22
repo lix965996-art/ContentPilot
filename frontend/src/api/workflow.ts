@@ -2,12 +2,16 @@ import { apiClient } from '@/api/client'
 import type { ApiResponse } from '@/types/api'
 import type {
   Article,
+  GenerationTask,
   LlmConfig,
   LlmConnectionResult,
   LlmUsage,
   Platform,
+  PlatformAccount,
+  PublishPackage,
   Schedule,
   Variant,
+  MediaAsset,
 } from '@/types/business'
 
 async function unwrap<T>(promise: Promise<{ data: ApiResponse<T> }>): Promise<T> {
@@ -42,13 +46,25 @@ export const workflowApi = {
   approveVariant(id: number) {
     return unwrap<Variant>(apiClient.post(`/variants/${id}/approve`))
   },
+  rejectVariant(id: number) {
+    return unwrap<Variant>(apiClient.post(`/variants/${id}/reject`))
+  },
+  deleteVariant(id: number) {
+    return unwrap<{ id: number }>(apiClient.delete(`/variants/${id}`))
+  },
   generate(data: Record<string, unknown>) {
     return unwrap<{ taskId: string; status: string }>(apiClient.post('/generation/content', data))
   },
   task(id: string) {
-    return unwrap<Record<string, unknown> & { variants?: Variant[] }>(
-      apiClient.get(`/generation/tasks/${id}`),
+    return unwrap<GenerationTask>(apiClient.get(`/generation/tasks/${id}`))
+  },
+  retryTaskPlatform(id: string, platform: Platform) {
+    return unwrap<{ taskId: string; status: string }>(
+      apiClient.post(`/generation/tasks/${id}/platforms/${platform}/retry`),
     )
+  },
+  reviewVariant(id: number) {
+    return unwrap<Record<string, unknown>>(apiClient.post('/generation/review', { article_id: id }))
   },
   regenerate(id: number) {
     return unwrap<{ taskId: string }>(apiClient.post(`/generation/content/${id}/regenerate`))
@@ -72,7 +88,7 @@ export const workflowApi = {
     return unwrap<Record<string, unknown>>(apiClient.post('/media/select', data))
   },
   articleMedia(id: number) {
-    return unwrap<Array<Record<string, unknown>>>(apiClient.get(`/articles/${id}/media`))
+    return unwrap<MediaAsset[]>(apiClient.get(`/articles/${id}/media`))
   },
   recommend(data: { article_id: number; variant_id?: number; platform: Platform }) {
     return unwrap<Record<string, unknown>>(apiClient.post('/recommendations/publish-time', data))
@@ -171,5 +187,43 @@ export const workflowApi = {
   },
   llmUsage(days = 30) {
     return unwrap<LlmUsage>(apiClient.get('/settings/model-service/usage', { params: { days } }))
+  },
+  platformAccounts() {
+    return unwrap<PlatformAccount[]>(apiClient.get('/platform-accounts'))
+  },
+  savePlatformAccount(platform: Platform, data: Record<string, unknown>) {
+    return unwrap<PlatformAccount>(apiClient.put(`/platform-accounts/${platform}`, data))
+  },
+  testPlatformAccount(platform: Platform) {
+    return unwrap<PlatformAccount & { result: Record<string, unknown> }>(
+      apiClient.post(`/platform-accounts/${platform}/test`),
+    )
+  },
+  disconnectPlatformAccount(platform: Platform) {
+    return unwrap<PlatformAccount>(apiClient.delete(`/platform-accounts/${platform}`))
+  },
+  platformAuthLogs(platform: Platform) {
+    return unwrap<Array<Record<string, unknown>>>(
+      apiClient.get(`/platform-accounts/${platform}/auth-logs`),
+    )
+  },
+  startWeiboOAuth(redirectUri: string) {
+    return unwrap<{ authorizationUrl: string }>(
+      apiClient.post('/platform-accounts/WEIBO/oauth/start', { redirect_uri: redirectUri }),
+    )
+  },
+  publishPackage(id: number) {
+    return unwrap<PublishPackage>(apiClient.get(`/schedules/${id}/publish-package`))
+  },
+  async downloadPublishPackage(id: number) {
+    const response = await apiClient.get(`/schedules/${id}/publish-package/download`, {
+      responseType: 'blob',
+    })
+    const url = URL.createObjectURL(response.data)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = `xiaohongshu-${id}.zip`
+    anchor.click()
+    URL.revokeObjectURL(url)
   },
 }

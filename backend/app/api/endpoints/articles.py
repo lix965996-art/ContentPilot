@@ -6,11 +6,11 @@ from app.api.deps import get_current_user, require_roles
 from app.core.exceptions import AppException
 from app.core.responses import success_response
 from app.db.session import get_db
-from app.models.business import ContentArticle, ContentVariant
+from app.models.business import ContentArticle, ContentVariant, PublishSchedule
 from app.models.user import User
 from app.schemas.business import ArticleCreate, ArticleUpdate, VariantUpdate
 from app.services.audit_service import record_audit
-from app.services.generation_service import edit_ratio
+from app.services.generation_service import count_emoji, edit_ratio, markdown_to_safe_html
 from app.services.serializers import model_dict
 
 router = APIRouter(tags=["内容管理"])
@@ -230,7 +230,9 @@ def update_variant(
         raise AppException(40402, "内容版本不存在", 404)
     variant.title = payload.title
     variant.content_text = payload.content_text
+    variant.content_html = markdown_to_safe_html(payload.content_text)
     variant.hashtags_json = payload.hashtags
+    variant.emoji_count = count_emoji(payload.title + payload.content_text)
     variant.word_count = len(payload.content_text)
     variant.manual_edit_ratio = edit_ratio(variant.original_generated_text, payload.content_text)
     record_audit(db, request, user, "UPDATE", "CONTENT", "VARIANT", variant.id)
@@ -254,3 +256,40 @@ def approve_variant(
     record_audit(db, request, user, "APPROVE", "CONTENT", "VARIANT", variant.id)
     db.commit()
     return success_response(request, model_dict(variant, camel=True), "审核通过")
+
+
+@router.post("/variants/{variant_id}/reject")
+def reject_variant(
+    variant_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+) -> dict:
+    variant = db.get(ContentVariant, variant_id)
+    if not variant:
+        raise AppException(40402, "内容版本不存在", 404)
+    variant.review_status = "REJECTED"
+    record_audit(db, request, user, "REJECT", "CONTENT", "VARIANT", variant.id)
+    db.commit()
+    return success_response(request, model_dict(variant, camel=True), "版本已拒绝")
+
+
+@router.delete("/variants/{variant_id}")
+def delete_variant(
+    variant_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+) -> dict:
+    variant = db.get(ContentVariant, variant_id)
+    if not variant:
+        raise AppException(40402, "内容版本不存在", 404)
+    schedule_count = (
+        db.query(PublishSchedule).filter(PublishSchedule.variant_id == variant_id).count()
+    )
+    if schedule_count:
+        raise AppException(40921, "该版本已有发布任务，不能删除", 409)
+    record_audit(db, request, user, "DELETE", "CONTENT", "VARIANT", variant.id)
+    db.delete(variant)
+    db.commit()
+    return success_response(request, {"id": variant_id}, "版本已删除")

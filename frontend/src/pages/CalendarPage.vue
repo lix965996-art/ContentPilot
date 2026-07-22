@@ -13,7 +13,14 @@ import StatusBadge from '@/components/StatusBadge.vue'
 import DetailDrawer from '@/components/DetailDrawer.vue'
 import { workflowApi } from '@/api/workflow'
 import { getApiErrorMessage } from '@/api/client'
-import type { Article, Platform, Schedule, Variant } from '@/types/business'
+import type {
+  Article,
+  Platform,
+  PlatformAccount,
+  PublishMode,
+  Schedule,
+  Variant,
+} from '@/types/business'
 import { platformColors, platformNames } from '@/types/business'
 import { useAuthStore } from '@/stores/auth'
 
@@ -26,13 +33,46 @@ const editing = ref<Schedule>()
 const dialog = ref(false)
 const articles = ref<Article[]>([])
 const variants = ref<Variant[]>([])
+const accounts = ref<PlatformAccount[]>([])
 const form = ref<{
   article_id?: number
   variant_id?: number
+  account_id?: number
   platform: Platform
   scheduled_at: string
-  publish_mode: string
-}>({ platform: 'WEIBO', scheduled_at: '', publish_mode: 'MANUAL' })
+  publish_mode: PublishMode
+}>({ platform: 'WEIBO', scheduled_at: '', publish_mode: 'MOCK' })
+const availableAccounts = computed(() =>
+  accounts.value.filter((item) => item.platform === form.value.platform && item.id),
+)
+const selectedAccount = computed(() =>
+  availableAccounts.value.find((item) => item.id === form.value.account_id),
+)
+const publishModes = computed<Array<{ value: PublishMode; label: string; disabled?: boolean }>>(
+  () => {
+    const account = selectedAccount.value
+    if (form.value.platform === 'XIAOHONGSHU')
+      return [
+        { value: 'MANUAL_CONFIRM', label: '人工确认发布' },
+        { value: 'MOCK', label: 'Mock 演示' },
+      ]
+    if (form.value.platform === 'WECHAT_OFFICIAL')
+      return [
+        { value: 'DRAFT_ONLY', label: '自动进入草稿箱', disabled: account?.status !== 'CONNECTED' },
+        {
+          value: 'REAL_API',
+          label: '提交发布',
+          disabled: account?.status !== 'CONNECTED' || account.publishMode !== 'SUBMIT_PUBLISH',
+        },
+        { value: 'MOCK', label: 'Mock 草稿箱' },
+      ]
+    return [
+      { value: 'REAL_API', label: '官方 API', disabled: account?.status !== 'CONNECTED' },
+      { value: 'MOCK', label: 'Mock 演示' },
+      { value: 'MANUAL_CONFIRM', label: '人工确认' },
+    ]
+  },
+)
 const platformGlyphs: Record<Platform, string> = {
   WEIBO: '微',
   XIAOHONGSHU: '红',
@@ -87,8 +127,12 @@ function formatLocalDateTime(value: Date): string {
   return new Date(value.getTime() - offset).toISOString().slice(0, 19)
 }
 async function init() {
-  const data = await workflowApi.articles({ page_size: 100 })
+  const [data, accountRows] = await Promise.all([
+    workflowApi.articles({ page_size: 100 }),
+    workflowApi.platformAccounts(),
+  ])
   articles.value = data.items
+  accounts.value = accountRows
   await load()
 }
 async function chooseArticle() {
@@ -98,22 +142,44 @@ async function chooseArticle() {
   if (first) {
     form.value.variant_id = first.id
     form.value.platform = first.platform
+    choosePlatform()
   }
 }
 function chooseVariant(id: number) {
   const item = variants.value.find((x) => x.id === id)
-  if (item) form.value.platform = item.platform
+  if (item) {
+    form.value.platform = item.platform
+    choosePlatform()
+  }
+}
+function choosePlatform() {
+  const account = accounts.value.find((item) => item.platform === form.value.platform && item.id)
+  form.value.account_id = account?.id || undefined
+  form.value.publish_mode =
+    form.value.platform === 'XIAOHONGSHU'
+      ? 'MANUAL_CONFIRM'
+      : form.value.platform === 'WECHAT_OFFICIAL'
+        ? account?.status === 'CONNECTED'
+          ? 'DRAFT_ONLY'
+          : 'MOCK'
+        : account?.status === 'CONNECTED' && account.publishMode === 'REAL_API'
+          ? 'REAL_API'
+          : 'MOCK'
 }
 function openCreate() {
   form.value = {
     platform: 'WEIBO',
     scheduled_at: formatLocalDateTime(new Date(Date.now() + 3600000)).slice(0, 16),
-    publish_mode: 'MANUAL',
+    publish_mode: 'MOCK',
   }
   dialog.value = true
 }
 async function create() {
   try {
+    if (!form.value.account_id) {
+      ElMessage.warning('请先在“平台账号”页面配置并选择账号')
+      return
+    }
     await workflowApi.createSchedule({
       ...form.value,
       scheduled_at: `${form.value.scheduled_at}:00`,
@@ -206,8 +272,27 @@ onMounted(init)
             type="datetime"
             value-format="YYYY-MM-DDTHH:mm"
             class="!w-full" /></el-form-item
-        ><el-form-item label="发布方式"
-          ><span class="setting-value">人工确认</span></el-form-item
+        ><el-form-item label="平台账号" required
+          ><el-select v-model="form.account_id" class="w-full" placeholder="请选择平台账号"
+            ><el-option
+              v-for="account in availableAccounts"
+              :key="account.id || account.platform"
+              :label="`${account.accountName} · ${account.status}`"
+              :value="account.id!" /></el-select></el-form-item
+        ><el-form-item label="发布方式" required
+          ><el-select v-model="form.publish_mode" class="w-full"
+            ><el-option
+              v-for="mode in publishModes"
+              :key="mode.value"
+              :label="mode.label"
+              :value="mode.value"
+              :disabled="mode.disabled" /></el-select></el-form-item
+        ><el-alert
+          v-if="form.platform === 'XIAOHONGSHU'"
+          title="小红书当前采用人工确认发布，不属于服务器无人值守自动发布。"
+          type="warning"
+          :closable="false"
+        />
         ></el-form
       ><template #footer
         ><el-button @click="dialog = false">取消</el-button

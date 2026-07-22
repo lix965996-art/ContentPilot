@@ -12,6 +12,7 @@ import {
   PanelLeftClose,
   PenLine,
   Rocket,
+  Share2,
   Settings,
   X,
 } from 'lucide-vue-next'
@@ -78,6 +79,7 @@ const allSections: Array<{ label: string; items: NavItem[] }> = [
         roles: ['ADMIN', 'OPERATOR', 'VIEWER'],
       },
       { label: '发布', icon: Rocket, name: 'publish', roles: ['ADMIN', 'OPERATOR'] },
+      { label: '平台账号', icon: Share2, name: 'platform-accounts', roles: ['ADMIN', 'OPERATOR'] },
     ],
   },
   {

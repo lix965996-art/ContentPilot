@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     unsplash_access_key: str = ""
     media_fallback_enabled: bool = False
     publish_mode: str = "manual"
+    platform_credential_key: str = ""
+    weibo_api_base_url: str = "https://api.weibo.com"
+    wechat_api_base_url: str = "https://api.weixin.qq.com"
 
     @property
     def cors_origin_list(self) -> list[str]:

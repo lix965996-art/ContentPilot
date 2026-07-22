@@ -23,6 +23,7 @@ export interface Variant {
   versionNo: number
   title: string
   contentText: string
+  contentHtml?: string
   hashtagsJson: string[]
   wordCount: number
   modelName: string
@@ -35,7 +36,49 @@ export interface Variant {
   qualityScore: number
   manualEditRatio: number
   reviewStatus: string
+  reviewDetailJson?: Record<string, unknown>
   createdAt: string
+}
+
+export type GenerationPlatformStatus = 'PENDING' | 'RUNNING' | 'RETRYING' | 'SUCCESS' | 'FAILED'
+
+export interface GenerationPlatformProgress {
+  status: GenerationPlatformStatus
+  progress: number
+  attempt: number
+  variantId?: number
+  error?: string
+  durationMs: number
+  tokenUsage: number
+}
+
+export interface GenerationTask {
+  id: string
+  articleId: number
+  status: 'PENDING' | 'RUNNING' | 'SUCCESS' | 'PARTIAL_SUCCESS' | 'FAILED'
+  progress: number
+  platformsJson: Platform[]
+  platformStatusJson: Partial<Record<Platform, GenerationPlatformProgress>>
+  resultVariantIdsJson: number[]
+  variants: Variant[]
+  provider: string
+  modelName: string
+  promptVersion: string
+  tokenUsage: number
+  durationMs: number
+  errorMessage?: string
+}
+
+export interface MediaAsset {
+  id: number
+  articleId: number
+  variantId?: number
+  imageUrl: string
+  thumbnailUrl: string
+  altText?: string
+  usageType: 'COVER' | 'BODY'
+  source: string
+  selected: boolean
 }
 
 export interface Schedule {
@@ -46,13 +89,61 @@ export interface Schedule {
   articleTitle: string
   variantTitle: string
   scheduledAt: string
-  publishMode: 'MOCK' | 'MANUAL'
+  accountId: number
+  accountName: string
+  publishMode: PublishMode
   status: string
   retryCount: number
   actualPublishAt?: string
   publishedUrl?: string
+  externalId?: string
+  resultMode?: string
+  publishPackageJson?: PublishPackage
   errorMessage?: string
   logs?: Array<Record<string, unknown>>
+}
+
+export type PublishMode = 'REAL_API' | 'DRAFT_ONLY' | 'MANUAL_CONFIRM' | 'MOCK'
+
+export type PlatformAccountStatus =
+  'NOT_CONFIGURED' | 'CONNECTING' | 'CONNECTED' | 'TOKEN_EXPIRED' | 'INVALID' | 'DISABLED'
+
+export interface PlatformAccount {
+  id: number | null
+  platform: Platform
+  platformName: string
+  accountName: string
+  authType: 'NONE' | 'OAUTH2' | 'APP_SECRET'
+  publishMode: PublishMode | 'SUBMIT_PUBLISH'
+  status: PlatformAccountStatus
+  capabilities: string[]
+  lastTestAt?: string
+  lastError?: string
+  appId: string
+  clientId: string
+  secretConfigured: boolean
+  accessTokenConfigured: boolean
+  refreshTokenConfigured: boolean
+  tokenHint: string
+  tokenExpiresAt?: string
+  config: {
+    redirect_uri?: string
+    default_author?: string
+    default_cover_media_id?: string
+    default_cover_url?: string
+    allow_submit_publish?: boolean
+  }
+}
+
+export interface PublishPackage {
+  title: string
+  content: string
+  hashtags: string[]
+  coverImage?: string
+  images: string[]
+  imageOrder: number[]
+  creatorUrl: string
+  notice: string
 }
 
 export interface LlmConfig {

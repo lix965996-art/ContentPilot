@@ -15,7 +15,7 @@ from app.models.business import ContentArticle, MediaAsset
 from app.models.user import User
 from app.schemas.business import KeywordRequest, MediaSelectRequest
 from app.services.audit_service import record_audit
-from app.services.generation_service import extract_keywords
+from app.services.generation_service import extract_keywords_with_llm
 from app.services.serializers import model_dict
 from app.services.setting_service import setting_value
 
@@ -34,6 +34,34 @@ FALLBACK_IMAGES = [
     }
     for i in range(1, 11)
 ]
+
+PROJECT_GENERATED_IMAGES = [
+    ("content-adaptation", "content-adaptation.webp", "多平台内容适配与分发"),
+    ("ai-brand-meaning", "ai-brand-meaning.webp", "AI 写作与品牌原意保护"),
+    ("content-calendar", "content-calendar.webp", "内容日历与团队协作"),
+    ("longform-reading", "longform-reading.webp", "长文章排版与阅读体验"),
+    ("visual-selection", "visual-selection.webp", "内容配图选择与裁切"),
+    ("team-workflow", "team-workflow.webp", "内容团队协作流程"),
+    ("content-experiment", "content-experiment.webp", "内容策略对照实验"),
+    ("publishing-schedule", "publishing-schedule.webp", "内容发布排期与时段规划"),
+]
+
+
+def _project_generated_items(keyword: str) -> list[dict]:
+    return [
+        {
+            "id": item_id,
+            "imageUrl": f"/media/generated/{filename}",
+            "thumbnailUrl": f"/media/generated/{filename}",
+            "source": "AI_GENERATED",
+            "photographerName": "ContentPilot AI",
+            "photographerUrl": None,
+            "altText": alt_text,
+            "searchKeyword": keyword,
+            "isMock": False,
+        }
+        for item_id, filename, alt_text in PROJECT_GENERATED_IMAGES
+    ]
 
 
 @router.get("/media/search")
@@ -71,10 +99,26 @@ async def search_media(
                 if items:
                     return success_response(
                         request,
-                        {"items": items, "page": page, "source": "UNSPLASH", "notice": ""},
+                        {
+                            "items": [*_project_generated_items(keyword), *items],
+                            "page": page,
+                            "source": "MIXED",
+                            "notice": "项目 AI 素材与 Unsplash 搜索结果",
+                        },
                     )
         except (httpx.HTTPError, KeyError, ValueError):
             pass
+    generated_items = _project_generated_items(keyword)
+    if generated_items:
+        return success_response(
+            request,
+            {
+                "items": generated_items,
+                "page": page,
+                "source": "AI_GENERATED",
+                "notice": "8 张项目内置 AI 生成素材",
+            },
+        )
     if not (settings.app_demo_mode and settings.media_fallback_enabled):
         return success_response(
             request,
@@ -101,7 +145,7 @@ async def search_media(
 
 
 @router.post("/media/extract-keywords")
-def media_keywords(
+async def media_keywords(
     payload: KeywordRequest,
     request: Request,
     db: Session = Depends(get_db),
@@ -110,13 +154,10 @@ def media_keywords(
     article = db.get(ContentArticle, payload.article_id)
     if not article:
         raise AppException(40401, "文章不存在", 404)
-    return success_response(
-        request,
-        {
-            "keywords": extract_keywords(article.title + article.source_text),
-            "provider": "RULE_BASED",
-        },
+    keywords, provider = await extract_keywords_with_llm(
+        db, article.title + "\n" + article.source_text
     )
+    return success_response(request, {"keywords": keywords, "provider": provider})
 
 
 @router.post("/media/upload")

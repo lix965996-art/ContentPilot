@@ -73,6 +73,12 @@ const router = createRouter({
           meta: { roles: ['ADMIN', 'OPERATOR'], title: '发布' },
         },
         {
+          path: 'platform-accounts',
+          name: 'platform-accounts',
+          component: () => import('@/pages/PlatformAccountsPage.vue'),
+          meta: { roles: ['ADMIN', 'OPERATOR'], title: '平台账号' },
+        },
+        {
           path: 'analytics',
           name: 'analytics',
           component: () => import('@/pages/AnalyticsPage.vue'),

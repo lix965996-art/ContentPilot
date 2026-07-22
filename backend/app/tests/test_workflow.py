@@ -57,6 +57,8 @@ def test_complete_content_to_publish_flow(client: TestClient, login_as) -> None:
     assert recommendation.json()["data"]["algorithmVersion"] == "weighted-v1"
 
     scheduled_at = (datetime.now() + timedelta(days=3)).isoformat(timespec="seconds")
+    accounts = client.get("/api/platform-accounts", headers=auth).json()["data"]
+    account_id = next(item["id"] for item in accounts if item["platform"] == variant["platform"])
     scheduled = client.post(
         "/api/schedules",
         headers=auth,
@@ -64,6 +66,7 @@ def test_complete_content_to_publish_flow(client: TestClient, login_as) -> None:
             "article_id": article_id,
             "variant_id": variant["id"],
             "platform": variant["platform"],
+            "account_id": account_id,
             "scheduled_at": scheduled_at,
             "publish_mode": "MOCK",
         },

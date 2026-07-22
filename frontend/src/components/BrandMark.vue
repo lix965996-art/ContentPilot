@@ -14,17 +14,14 @@ withDefaults(
 </script>
 
 <template>
-  <div class="brand-mark" aria-label="ContentPilot 多平台内容运营工作台">
-    <span class="brand-symbol" aria-hidden="true">CP</span>
-    <div v-if="!compact" class="min-w-0">
-      <div :class="inverse ? 'text-white' : 'text-ink'" class="brand-name">ContentPilot</div>
-      <div
-        v-if="showSubtitle"
-        :class="inverse ? 'text-slate-400' : 'text-muted'"
-        class="brand-subtitle"
-      >
-        多平台内容运营工作台
-      </div>
-    </div>
+  <div
+    class="brand-mark"
+    :class="{ 'has-subtitle': showSubtitle && !compact, 'is-inverse': inverse }"
+    aria-label="ContentPilot 多平台内容运营工作台"
+  >
+    <span class="brand-image-frame" :class="{ 'is-compact': compact }" aria-hidden="true">
+      <img src="/brand/contentpilot-logo.png" alt="" />
+    </span>
+    <span v-if="showSubtitle && !compact" class="brand-subtitle">多平台内容运营工作台</span>
   </div>
 </template>

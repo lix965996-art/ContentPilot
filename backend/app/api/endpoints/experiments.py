@@ -24,6 +24,12 @@ def _data(row: Experiment, include_samples: bool = False) -> dict:
     if include_samples:
         data["samples"] = [model_dict(x, camel=True) for x in row.samples]
     data["sampleCount"] = len(row.samples)
+    data["statistics"] = _results(row)
+    data["hasSimulatedData"] = any(
+        str(sample.metric_value_json.get("dataSource", "")).upper() == "SIMULATED"
+        or str(sample.metric_value_json.get("dataNotice", "")).upper() == "SIMULATED"
+        for sample in row.samples
+    )
     return data
 
 

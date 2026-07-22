@@ -1,13 +1,21 @@
 <script setup lang="ts">
 import { onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { Inbox, RefreshCw, Rocket, ScrollText } from 'lucide-vue-next'
+import {
+  Clipboard,
+  Download,
+  ExternalLink,
+  Inbox,
+  RefreshCw,
+  Rocket,
+  ScrollText,
+} from 'lucide-vue-next'
 import EmptyState from '@/components/EmptyState.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import { workflowApi } from '@/api/workflow'
 import { getApiErrorMessage } from '@/api/client'
-import type { Schedule } from '@/types/business'
+import type { PublishPackage, Schedule } from '@/types/business'
 import { platformNames } from '@/types/business'
 import type { Platform } from '@/types/business'
 const rows = ref<Schedule[]>([])
@@ -15,6 +23,7 @@ const loading = ref(false)
 const detail = ref<Schedule>()
 const drawer = ref(false)
 const status = ref('')
+const publishPackage = ref<PublishPackage>()
 const statusTabs = [
   ['全部', ''],
   ['待发布', 'PENDING'],
@@ -33,23 +42,51 @@ async function load() {
 }
 async function open(row: Schedule) {
   detail.value = await workflowApi.schedule(row.id)
+  publishPackage.value = undefined
+  if (detail.value.platform === 'XIAOHONGSHU' && detail.value.publishPackageJson) {
+    publishPackage.value = detail.value.publishPackageJson
+  }
   drawer.value = true
 }
 async function action(row: Schedule, name: string) {
   try {
     if (name === 'publish-now')
       await ElMessageBox.confirm('将立即执行当前发布适配器，是否继续？', '立即发布')
-    await workflowApi.scheduleAction(
-      row.id,
-      name,
-      name === 'manual-confirm' ? { publishedUrl: 'manual://confirmed' } : {},
-    )
+    let data: Record<string, unknown> = {}
+    if (name === 'manual-confirm') {
+      const answer = await ElMessageBox.prompt(
+        '请填写平台公开发布链接，系统会据此记录真实发布时间。',
+        '确认人工发布',
+        {
+          inputPlaceholder: 'https://www.xiaohongshu.com/explore/...',
+          inputPattern: /^https?:\/\/.+/,
+          inputErrorMessage: '请输入有效的 HTTP(S) 链接',
+          confirmButtonText: '我已发布',
+        },
+      )
+      data = { published_url: answer.value }
+    }
+    await workflowApi.scheduleAction(row.id, name, data)
     ElMessage.success('操作成功')
     await load()
     if (drawer.value) await open(row)
   } catch (e) {
     if (e !== 'cancel') ElMessage.error(getApiErrorMessage(e))
   }
+}
+async function copyPackage() {
+  if (!publishPackage.value) return
+  const text = `${publishPackage.value.title}\n\n${publishPackage.value.content}\n\n${publishPackage.value.hashtags.join(' ')}`
+  await navigator.clipboard.writeText(text)
+  ElMessage.success('文案已复制')
+}
+async function downloadPackage() {
+  if (!detail.value) return
+  await workflowApi.downloadPublishPackage(detail.value.id)
+}
+function openCreator() {
+  if (publishPackage.value?.creatorUrl)
+    window.open(publishPackage.value.creatorUrl, '_blank', 'noopener')
 }
 onMounted(load)
 function platformLabel(value: string): string {
@@ -162,7 +199,36 @@ function selectStatus(value: string) {
               <dt>发布链接</dt>
               <dd class="break-all">{{ detail.publishedUrl || '—' }}</dd>
             </div>
+            <div>
+              <dt>结果类型</dt>
+              <dd>{{ detail.resultMode || '—' }}</dd>
+            </div>
+            <div>
+              <dt>平台任务 ID</dt>
+              <dd class="break-all">{{ detail.externalId || '—' }}</dd>
+            </div>
           </dl>
+          <section v-if="publishPackage" class="reason-card">
+            <p class="font-medium">小红书人工发布包</p>
+            <el-alert
+              class="mt-3"
+              :title="publishPackage.notice"
+              type="warning"
+              :closable="false"
+            />
+            <h4 class="mt-4 font-medium">{{ publishPackage.title }}</h4>
+            <p class="mt-2 whitespace-pre-wrap text-sm leading-6">{{ publishPackage.content }}</p>
+            <div class="mt-3 flex flex-wrap gap-2">
+              <el-tag v-for="tag in publishPackage.hashtags" :key="tag">{{ tag }}</el-tag>
+            </div>
+            <div class="mt-4 flex flex-wrap gap-2">
+              <el-button @click="copyPackage"><Clipboard :size="14" />复制文案</el-button>
+              <el-button @click="downloadPackage"><Download :size="14" />下载全部图片</el-button>
+              <el-button type="primary" @click="openCreator"
+                ><ExternalLink :size="14" />打开创作页面</el-button
+              >
+            </div>
+          </section>
           <div>
             <p class="section-label">执行日志</p>
             <div v-if="detail.logs?.length" class="timeline mt-3">

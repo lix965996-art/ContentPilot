@@ -90,13 +90,12 @@ async def test_llm_connection(db: Session, payload: LlmConfigUpdate) -> dict:
             response = await client.get(
                 f"{payload.base_url.rstrip('/')}/models",
                 headers={"Authorization": f"Bearer {api_key}"},
+                params=_model_query_params(payload.provider),
             )
             response.raise_for_status()
             body = response.json()
     except httpx.HTTPStatusError as exc:
-        raise AppException(
-            50203, f"连接失败：服务返回 HTTP {exc.response.status_code}", 502
-        ) from exc
+        raise AppException(50203, _connection_error_message(exc.response), 502) from exc
     except (httpx.HTTPError, ValueError) as exc:
         raise AppException(50203, f"连接失败：{type(exc).__name__}", 502) from exc
     models = sorted(
@@ -112,6 +111,42 @@ async def test_llm_connection(db: Session, payload: LlmConfigUpdate) -> dict:
         "models": models,
         "message": f"连接成功，发现 {len(models)} 个模型",
     }
+
+
+def _model_query_params(provider: str) -> dict[str, str] | None:
+    if provider.lower() == "siliconflow":
+        return {"type": "text", "sub_type": "chat"}
+    return None
+
+
+def _connection_error_message(response: httpx.Response) -> str:
+    """Return an actionable error without ever reflecting an API key."""
+    status = response.status_code
+    error_code = ""
+    try:
+        body = response.json()
+        error = body.get("error", {}) if isinstance(body, dict) else {}
+        if isinstance(error, dict):
+            error_code = str(error.get("code") or "").lower()
+    except ValueError:
+        pass
+
+    if status == 401:
+        return (
+            "连接失败：API Key 无效、已失效，或与当前 API Base URL 不匹配。"
+            "请在服务商控制台重新创建密钥后再试。"
+        )
+    if status == 403:
+        return "连接失败：API Key 没有访问模型列表的权限，请检查项目和密钥权限。"
+    if status == 404:
+        return "连接失败：未找到模型接口，请检查 API Base URL 是否包含正确的 /v1 路径。"
+    if status == 429:
+        if error_code == "insufficient_quota":
+            return "连接失败：API 额度不足或尚未启用计费，请检查服务商账户余额。"
+        return "连接失败：请求过于频繁，请稍后再试。"
+    if status >= 500:
+        return f"连接失败：模型服务暂时不可用（HTTP {status}），请稍后再试。"
+    return f"连接失败：模型服务返回 HTTP {status}，请检查服务地址和账号权限。"
 
 
 def llm_usage(db: Session, days: int) -> dict:

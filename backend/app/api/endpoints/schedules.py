@@ -1,21 +1,36 @@
+import io
+import json
 import uuid
+import zipfile
 from datetime import datetime
+from pathlib import Path
+from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
 
 from fastapi import APIRouter, Depends, Request
+from fastapi.responses import StreamingResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_roles
+from app.core.credentials import decrypt_json
 from app.core.exceptions import AppException
 from app.core.responses import success_response
 from app.db.session import get_db
-from app.models.business import ContentArticle, ContentVariant, PublishLog, PublishSchedule
+from app.models.business import (
+    ContentArticle,
+    ContentVariant,
+    PlatformAccount,
+    PublishLog,
+    PublishSchedule,
+)
 from app.models.user import User
 from app.scheduler.runtime import add_schedule_job, remove_schedule_job
 from app.schemas.business import ScheduleCreate, ScheduleUpdate
+from app.schemas.platform_account import ManualConfirmRequest
 from app.services.audit_service import record_audit
-from app.services.publish_service import execute_publish
+from app.services.platform_account_service import effective_status
+from app.services.publish_service import execute_publish, validate_schedule_account
 from app.services.serializers import model_dict
 
 router = APIRouter(tags=["排期与发布"])
@@ -27,6 +42,11 @@ def _local_naive(value: datetime) -> datetime:
     return value.astimezone(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
 
 
+def _ensure_schedule_owner(row: PublishSchedule, user: User) -> None:
+    if row.created_by != user.id:
+        raise AppException(40303, "无权操作其他用户的平台排期", 403)
+
+
 def _data(db: Session, row: PublishSchedule, include_logs: bool = False) -> dict:
     data = model_dict(row, camel=True)
     article = db.get(ContentArticle, row.article_id)
@@ -35,6 +55,11 @@ def _data(db: Session, row: PublishSchedule, include_logs: bool = False) -> dict
         {
             "articleTitle": article.title if article else "",
             "variantTitle": variant.title if variant else "",
+            "accountName": (
+                db.get(PlatformAccount, row.account_id).account_name
+                if row.account_id and db.get(PlatformAccount, row.account_id)
+                else ""
+            ),
         }
     )
     if include_logs:
@@ -78,6 +103,49 @@ def create_schedule(
     variant = db.get(ContentVariant, payload.variant_id)
     if not article or not variant or variant.article_id != article.id:
         raise AppException(40031, "文章与平台版本不匹配")
+    if variant.platform != payload.platform:
+        raise AppException(40033, "内容版本与目标平台不匹配")
+    if not payload.account_id:
+        raise AppException(40072, "创建排期时必须选择平台账号")
+    account = db.scalar(
+        select(PlatformAccount).where(
+            PlatformAccount.id == payload.account_id, PlatformAccount.user_id == user.id
+        )
+    )
+    if not account:
+        raise AppException(40303, "平台账号不存在或不属于当前用户", 403)
+    if account.platform != payload.platform:
+        raise AppException(40073, "平台账号与目标平台不匹配")
+    if payload.publish_mode in {"REAL_API", "DRAFT_ONLY"}:
+        allowed_account_modes = (
+            {"REAL_API"}
+            if payload.platform == "WEIBO" and payload.publish_mode == "REAL_API"
+            else {"SUBMIT_PUBLISH"}
+            if payload.publish_mode == "REAL_API"
+            else {"DRAFT_ONLY", "SUBMIT_PUBLISH"}
+        )
+        if account.publish_mode not in allowed_account_modes:
+            raise AppException(40075, "账号配置未启用所选真实发布方式")
+        if effective_status(account) != "CONNECTED":
+            raise AppException(40075, "真实发布前必须先通过平台账号连接测试")
+        required = (
+            "DRAFT_CREATE"
+            if payload.publish_mode == "DRAFT_ONLY"
+            else ("TEXT_PUBLISH" if payload.platform == "WEIBO" else "SUBMIT_PUBLISH")
+        )
+        if required not in set(account.capabilities_json or []):
+            raise AppException(40076, f"平台账号缺少发布能力：{required}")
+        if (
+            payload.platform == "WECHAT_OFFICIAL"
+            and payload.publish_mode == "REAL_API"
+            and not decrypt_json(account.credentials_encrypted).get("allow_submit_publish")
+        ):
+            raise AppException(40076, "公众号配置未明确允许提交发布")
+    if payload.platform == "XIAOHONGSHU" and payload.publish_mode not in {
+        "MANUAL_CONFIRM",
+        "MOCK",
+    }:
+        raise AppException(40077, "小红书只支持人工确认或 Mock 模式")
     scheduled_at = _local_naive(payload.scheduled_at)
     if scheduled_at <= datetime.now():
         raise AppException(40032, "排期时间必须晚于当前时间")
@@ -133,6 +201,7 @@ def update_schedule(
     row = db.get(PublishSchedule, schedule_id)
     if not row:
         raise AppException(40407, "排期任务不存在", 404)
+    _ensure_schedule_owner(row, user)
     if row.status not in {"PENDING", "FAILED", "WAITING_MANUAL_CONFIRM"}:
         raise AppException(40903, "当前状态不允许修改", 409)
     if payload.scheduled_at:
@@ -142,6 +211,19 @@ def update_schedule(
         row.scheduled_at = scheduled_at
     if payload.publish_mode:
         row.publish_mode = payload.publish_mode
+    if payload.account_id:
+        account = db.scalar(
+            select(PlatformAccount).where(
+                PlatformAccount.id == payload.account_id,
+                PlatformAccount.user_id == user.id,
+                PlatformAccount.platform == row.platform,
+            )
+        )
+        if not account:
+            raise AppException(40303, "平台账号不存在、不匹配或不属于当前用户", 403)
+        row.account_id = account.id
+    account = db.get(PlatformAccount, row.account_id) if row.account_id else None
+    validate_schedule_account(row, account)
     row.status = "PENDING"
     record_audit(db, request, user, "UPDATE", "SCHEDULING", "SCHEDULE", row.id)
     db.commit()
@@ -159,6 +241,7 @@ def delete_schedule(
     row = db.get(PublishSchedule, schedule_id)
     if not row:
         raise AppException(40407, "排期任务不存在", 404)
+    _ensure_schedule_owner(row, user)
     if row.status in {"RUNNING", "SUCCESS", "MOCK_SUCCESS"}:
         raise AppException(40903, "已执行任务不能删除", 409)
     remove_schedule_job(row.id)
@@ -178,6 +261,7 @@ def cancel_schedule(
     row = db.get(PublishSchedule, schedule_id)
     if not row:
         raise AppException(40407, "排期任务不存在", 404)
+    _ensure_schedule_owner(row, user)
     if row.status in {"SUCCESS", "MOCK_SUCCESS"}:
         raise AppException(40903, "已发布任务不能取消", 409)
     row.status = "CANCELLED"
@@ -194,6 +278,10 @@ async def publish_now(
     db: Session = Depends(get_db),
     user: User = Depends(require_roles("ADMIN", "OPERATOR")),
 ) -> dict:
+    existing = db.get(PublishSchedule, schedule_id)
+    if not existing:
+        raise AppException(40407, "排期任务不存在", 404)
+    _ensure_schedule_owner(existing, user)
     row = await execute_publish(db, schedule_id)
     record_audit(
         db, request, user, "PUBLISH_NOW", "PUBLISH", "SCHEDULE", row.id, {"status": row.status}
@@ -210,6 +298,8 @@ async def retry(
     user: User = Depends(require_roles("ADMIN", "OPERATOR")),
 ) -> dict:
     row = db.get(PublishSchedule, schedule_id)
+    if row:
+        _ensure_schedule_owner(row, user)
     if not row or row.status != "FAILED":
         raise AppException(40904, "只有失败任务可以重试", 409)
     if row.retry_count >= row.max_retry_count:
@@ -220,25 +310,86 @@ async def retry(
 @router.post("/schedules/{schedule_id}/manual-confirm")
 async def manual_confirm(
     schedule_id: int,
+    payload: ManualConfirmRequest,
     request: Request,
     db: Session = Depends(get_db),
     user: User = Depends(require_roles("ADMIN", "OPERATOR")),
 ) -> dict:
     row = db.get(PublishSchedule, schedule_id)
+    if row:
+        _ensure_schedule_owner(row, user)
     if not row or row.status != "WAITING_MANUAL_CONFIRM":
         raise AppException(40906, "当前任务不在等待人工确认状态", 409)
-    body = await request.json()
-    row.status = "SUCCESS"
+    if row.platform == "XIAOHONGSHU" and not payload.published_url:
+        raise AppException(40078, "请填写小红书真实发布链接")
+    row.status = "MANUAL_PUBLISHED"
+    row.result_mode = "MANUAL_CONFIRM"
     row.actual_publish_at = datetime.now()
-    row.published_url = body.get("publishedUrl") or "manual://confirmed"
+    row.published_url = str(payload.published_url) if payload.published_url else None
     db.add(
         PublishLog(
             schedule_id=row.id,
             step="MANUAL_CONFIRM",
             response_summary="运营人员已确认平台发布",
-            status="SUCCESS",
+            status="MANUAL_PUBLISHED",
         )
     )
     record_audit(db, request, user, "MANUAL_CONFIRM", "PUBLISH", "SCHEDULE", row.id)
     db.commit()
     return success_response(request, _data(db, row, True), "人工发布已确认")
+
+
+@router.get("/schedules/{schedule_id}/publish-package")
+def get_publish_package(
+    schedule_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+) -> dict:
+    row = db.get(PublishSchedule, schedule_id)
+    if not row or row.created_by != user.id:
+        raise AppException(40407, "发布任务不存在", 404)
+    if row.platform != "XIAOHONGSHU":
+        raise AppException(40079, "只有小红书人工任务提供发布包")
+    return success_response(request, row.publish_package_json or {})
+
+
+@router.get("/schedules/{schedule_id}/publish-package/download")
+def download_publish_package(
+    schedule_id: int,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+) -> StreamingResponse:
+    row = db.get(PublishSchedule, schedule_id)
+    if not row or row.created_by != user.id:
+        raise AppException(40407, "发布任务不存在", 404)
+    if row.platform != "XIAOHONGSHU":
+        raise AppException(40079, "只有小红书人工任务提供发布包")
+    package = row.publish_package_json or {}
+    stream = io.BytesIO()
+    with zipfile.ZipFile(stream, "w", zipfile.ZIP_DEFLATED) as archive:
+        text = f"{package.get('title', '')}\n\n{package.get('content', '')}\n\n"
+        text += " ".join(package.get("hashtags", []))
+        archive.writestr("发布文案.txt", text)
+        archive.writestr("发布说明.json", json.dumps(package, ensure_ascii=False, indent=2))
+        for index, image_url in enumerate(package.get("images", []), start=1):
+            path = _package_image_path(str(image_url))
+            if path and path.is_file():
+                archive.writestr(f"images/{index:02d}{path.suffix.lower()}", path.read_bytes())
+    stream.seek(0)
+    return StreamingResponse(
+        stream,
+        media_type="application/zip",
+        headers={"Content-Disposition": f'attachment; filename="xiaohongshu-{schedule_id}.zip"'},
+    )
+
+
+def _package_image_path(value: str) -> Path | None:
+    parsed = urlparse(value)
+    url_path = parsed.path if parsed.scheme else value
+    project_root = Path(__file__).resolve().parents[4]
+    if url_path.startswith("/uploads/"):
+        return project_root / url_path.lstrip("/")
+    if url_path.startswith("/media/"):
+        return project_root / "frontend" / "public" / url_path.lstrip("/")
+    return None
