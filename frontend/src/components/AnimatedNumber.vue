@@ -14,7 +14,8 @@ watch(
     const draw = (now: number) => {
       const progress = Math.min((now - start) / props.duration, 1)
       const eased = 1 - Math.pow(1 - progress, 3)
-      display.value = Math.round((from + (next - from) * eased) * 100) / 100
+      const value = from + (next - from) * eased
+      display.value = Number.isInteger(next) ? Math.round(value) : Math.round(value * 100) / 100
       if (progress < 1) frame = window.requestAnimationFrame(draw)
     }
     frame = window.requestAnimationFrame(draw)

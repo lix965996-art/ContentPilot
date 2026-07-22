@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useRoute } from 'vue-router'
 import FullCalendar from '@fullcalendar/vue3'
 import dayGridPlugin from '@fullcalendar/daygrid'
 import timeGridPlugin from '@fullcalendar/timegrid'
@@ -25,6 +26,7 @@ import { platformColors, platformNames } from '@/types/business'
 import { useAuthStore } from '@/stores/auth'
 
 const schedules = ref<Schedule[]>([])
+const route = useRoute()
 const auth = useAuthStore()
 const canOperate = computed(() => auth.hasRole(['ADMIN', 'OPERATOR']))
 const platformFilter = ref<Platform | ''>('')
@@ -134,11 +136,24 @@ async function init() {
   articles.value = data.items
   accounts.value = accountRows
   await load()
+  if (route.query.create === '1') {
+    openCreate()
+    const articleId = Number(route.query.article)
+    if (articleId && articles.value.some((item) => item.id === articleId)) {
+      form.value.article_id = articleId
+      await chooseArticle()
+      const variantId = Number(route.query.variant)
+      if (variantId && variants.value.some((item) => item.id === variantId)) {
+        form.value.variant_id = variantId
+        chooseVariant(variantId)
+      }
+    }
+  }
 }
 async function chooseArticle() {
   if (!form.value.article_id) return
   variants.value = await workflowApi.variants(form.value.article_id)
-  const first = variants.value[0]
+  const first = variants.value.find((item) => item.reviewStatus === 'APPROVED') || variants.value[0]
   if (first) {
     form.value.variant_id = first.id
     form.value.platform = first.platform
@@ -264,7 +279,7 @@ onMounted(init)
             ><el-option
               v-for="item in variants"
               :key="item.id"
-              :label="`${platformNames[item.platform]} · v${item.versionNo} · ${item.title}`"
+              :label="`${platformNames[item.platform]} · v${item.versionNo} · ${item.reviewStatus === 'APPROVED' ? '已审核' : '待审核'} · ${item.title}`"
               :value="item.id" /></el-select></el-form-item
         ><el-form-item label="排期时间" required
           ><el-date-picker
@@ -293,11 +308,11 @@ onMounted(init)
           type="warning"
           :closable="false"
         />
-        ></el-form
-      ><template #footer
-        ><el-button @click="dialog = false">取消</el-button
-        ><el-button type="primary" @click="create">创建排期</el-button></template
-      ></el-dialog
-    >
+      </el-form>
+      <template #footer>
+        <el-button @click="dialog = false">取消</el-button>
+        <el-button type="primary" @click="create">创建排期</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>

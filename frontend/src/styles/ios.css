@@ -1001,7 +1001,7 @@ button:active:not(:disabled),
 .compact-timeline span small {
   margin-top: 2px;
   color: var(--sf-muted);
-  font-size: 10px;
+  font-size: 11px;
 }
 
 .performance-content {
@@ -1234,7 +1234,29 @@ button:active:not(:disabled),
   min-height: 52px;
   margin: 0 -32px;
   border-top: 1px solid var(--sf-line);
-  padding: 0 15px;
+  align-items: stretch;
+  flex-direction: column;
+  gap: 7px;
+  padding: 9px 15px;
+}
+.editor-footer .editor-meta,
+.editor-footer .editor-actions {
+  width: 100%;
+  flex-wrap: wrap;
+}
+.editor-footer .editor-actions {
+  justify-content: flex-end;
+}
+.editor-footer .editor-actions .el-button {
+  display: inline-flex;
+  width: auto;
+  min-width: max-content;
+  gap: 4px;
+  padding: 0 10px;
+}
+.generation-metrics {
+  color: var(--sf-subtle);
+  font-size: 11px;
 }
 .composer-preview {
   overflow-y: auto;
@@ -1306,8 +1328,19 @@ button:active:not(:disabled),
 }
 .keyword-list button {
   min-height: 34px;
+  align-items: flex-start;
+  flex-direction: column;
+  justify-content: center;
   border-radius: 8px;
   font-size: 11px;
+}
+.keyword-list button small {
+  display: block;
+  max-width: 100%;
+  margin-top: 2px;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .keyword-list button.active {
   background: var(--sf-brand-soft);

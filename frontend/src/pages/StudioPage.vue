@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Check,
+  CalendarClock,
   Clipboard,
   FilePlus2,
   FileText,
@@ -63,6 +64,7 @@ const options = reactive({
   preserve_meaning: 90,
 })
 const editing = reactive({ title: '', content_text: '', hashtags: [] as string[] })
+const preferenceKey = (articleId: number) => `contentpilot_studio_preferences:${articleId}`
 
 const activeVersions = computed(() =>
   variants.value
@@ -104,6 +106,48 @@ const progressEntries = computed(() =>
     },
   })),
 )
+const qualityDimensions = computed<Array<[string, string | number]>>(() => {
+  const detail = reviewResult.value || {}
+  const value = (camelCase: string, snakeCase: string): string | number => {
+    const result = detail[camelCase] ?? detail[snakeCase]
+    return typeof result === 'string' || typeof result === 'number' ? result : '-'
+  }
+  return [
+    ['事实一致性', value('factualConsistency', 'factual_consistency')],
+    ['信息完整度', value('informationCompleteness', 'information_completeness')],
+    ['平台适配度', value('platformFit', 'platform_fit')],
+    ['可读性', value('readability', 'readability')],
+    ['格式合规性', value('formatCompliance', 'format_compliance')],
+  ]
+})
+
+function formatDuration(milliseconds: number) {
+  if (!milliseconds) return '计算中'
+  return milliseconds >= 1000 ? `${(milliseconds / 1000).toFixed(1)} 秒` : `${milliseconds} 毫秒`
+}
+
+function persistPreferences() {
+  if (!selectedArticleId.value) return
+  window.sessionStorage.setItem(
+    preferenceKey(selectedArticleId.value),
+    JSON.stringify({
+      options: { ...options, platforms: [...options.platforms] },
+      activePlatform: activePlatform.value,
+    }),
+  )
+}
+
+function restorePreferences(articleId: number) {
+  const raw = window.sessionStorage.getItem(preferenceKey(articleId))
+  if (!raw) return
+  try {
+    const value = JSON.parse(raw)
+    if (value.options) Object.assign(options, value.options)
+    if (value.activePlatform) activePlatform.value = value.activePlatform
+  } catch {
+    window.sessionStorage.removeItem(preferenceKey(articleId))
+  }
+}
 
 function sleep(milliseconds: number) {
   return new Promise((resolve) => window.setTimeout(resolve, milliseconds))
@@ -131,6 +175,7 @@ async function loadArticle() {
   accounts.value = accountData
   media.value = mediaData
   options.target_audience = articleData.targetAudience || ''
+  restorePreferences(articleData.id)
   selectedVersionId.value = undefined
   syncEditor()
 }
@@ -288,9 +333,19 @@ function openMedia() {
     ElMessage.warning('请先选择原文')
     return
   }
+  persistPreferences()
   void router.push({
     name: 'media',
     query: { article: selectedArticleId.value, returnTo: 'studio' },
+  })
+}
+
+function scheduleCurrent() {
+  if (!article.value || !current.value) return
+  persistPreferences()
+  void router.push({
+    name: 'calendar',
+    query: { create: '1', article: article.value.id, variant: current.value.id },
   })
 }
 
@@ -304,7 +359,7 @@ watch(
   () => {
     saved.value = false
   },
-  { deep: true },
+  { deep: true, flush: 'sync' },
 )
 onBeforeUnmount(() => {
   pollingSequence += 1
@@ -331,6 +386,9 @@ onMounted(() => loadArticles().catch((error) => ElMessage.error(getApiErrorMessa
         <div>
           <strong>生成进度 · {{ generationTask.status }}</strong>
           <span>{{ generationTask.provider }} / {{ generationTask.modelName }}</span>
+          <small v-if="terminalTask" class="generation-metrics">
+            {{ generationTask.tokenUsage }} Token · {{ formatDuration(generationTask.durationMs) }}
+          </small>
         </div>
         <span>{{ generationTask.progress }}%</span>
       </header>
@@ -445,13 +503,13 @@ onMounted(() => loadArticles().catch((error) => ElMessage.error(getApiErrorMessa
             placeholder="添加标签"
           />
           <div class="editor-footer">
-            <div>
+            <div class="editor-meta">
               <StatusBadge :status="current.reviewStatus" />
               <span>版本 {{ current.versionNo }}</span
               ><span>质量 {{ current.qualityScore }}</span>
               <span>人工修改 {{ current.manualEditRatio }}%</span>
             </div>
-            <div>
+            <div class="editor-actions">
               <button title="复制" @click="copy"><Clipboard :size="15" /></button>
               <button title="单平台重新生成" :disabled="generating" @click="regenerate">
                 <RefreshCw :size="15" />
@@ -463,14 +521,21 @@ onMounted(() => loadArticles().catch((error) => ElMessage.error(getApiErrorMessa
               <el-button type="success" plain size="small" @click="approve">
                 <Check :size="14" />审核通过
               </el-button>
+              <el-button
+                v-if="current.reviewStatus === 'APPROVED'"
+                type="primary"
+                size="small"
+                data-testid="schedule-current"
+                @click="scheduleCurrent"
+              >
+                <CalendarClock :size="14" />安排发布
+              </el-button>
             </div>
           </div>
           <div v-if="reviewResult" class="quality-summary">
-            <span>事实一致性 {{ reviewResult.factualConsistency ?? '-' }}</span>
-            <span>信息完整度 {{ reviewResult.informationCompleteness ?? '-' }}</span>
-            <span>平台适配度 {{ reviewResult.platformFit ?? '-' }}</span>
-            <span>可读性 {{ reviewResult.readability ?? '-' }}</span>
-            <span>格式合规性 {{ reviewResult.formatCompliance ?? '-' }}</span>
+            <span v-for="item in qualityDimensions" :key="item[0]"
+              >{{ item[0] }} {{ item[1] }}</span
+            >
           </div>
           <div class="version-history" data-testid="version-history">
             <header>

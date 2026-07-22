@@ -193,4 +193,4 @@ socialflow-ai/
 
 ## License
 
-本仓库当前未声明开源许可证。除非仓库所有者另行授权，请勿将代码视为已获得公开再分发许可。
+本项目基于 [Apache License 2.0](LICENSE) 开源。
