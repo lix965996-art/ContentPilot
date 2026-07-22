@@ -1807,6 +1807,53 @@ body,
   background: #f2f7ff;
   color: #27609b;
 }
+
+.analysis-loading-card,
+.analysis-error-card {
+  display: flex;
+  min-height: 300px;
+  align-items: center;
+  justify-content: center;
+  flex-direction: column;
+  gap: 12px;
+  padding: 28px;
+  text-align: center;
+}
+
+.analysis-loading-card b,
+.analysis-error-card b {
+  font-size: 17px;
+}
+
+.analysis-loading-card p,
+.analysis-error-card p {
+  margin: 0;
+  color: var(--text-secondary);
+  line-height: 1.6;
+}
+
+.analysis-loading-card small {
+  color: var(--text-muted);
+}
+
+.analysis-loading-card .el-progress {
+  width: min(320px, 100%);
+}
+
+.analysis-spinner {
+  color: #1677ff;
+  animation: analysis-spin 1.2s linear infinite;
+}
+
+@keyframes analysis-spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+.analysis-error-card > svg {
+  color: #e34d59;
+}
 .analysis-risks {
   margin: 16px 0;
   padding: 14px;

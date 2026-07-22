@@ -6,6 +6,7 @@ from app.models.business import ContentArticle
 from app.schemas.generation import (
     WeiboDeepDraftOutput,
 )
+from app.schemas.trends import TrendAngleOutput
 from app.services import generation_service, trend_service
 from app.services.generation_service import LlmRuntime, generate_deep_variant_data
 from app.services.trend_service import aggregate_trends, parse_baidu_html
@@ -34,6 +35,32 @@ def test_parse_real_baidu_payload_shape() -> None:
     assert items[0]["title"] == "真实热点标题"
     assert items[0]["heat"] == 98765
     assert items[0]["url"] == "https://example.com/source"
+
+
+def test_numbered_outline_string_is_normalized() -> None:
+    result = TrendAngleOutput.model_validate(
+        {
+            "title": "热点观察",
+            "audience": "内容运营者",
+            "hook": "从热点理解行业变化",
+            "outline": "1. 核验事实 2. 分析原因 3. 给出建议",
+            "creative_goal": "知识分享",
+        }
+    )
+    assert result.outline == ["核验事实", "分析原因", "给出建议"]
+
+
+def test_provider_specific_angle_fields_have_safe_defaults() -> None:
+    result = TrendAngleOutput.model_validate(
+        {
+            "title": "AI 热点背后的内容趋势",
+            "core_value": "讨论内容生产方式的变化",
+            "platform": "公众号",
+        }
+    )
+    assert result.hook == "讨论内容生产方式的变化"
+    assert result.audience == "关注该热点的内容读者"
+    assert len(result.outline) == 2
 
 
 @pytest.mark.asyncio

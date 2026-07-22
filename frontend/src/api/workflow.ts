@@ -38,7 +38,7 @@ export const workflowApi = {
     }>(apiClient.get('/trends', { params }))
   },
   analyzeTrend(data: { title: string; summary: string; source: string; url: string }) {
-    return unwrap<TrendAnalysis>(apiClient.post('/trends/analyze', data))
+    return unwrap<TrendAnalysis>(apiClient.post('/trends/analyze', data, { timeout: 120_000 }))
   },
   articles(params: Record<string, unknown> = {}) {
     return unwrap<{ items: Article[]; total: number }>(apiClient.get('/articles', { params }))

@@ -1,8 +1,16 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { ExternalLink, Flame, RefreshCw, Sparkles } from 'lucide-vue-next'
+import {
+  AlertCircle,
+  ExternalLink,
+  Flame,
+  LoaderCircle,
+  RefreshCw,
+  RotateCcw,
+  Sparkles,
+} from 'lucide-vue-next'
 import { getApiErrorMessage } from '@/api/client'
 import { workflowApi } from '@/api/workflow'
 import PageHeader from '@/components/PageHeader.vue'
@@ -23,6 +31,20 @@ const selected = ref<TrendItem>()
 const analysis = ref<TrendAnalysis>()
 const selectedAngle = ref(0)
 const drawerOpen = ref(false)
+const analysisError = ref('')
+const analysisStartedAt = ref(0)
+const clock = ref(Date.now())
+let clockTimer: number | undefined
+
+const analysisElapsed = computed(() =>
+  analysisStartedAt.value ? Math.floor((clock.value - analysisStartedAt.value) / 1000) : 0,
+)
+const analysisStage = computed(() => {
+  if (analysisElapsed.value < 5) return '正在读取热点标题、摘要和来源信息'
+  if (analysisElapsed.value < 15) return '真实模型正在策划不同的内容切入角度'
+  if (analysisElapsed.value < 30) return '正在整理目标读者、开场钩子和文章大纲'
+  return '模型响应时间较长，系统仍在等待，请不要重复点击'
+})
 
 async function load(refresh = false) {
   loading.value = true
@@ -41,9 +63,11 @@ async function load(refresh = false) {
 async function analyze(item: TrendItem) {
   selected.value = item
   analysis.value = undefined
+  analysisError.value = ''
   selectedAngle.value = 0
   drawerOpen.value = true
   analyzing.value = true
+  analysisStartedAt.value = Date.now()
   try {
     analysis.value = await workflowApi.analyzeTrend({
       title: item.title,
@@ -53,7 +77,8 @@ async function analyze(item: TrendItem) {
     })
     selectedAngle.value = analysis.value.recommended_angle_index
   } catch (error) {
-    ElMessage.error(getApiErrorMessage(error, 'AI 选题分析失败'))
+    analysisError.value = getApiErrorMessage(error, 'AI 选题分析失败')
+    ElMessage.error(analysisError.value)
   } finally {
     analyzing.value = false
   }
@@ -82,7 +107,13 @@ async function createFromAngle(angle: TrendAngle) {
   }
 }
 
-onMounted(() => void load())
+onMounted(() => {
+  clockTimer = window.setInterval(() => (clock.value = Date.now()), 1000)
+  void load()
+})
+onBeforeUnmount(() => {
+  if (clockTimer) window.clearInterval(clockTimer)
+})
 </script>
 
 <template>
@@ -145,7 +176,30 @@ onMounted(() => void load())
     </section>
 
     <el-drawer v-model="drawerOpen" title="AI 选题分析" size="520px">
-      <div v-loading="analyzing" class="trend-analysis">
+      <div class="trend-analysis">
+        <div v-if="analyzing" class="analysis-loading-card" data-testid="trend-analysis-loading">
+          <LoaderCircle :size="30" class="analysis-spinner" />
+          <b>AI 正在分析选题</b>
+          <p>{{ analysisStage }}</p>
+          <small>已等待 {{ analysisElapsed }} 秒 · 使用已配置的真实模型</small>
+          <el-progress
+            :percentage="Math.min(92, 12 + analysisElapsed * 2)"
+            :show-text="false"
+            :stroke-width="6"
+          />
+        </div>
+        <div
+          v-else-if="analysisError"
+          class="analysis-error-card"
+          data-testid="trend-analysis-error"
+        >
+          <AlertCircle :size="28" />
+          <b>这次分析没有完成</b>
+          <p>{{ analysisError }}</p>
+          <el-button type="primary" @click="selected && analyze(selected)">
+            <RotateCcw :size="15" class="mr-1" />重新分析
+          </el-button>
+        </div>
         <template v-if="analysis">
           <p class="analysis-reason"><Flame :size="18" />{{ analysis.relevance_reason }}</p>
           <article
