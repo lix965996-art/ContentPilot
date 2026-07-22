@@ -8,10 +8,20 @@ from app.core.responses import success_response
 from app.db.session import get_db
 from app.models.business import ContentArticle, ContentVariant, PublishSchedule
 from app.models.user import User
-from app.schemas.business import ArticleCreate, ArticleUpdate, VariantUpdate
+from app.schemas.business import (
+    ArticleCreate,
+    ArticleUpdate,
+    VariantUpdate,
+    WechatFormatPreviewRequest,
+    WechatFormatRequest,
+)
 from app.services.audit_service import record_audit
 from app.services.generation_service import count_emoji, edit_ratio, markdown_to_safe_html
 from app.services.serializers import model_dict
+from app.services.wechat_formatting import (
+    format_wechat_html,
+    wechat_theme_profiles,
+)
 
 router = APIRouter(tags=["内容管理"])
 
@@ -230,7 +240,12 @@ def update_variant(
         raise AppException(40402, "内容版本不存在", 404)
     variant.title = payload.title
     variant.content_text = payload.content_text
-    variant.content_html = markdown_to_safe_html(payload.content_text)
+    if variant.platform == "WECHAT_OFFICIAL" and variant.format_profile_json:
+        variant.content_html, variant.format_profile_json = format_wechat_html(
+            payload.content_text, variant.format_profile_json
+        )
+    else:
+        variant.content_html = markdown_to_safe_html(payload.content_text)
     variant.hashtags_json = payload.hashtags
     variant.emoji_count = count_emoji(payload.title + payload.content_text)
     variant.word_count = len(payload.content_text)
@@ -239,6 +254,48 @@ def update_variant(
     db.commit()
     db.refresh(variant)
     return success_response(request, model_dict(variant, camel=True), "版本已保存")
+
+
+@router.get("/formatting/wechat/profiles")
+def wechat_format_profiles(
+    request: Request,
+    _: User = Depends(get_current_user),
+) -> dict:
+    return success_response(request, wechat_theme_profiles())
+
+
+@router.post("/formatting/wechat/preview")
+def preview_wechat_format(
+    payload: WechatFormatPreviewRequest,
+    request: Request,
+    _: User = Depends(get_current_user),
+) -> dict:
+    data = payload.model_dump()
+    content_text = data.pop("content_text")
+    content_html, profile = format_wechat_html(content_text, data)
+    return success_response(request, {"contentHtml": content_html, "profile": profile})
+
+
+@router.put("/variants/{variant_id}/format")
+def format_wechat_variant(
+    variant_id: int,
+    payload: WechatFormatRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+) -> dict:
+    variant = db.get(ContentVariant, variant_id)
+    if not variant:
+        raise AppException(40402, "内容版本不存在", 404)
+    if variant.platform != "WECHAT_OFFICIAL":
+        raise AppException(40078, "排版助手当前仅适用于微信公众号版本")
+    variant.content_html, variant.format_profile_json = format_wechat_html(
+        variant.content_text, payload.model_dump()
+    )
+    record_audit(db, request, user, "FORMAT", "CONTENT", "VARIANT", variant.id)
+    db.commit()
+    db.refresh(variant)
+    return success_response(request, model_dict(variant, camel=True), "公众号排版已保存")
 
 
 @router.post("/variants/{variant_id}/approve")

@@ -9,6 +9,7 @@ import {
   FilePlus2,
   FileText,
   ImagePlus,
+  LayoutTemplate,
   RefreshCw,
   Save,
   Send,
@@ -23,6 +24,7 @@ import PageHeader from '@/components/PageHeader.vue'
 import PlatformIcon from '@/components/PlatformIcon.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import Toast from '@/components/Toast.vue'
+import WechatFormatterDialog from '@/components/WechatFormatterDialog.vue'
 import type {
   Article,
   GenerationTask,
@@ -52,6 +54,7 @@ const reviewing = ref(false)
 const reviewResult = ref<Record<string, unknown>>()
 const saved = ref(true)
 const savedToast = ref(false)
+const showWechatFormatter = ref(false)
 let pollingSequence = 0
 
 const options = reactive({
@@ -324,6 +327,20 @@ async function copy() {
   ElMessage.success('已复制')
 }
 
+async function openWechatFormatter() {
+  if (!current.value || current.value.platform !== 'WECHAT_OFFICIAL') return
+  try {
+    if (!saved.value) await save()
+    showWechatFormatter.value = true
+  } catch (error) {
+    ElMessage.error(getApiErrorMessage(error, '请先保存正文后再进行排版'))
+  }
+}
+
+function applyWechatFormatting(value: Variant) {
+  variants.value = variants.value.map((item) => (item.id === value.id ? value : item))
+}
+
 function focusEditor() {
   editorContent.value?.focus()
 }
@@ -511,6 +528,15 @@ onMounted(() => loadArticles().catch((error) => ElMessage.error(getApiErrorMessa
             </div>
             <div class="editor-actions">
               <button title="复制" @click="copy"><Clipboard :size="15" /></button>
+              <el-button
+                v-if="current.platform === 'WECHAT_OFFICIAL'"
+                plain
+                size="small"
+                data-testid="open-wechat-formatter"
+                @click="openWechatFormatter"
+              >
+                <LayoutTemplate :size="14" />公众号排版
+              </el-button>
               <button title="单平台重新生成" :disabled="generating" @click="regenerate">
                 <RefreshCw :size="15" />
               </button>
@@ -630,5 +656,11 @@ onMounted(() => loadArticles().catch((error) => ElMessage.error(getApiErrorMessa
     <EmptyState v-else title="先创建一篇原文"
       ><template #icon><FilePlus2 /></template
     ></EmptyState>
+    <WechatFormatterDialog
+      v-model="showWechatFormatter"
+      :variant="current"
+      :content-text="editing.content_text"
+      @applied="applyWechatFormatting"
+    />
   </div>
 </template>

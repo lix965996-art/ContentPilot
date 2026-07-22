@@ -121,6 +121,7 @@ async def execute_publish(db: Session, schedule_id: int) -> PublishSchedule:
                 "platform": schedule.platform,
                 "title": variant.title,
                 "content": variant.content_text,
+                "content_html": variant.content_html,
                 "summary": variant.content_text[:120],
                 "hashtags": variant.hashtags_json or [],
                 "images": [asset.image_url for asset in assets],

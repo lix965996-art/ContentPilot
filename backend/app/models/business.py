@@ -58,6 +58,7 @@ class ContentVariant(TimestampMixin, Base):
     title: Mapped[str] = mapped_column(String(255))
     content_text: Mapped[str] = mapped_column(Text)
     content_html: Mapped[str | None] = mapped_column(Text, nullable=True)
+    format_profile_json: Mapped[dict] = mapped_column(JSON, default=dict)
     hashtags_json: Mapped[list] = mapped_column(JSON, default=list)
     emoji_count: Mapped[int] = mapped_column(Integer, default=0)
     word_count: Mapped[int] = mapped_column(Integer, default=0)

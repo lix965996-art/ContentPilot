@@ -19,6 +19,8 @@ export default tseslint.config(
         HTMLElement: 'readonly',
         document: 'readonly',
         URL: 'readonly',
+        Blob: 'readonly',
+        ClipboardItem: 'readonly',
       },
       parserOptions: {
         parser: tseslint.parser,

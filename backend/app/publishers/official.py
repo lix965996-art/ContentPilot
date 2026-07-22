@@ -236,7 +236,7 @@ class WechatDraftPublisher(OfficialPublisher):
                 )
             if not thumb_media_id:
                 raise ValueError("请配置默认封面素材 ID，或为文章选择一张本地图片")
-            body_html = markdown_to_wechat_html(request["content"])
+            body_html = request.get("content_html") or markdown_to_wechat_html(request["content"])
             for path in images[1:]:
                 image_url = await self._upload_image(token, path, permanent=False)
                 body_html += f'<p><img src="{html.escape(image_url)}" /></p>'

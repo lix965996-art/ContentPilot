@@ -12,6 +12,8 @@ import type {
   Schedule,
   Variant,
   MediaAsset,
+  WechatFormatProfile,
+  WechatThemeProfile,
 } from '@/types/business'
 
 async function unwrap<T>(promise: Promise<{ data: ApiResponse<T> }>): Promise<T> {
@@ -42,6 +44,17 @@ export const workflowApi = {
   },
   updateVariant(id: number, data: Record<string, unknown>) {
     return unwrap<Variant>(apiClient.put(`/variants/${id}`, data))
+  },
+  wechatFormatProfiles() {
+    return unwrap<WechatThemeProfile[]>(apiClient.get('/formatting/wechat/profiles'))
+  },
+  previewWechatFormat(contentText: string, profile: WechatFormatProfile) {
+    return unwrap<{ contentHtml: string; profile: WechatFormatProfile }>(
+      apiClient.post('/formatting/wechat/preview', { content_text: contentText, ...profile }),
+    )
+  },
+  formatWechatVariant(id: number, profile: WechatFormatProfile) {
+    return unwrap<Variant>(apiClient.put(`/variants/${id}/format`, profile))
   },
   approveVariant(id: number) {
     return unwrap<Variant>(apiClient.post(`/variants/${id}/approve`))

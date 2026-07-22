@@ -24,6 +24,7 @@ export interface Variant {
   title: string
   contentText: string
   contentHtml?: string
+  formatProfileJson?: WechatFormatProfile
   hashtagsJson: string[]
   wordCount: number
   modelName: string
@@ -38,6 +39,25 @@ export interface Variant {
   reviewStatus: string
   reviewDetailJson?: Record<string, unknown>
   createdAt: string
+}
+
+export interface WechatFormatProfile {
+  theme: 'clean' | 'brand' | 'editorial'
+  accent_color: string
+  font_size: number
+  line_height: number
+  paragraph_spacing: number
+  first_line_indent: boolean
+  link_footnotes: boolean
+}
+
+export interface WechatThemeProfile {
+  key: WechatFormatProfile['theme']
+  name: string
+  description: string
+  accent_color: string
+  heading_style: string
+  quote_background: string
 }
 
 export type GenerationPlatformStatus = 'PENDING' | 'RUNNING' | 'RETRYING' | 'SUCCESS' | 'FAILED'

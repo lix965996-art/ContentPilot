@@ -82,6 +82,41 @@ def test_complete_content_to_publish_flow(client: TestClient, login_as) -> None:
     assert repeated.json()["data"]["status"] == "MOCK_SUCCESS"
 
 
+def test_wechat_variant_can_preview_and_save_formatting(client: TestClient, login_as) -> None:
+    token = login_as("operator", "Operator@123456")["access_token"]
+    auth = headers(token)
+    articles = client.get("/api/articles?page_size=100", headers=auth).json()["data"]["items"]
+    article_id = articles[0]["id"]
+    variants = client.get(f"/api/articles/{article_id}/variants", headers=auth).json()["data"]
+    variant = next(item for item in variants if item["platform"] == "WECHAT_OFFICIAL")
+    profile = {
+        "theme": "editorial",
+        "accent_color": "#9a6b3f",
+        "font_size": 17,
+        "line_height": 1.9,
+        "paragraph_spacing": 18,
+        "first_line_indent": True,
+        "link_footnotes": True,
+    }
+
+    themes = client.get("/api/formatting/wechat/profiles", headers=auth)
+    assert themes.status_code == 200
+    assert len(themes.json()["data"]) == 3
+
+    preview = client.post(
+        "/api/formatting/wechat/preview",
+        headers=auth,
+        json={"content_text": variant["contentText"], **profile},
+    )
+    assert preview.status_code == 200
+    assert 'data-contentpilot-format="wechat-editorial"' in preview.json()["data"]["contentHtml"]
+
+    saved = client.put(f"/api/variants/{variant['id']}/format", headers=auth, json=profile)
+    assert saved.status_code == 200
+    assert saved.json()["data"]["formatProfileJson"]["theme"] == "editorial"
+    assert "border-bottom:2px" in saved.json()["data"]["contentHtml"]
+
+
 def test_analytics_and_experiment_endpoints(client: TestClient, login_as) -> None:
     token = login_as("operator", "Operator@123456")["access_token"]
     auth = headers(token)

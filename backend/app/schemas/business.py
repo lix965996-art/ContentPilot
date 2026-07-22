@@ -42,6 +42,20 @@ class VariantUpdate(BaseModel):
     hashtags: list[str] = Field(default_factory=list, max_length=20)
 
 
+class WechatFormatRequest(BaseModel):
+    theme: Literal["clean", "brand", "editorial"] = "clean"
+    accent_color: str = Field(default="#1677ff", pattern=r"^#[0-9A-Fa-f]{6}$")
+    font_size: int = Field(default=16, ge=14, le=20)
+    line_height: float = Field(default=1.8, ge=1.4, le=2.2)
+    paragraph_spacing: int = Field(default=16, ge=8, le=32)
+    first_line_indent: bool = False
+    link_footnotes: bool = True
+
+
+class WechatFormatPreviewRequest(WechatFormatRequest):
+    content_text: str = Field(min_length=1, max_length=100_000)
+
+
 class KeywordRequest(BaseModel):
     article_id: int
 

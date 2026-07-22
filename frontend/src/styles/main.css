@@ -2011,12 +2011,12 @@ body,
   display: block;
   margin: 3px 0 7px;
   color: var(--sf-subtle);
-  font-size: 9px;
+  font-size: 11px;
 }
 .media-masonry button {
   margin-right: 7px;
   color: var(--sf-brand);
-  font-size: 10px;
+  font-size: 11px;
 }
 .selected-media {
   border-left: 1px solid var(--sf-line);
@@ -2067,7 +2067,7 @@ body,
   overflow: hidden;
   margin-top: 3px;
   color: var(--sf-subtle);
-  font-size: 9px;
+  font-size: 11px;
   text-overflow: ellipsis;
   white-space: nowrap;
 }

@@ -85,3 +85,25 @@ test('studio displays independent real-time progress for all three platforms', a
   await expect(page.getByTestId('length-control')).toBeVisible()
   await expect(page.getByTestId('preserve-control')).toBeVisible()
 })
+
+test('WeChat version opens the formatting assistant and previews a selected theme', async ({
+  page,
+}) => {
+  await login(page)
+  await page.goto('/studio')
+  await page.locator('.preview-tabs button').filter({ hasText: '微信公众号' }).click()
+
+  await expect(page.getByTestId('open-wechat-formatter')).toBeVisible()
+  await page.getByTestId('open-wechat-formatter').click()
+  await expect(page.getByTestId('wechat-formatter')).toBeVisible()
+  await expect(page.getByRole('button', { name: /清爽简约/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: /品牌强调/ })).toBeVisible()
+  await expect(page.getByRole('button', { name: /杂志阅读/ })).toBeVisible()
+
+  await page.getByRole('button', { name: /品牌强调/ }).click()
+  await expect(
+    page.locator('.wechat-rich-content [data-contentpilot-format="wechat-brand"]'),
+  ).toBeVisible()
+  await page.getByRole('button', { name: '保存并用于发布' }).click()
+  await expect(page.getByText('公众号排版已保存，发布草稿时会使用此样式')).toBeVisible()
+})

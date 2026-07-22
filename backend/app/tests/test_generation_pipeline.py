@@ -18,6 +18,7 @@ from app.services.generation_service import (
     markdown_to_safe_html,
     review_variant_quality,
 )
+from app.services.wechat_formatting import format_wechat_html
 
 
 def headers(token: str) -> dict[str, str]:
@@ -265,6 +266,27 @@ def test_edit_ratio_safe_html_and_emoji_count() -> None:
     assert "<script>" not in rendered
     assert "&lt;script&gt;" in rendered
     assert count_emoji("你好 👨‍💻✨，测试✅") == 3
+
+
+def test_wechat_formatter_outputs_safe_inline_styles_and_footnotes() -> None:
+    rendered, profile = format_wechat_html(
+        "## 核心观点\n\n<script>alert(1)</script>\n\n- **第一项**\n\n[原文](https://example.com/a)",
+        {
+            "theme": "brand",
+            "accent_color": "#07c160",
+            "font_size": 17,
+            "first_line_indent": True,
+            "link_footnotes": True,
+        },
+    )
+
+    assert profile["theme"] == "brand"
+    assert 'data-contentpilot-format="wechat-brand"' in rendered
+    assert "font-size:17px" in rendered
+    assert "text-indent:2em" in rendered
+    assert "display:flex" in rendered
+    assert "https://example.com/a" in rendered
+    assert "<script>" not in rendered
 
 
 def test_history_delete_reject_and_single_platform_retry(client: TestClient, login_as) -> None:
