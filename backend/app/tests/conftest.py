@@ -68,7 +68,7 @@ def intercept_llm_transport(monkeypatch):
                 "title": "真实模型测试公众号文章",
                 "summary": "依据原文生成的结构化摘要",
                 "content": (
-                    "## 核心信息\n\n这是依据原文生成的公众号测试正文。\n\n## 结语\n\n发布前请复核。"
+                    "一、核心信息\n\n这是依据原文生成的公众号测试正文。\n\n结语\n\n发布前请复核。"
                 ),
                 "author": "",
                 "hashtags": [],

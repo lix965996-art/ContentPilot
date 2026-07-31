@@ -2,7 +2,8 @@ import json
 
 import pytest
 
-from app.models.business import ContentArticle
+from app.db.session import SessionLocal
+from app.models.business import ContentArticle, GenerationTask
 from app.schemas.generation import (
     WeiboDeepDraftOutput,
 )
@@ -149,6 +150,101 @@ async def test_deep_creation_generates_candidates_then_reviews(monkeypatch) -> N
     )
     assert result.data["title"] == "审慎看试点"
     assert result.candidate_titles == ["候选一", "候选二"]
+    assert [item["title"] for item in result.candidates or []] == ["候选一", "候选二"]
     assert result.selected_candidate == 1
     assert "PLANNING_STRATEGY" in events
     assert "REVIEWING_AND_REFINING" in events
+
+
+def test_user_can_select_and_persist_a_deep_candidate(client, login_as) -> None:
+    auth = {"Authorization": f"Bearer {login_as('operator', 'Operator@123456')['access_token']}"}
+    with SessionLocal() as db:
+        article = db.query(ContentArticle).order_by(ContentArticle.id).first()
+        assert article is not None
+        task = GenerationTask(
+            id="deep-candidate-selection-test",
+            article_id=article.id,
+            status="SUCCESS",
+            progress=100,
+            platforms_json=["WEIBO"],
+            result_variant_ids_json=[],
+            model_name="test-chat-model",
+            provider="test",
+            prompt_version="2.0.0",
+            token_usage=100,
+            duration_ms=200,
+            options_json={
+                "article_id": article.id,
+                "platforms": ["WEIBO"],
+                "generation_mode": "DEEP",
+            },
+            platform_status_json={
+                "WEIBO": {
+                    "status": "SUCCESS",
+                    "progress": 100,
+                    "stage": "COMPLETED",
+                    "strategy": {
+                        "angle": "事实边界",
+                        "hook": "先确认事实",
+                        "reader_value": "避免误读",
+                        "structure": ["事实", "建议"],
+                        "cta": "继续讨论",
+                    },
+                    "candidates": [
+                        {
+                            "title": "候选一",
+                            "content": "这是第一份基于原文事实生成的完整候选内容。",
+                            "hashtags": [],
+                            "warnings": [],
+                        },
+                        {
+                            "title": "候选二",
+                            "content": "这是第二份基于原文事实生成的完整候选内容。",
+                            "hashtags": [],
+                            "warnings": [],
+                        },
+                    ],
+                    "candidateTitles": ["候选一", "候选二"],
+                    "selectedCandidate": 0,
+                    "attempt": 1,
+                    "durationMs": 200,
+                    "tokenUsage": 100,
+                }
+            },
+        )
+        db.merge(task)
+        db.commit()
+        article_id = article.id
+
+    selected = client.post(
+        "/api/generation/tasks/deep-candidate-selection-test/platforms/WEIBO/select-candidate",
+        headers=auth,
+        json={"candidate_index": 1},
+    )
+    assert selected.status_code == 200
+    data = selected.json()["data"]
+    assert data["variant"]["title"] == "候选二"
+    state = data["task"]["platformStatusJson"]["WEIBO"]
+    assert state["userSelectedCandidate"] == 1
+    assert state["userSelectedVariantId"] == data["variant"]["id"]
+
+    latest = client.get(
+        f"/api/generation/articles/{article_id}/latest-deep-task",
+        headers=auth,
+    )
+    assert latest.status_code == 200
+    assert latest.json()["data"]["id"] == "deep-candidate-selection-test"
+
+    regenerated = client.post(
+        "/api/generation/tasks/deep-candidate-selection-test/platforms/WEIBO/regenerate",
+        headers=auth,
+        json={"feedback": "更克制地表达" * 100},
+    )
+    assert regenerated.status_code == 200
+    regenerated_task_id = regenerated.json()["data"]["taskId"]
+    with SessionLocal() as db:
+        regenerated_task = db.get(GenerationTask, regenerated_task_id)
+        assert regenerated_task is not None
+        requirements = regenerated_task.options_json["creative_requirements"]
+        assert len(requirements) <= 1000
+        assert "更克制地表达" in requirements

@@ -12,9 +12,16 @@ class WeiboGenerationOutput(BaseModel):
     warnings: list[str] = Field(default_factory=list, max_length=10)
 
 
+class XGenerationOutput(BaseModel):
+    title: str = Field(min_length=1, max_length=80)
+    content: str = Field(min_length=1, max_length=280)
+    hashtags: list[Hashtag] = Field(default_factory=list, max_length=4)
+    warnings: list[str] = Field(default_factory=list, max_length=10)
+
+
 class XiaohongshuGenerationOutput(BaseModel):
-    title: str = Field(min_length=1, max_length=30)
-    content: str = Field(min_length=20, max_length=5000)
+    title: str = Field(min_length=1, max_length=20)
+    content: str = Field(min_length=20, max_length=1000)
     hashtags: list[Hashtag] = Field(default_factory=list, max_length=10)
     cover_text: str = Field(default="", max_length=30)
     warnings: list[str] = Field(default_factory=list, max_length=10)
@@ -33,7 +40,7 @@ class WechatGenerationOutput(BaseModel):
     @classmethod
     def require_markdown_structure(cls, value: str) -> str:
         if "\n" not in value:
-            raise ValueError("微信公众号正文必须包含 Markdown 段落")
+            raise ValueError("微信公众号正文必须包含结构化段落")
         return value
 
 
@@ -81,6 +88,11 @@ class WeiboDeepDraftOutput(BaseModel):
     candidates: list[WeiboGenerationOutput] = Field(min_length=2, max_length=2)
 
 
+class XDeepDraftOutput(BaseModel):
+    strategy: CreativeStrategyOutput
+    candidates: list[XGenerationOutput] = Field(min_length=2, max_length=2)
+
+
 class XiaohongshuDeepDraftOutput(BaseModel):
     strategy: CreativeStrategyOutput
     candidates: list[XiaohongshuGenerationOutput] = Field(min_length=2, max_length=2)
@@ -93,6 +105,10 @@ class WechatDeepDraftOutput(BaseModel):
 
 class WeiboDeepFinalOutput(DeepReviewOutput):
     final: WeiboGenerationOutput
+
+
+class XDeepFinalOutput(DeepReviewOutput):
+    final: XGenerationOutput
 
 
 class XiaohongshuDeepFinalOutput(DeepReviewOutput):
@@ -113,23 +129,28 @@ class KeywordExtractionOutput(BaseModel):
     keywords: list[KeywordOutput] = Field(min_length=1, max_length=8)
 
 
-GenerationOutput = WeiboGenerationOutput | XiaohongshuGenerationOutput | WechatGenerationOutput
-PlatformName = Literal["WEIBO", "XIAOHONGSHU", "WECHAT_OFFICIAL"]
+GenerationOutput = (
+    WeiboGenerationOutput | XGenerationOutput | XiaohongshuGenerationOutput | WechatGenerationOutput
+)
+PlatformName = Literal["WEIBO", "X", "XIAOHONGSHU", "WECHAT_OFFICIAL"]
 
 OUTPUT_MODELS: dict[str, type[BaseModel]] = {
     "WEIBO": WeiboGenerationOutput,
+    "X": XGenerationOutput,
     "XIAOHONGSHU": XiaohongshuGenerationOutput,
     "WECHAT_OFFICIAL": WechatGenerationOutput,
 }
 
 DEEP_DRAFT_MODELS: dict[str, type[BaseModel]] = {
     "WEIBO": WeiboDeepDraftOutput,
+    "X": XDeepDraftOutput,
     "XIAOHONGSHU": XiaohongshuDeepDraftOutput,
     "WECHAT_OFFICIAL": WechatDeepDraftOutput,
 }
 
 DEEP_FINAL_MODELS: dict[str, type[BaseModel]] = {
     "WEIBO": WeiboDeepFinalOutput,
+    "X": XDeepFinalOutput,
     "XIAOHONGSHU": XiaohongshuDeepFinalOutput,
     "WECHAT_OFFICIAL": WechatDeepFinalOutput,
 }

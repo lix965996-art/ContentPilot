@@ -317,9 +317,7 @@ def update_workspace() -> dict[str, int]:
             "WECHAT_OFFICIAL": "公众号（待真实配置）",
             "XIAOHONGSHU": "ContentPilot 小红书（人工发布）",
         }
-        accounts = db.scalars(
-            select(PlatformAccount).where(PlatformAccount.user_id == operator.id)
-        ).all()
+        accounts = db.scalars(select(PlatformAccount)).all()
         for account in accounts:
             account.account_name = account_names[account.platform]
             if account.platform == "XIAOHONGSHU":

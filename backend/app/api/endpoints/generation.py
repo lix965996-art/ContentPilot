@@ -1,10 +1,12 @@
 import asyncio
 import time
 import uuid
+from dataclasses import replace
 from datetime import UTC, datetime
 from typing import Any
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Request
+from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_roles
@@ -14,9 +16,16 @@ from app.db.session import SessionLocal, get_db
 from app.models.business import ContentArticle, ContentVariant, GenerationTask
 from app.models.user import User
 from app.prompts.profiles import PROMPT_VERSION
-from app.schemas.business import GenerateRequest, KeywordRequest, Platform
+from app.schemas.business import (
+    DeepCandidateSelectRequest,
+    DeepRegenerateRequest,
+    GenerateRequest,
+    KeywordRequest,
+    Platform,
+)
 from app.services.audit_service import record_audit
 from app.services.generation_service import (
+    GenerationResult,
     extract_keywords_with_llm,
     generate_content_brief,
     generate_deep_variant_data,
@@ -68,6 +77,24 @@ def _create_task(db: Session, payload: GenerateRequest) -> GenerationTask:
     db.add(task)
     db.commit()
     return task
+
+
+def _task_data(db: Session, task: GenerationTask) -> dict[str, Any]:
+    data = model_dict(task, camel=True)
+    if task.result_variant_ids_json:
+        variants = (
+            db.query(ContentVariant)
+            .filter(ContentVariant.id.in_(task.result_variant_ids_json))
+            .all()
+        )
+        order = {variant_id: index for index, variant_id in enumerate(task.result_variant_ids_json)}
+        data["variants"] = [
+            model_dict(item, camel=True)
+            for item in sorted(variants, key=lambda item: order[item.id])
+        ]
+    else:
+        data["variants"] = []
+    return data
 
 
 async def _run_generation_task(task_id: str) -> None:
@@ -175,9 +202,15 @@ async def _run_generation_task(task_id: str) -> None:
                 return_exceptions=True,
             )
 
+            successful_result_count = sum(
+                not isinstance(result, BaseException) for result in results
+            )
+            successful_result_index = 0
             variant_ids: list[int] = []
             errors: list[str] = []
-            total_tokens = shared_prompt_tokens + shared_completion_tokens
+            total_tokens = (
+                0 if successful_result_count else shared_prompt_tokens + shared_completion_tokens
+            )
             total_duration = 0
             for platform, result in zip(task.platforms_json, results, strict=True):
                 if isinstance(result, BaseException):
@@ -196,6 +229,23 @@ async def _run_generation_task(task_id: str) -> None:
                         },
                     )
                     continue
+                if successful_result_count:
+                    prompt_share, prompt_remainder = divmod(
+                        shared_prompt_tokens, successful_result_count
+                    )
+                    completion_share, completion_remainder = divmod(
+                        shared_completion_tokens, successful_result_count
+                    )
+                    result = replace(
+                        result,
+                        prompt_tokens=result.prompt_tokens
+                        + prompt_share
+                        + int(successful_result_index < prompt_remainder),
+                        completion_tokens=result.completion_tokens
+                        + completion_share
+                        + int(successful_result_index < completion_remainder),
+                    )
+                    successful_result_index += 1
                 await update_platform(
                     platform,
                     "RUNNING",
@@ -206,6 +256,7 @@ async def _run_generation_task(task_id: str) -> None:
                         "strategy": result.strategy,
                         "review": result.review_detail,
                         "candidateTitles": result.candidate_titles,
+                        "candidates": result.candidates,
                         "selectedCandidate": result.selected_candidate,
                     },
                 )
@@ -298,20 +349,161 @@ def task_status(
     task = db.get(GenerationTask, task_id)
     if not task:
         raise AppException(40403, "生成任务不存在", 404)
-    data = model_dict(task, camel=True)
-    if task.result_variant_ids_json:
-        variants = (
-            db.query(ContentVariant)
-            .filter(ContentVariant.id.in_(task.result_variant_ids_json))
-            .all()
-        )
-        order = {variant_id: index for index, variant_id in enumerate(task.result_variant_ids_json)}
-        data["variants"] = [
-            model_dict(item, camel=True) for item in sorted(variants, key=lambda x: order[x.id])
-        ]
-    else:
-        data["variants"] = []
-    return success_response(request, data)
+    return success_response(request, _task_data(db, task))
+
+
+@router.get("/generation/articles/{article_id}/latest-deep-task")
+def latest_deep_task(
+    article_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+) -> dict:
+    tasks = db.scalars(
+        select(GenerationTask)
+        .where(GenerationTask.article_id == article_id)
+        .order_by(GenerationTask.created_at.desc())
+        .limit(30)
+    ).all()
+    task = next(
+        (item for item in tasks if (item.options_json or {}).get("generation_mode") == "DEEP"),
+        None,
+    )
+    return success_response(request, _task_data(db, task) if task else None)
+
+
+@router.post("/generation/tasks/{task_id}/platforms/{platform}/select-candidate")
+def select_deep_candidate(
+    task_id: str,
+    platform: Platform,
+    payload: DeepCandidateSelectRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+) -> dict:
+    task = db.get(GenerationTask, task_id)
+    if not task:
+        raise AppException(40403, "生成任务不存在", 404)
+    if (task.options_json or {}).get("generation_mode") != "DEEP":
+        raise AppException(40032, "该任务不是深度创作任务")
+    state = dict((task.platform_status_json or {}).get(platform, {}))
+    candidates = state.get("candidates") or []
+    if len(candidates) != 2:
+        raise AppException(40931, "候选稿尚未生成完成", 409)
+    article = db.get(ContentArticle, task.article_id)
+    if not article:
+        raise AppException(40401, "文章不存在", 404)
+
+    candidate = dict(candidates[payload.candidate_index])
+    result = GenerationResult(
+        data=candidate,
+        model_name=task.model_name,
+        provider=task.provider,
+        duration_ms=0,
+        prompt_tokens=0,
+        completion_tokens=0,
+        attempts=0,
+        strategy=state.get("strategy"),
+    )
+    variant = save_variant(db, article, platform, result)
+    review_detail = dict(variant.review_detail_json or {})
+    review_detail.update(
+        {
+            "strategy": state.get("strategy"),
+            "humanSelection": {
+                "candidateIndex": payload.candidate_index,
+                "sourceTaskId": task.id,
+            },
+        }
+    )
+    variant.review_detail_json = review_detail
+    db.flush()
+
+    states = dict(task.platform_status_json or {})
+    state.update(
+        {
+            "userSelectedCandidate": payload.candidate_index,
+            "userSelectedVariantId": variant.id,
+            "message": f"已采用候选稿 {payload.candidate_index + 1}，并保存为新版本",
+            "updatedAt": datetime.now(UTC).isoformat(),
+        }
+    )
+    states[platform] = state
+    task.platform_status_json = states
+    result_ids = list(task.result_variant_ids_json or [])
+    result_ids.append(variant.id)
+    task.result_variant_ids_json = result_ids
+    record_audit(
+        db,
+        request,
+        user,
+        "SELECT_DEEP_CANDIDATE",
+        "AI",
+        "GENERATION_TASK",
+        task.id,
+        {
+            "platform": platform,
+            "candidateIndex": payload.candidate_index,
+            "variantId": variant.id,
+        },
+    )
+    db.commit()
+    db.refresh(variant)
+    db.refresh(task)
+    return success_response(
+        request,
+        {"variant": model_dict(variant, camel=True), "task": _task_data(db, task)},
+        "候选稿已保存为新版本",
+    )
+
+
+@router.post("/generation/tasks/{task_id}/platforms/{platform}/regenerate")
+async def regenerate_deep_platform(
+    task_id: str,
+    platform: Platform,
+    payload: DeepRegenerateRequest,
+    request: Request,
+    background_tasks: BackgroundTasks,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+) -> dict:
+    previous = db.get(GenerationTask, task_id)
+    if not previous:
+        raise AppException(40403, "生成任务不存在", 404)
+    if (previous.options_json or {}).get("generation_mode") != "DEEP":
+        raise AppException(40032, "该任务不是深度创作任务")
+    if platform not in previous.platforms_json:
+        raise AppException(40031, "该平台不属于原生成任务")
+    options = dict(previous.options_json or {})
+    existing_requirements = str(options.get("creative_requirements") or "").strip()
+    combined_requirements = "\n".join(
+        item for item in (existing_requirements, f"本轮修改意见：{payload.feedback}") if item
+    )[-1000:]
+    options.update(
+        {
+            "article_id": previous.article_id,
+            "platforms": [platform],
+            "creative_requirements": combined_requirements,
+        }
+    )
+    task = _create_task(db, GenerateRequest.model_validate(options))
+    record_audit(
+        db,
+        request,
+        user,
+        "REGENERATE_DEEP_PLATFORM",
+        "AI",
+        "GENERATION_TASK",
+        task.id,
+        {"sourceTaskId": task_id, "platform": platform, "feedback": payload.feedback},
+    )
+    db.commit()
+    background_tasks.add_task(_run_generation_task, task.id)
+    return success_response(
+        request,
+        {"taskId": task.id, "status": task.status},
+        "已按修改意见创建新的深度创作任务",
+    )
 
 
 @router.post("/generation/tasks/{task_id}/platforms/{platform}/retry")

@@ -1,4 +1,6 @@
+import asyncio
 import base64
+import logging
 import mimetypes
 import uuid
 from pathlib import Path
@@ -12,6 +14,7 @@ from app.services.generation_service import LlmRuntime
 
 MEDIA_UPLOAD_DIR = Path(__file__).resolve().parents[3] / "uploads" / "media"
 MAX_IMAGE_BYTES = 12 * 1024 * 1024
+logger = logging.getLogger(__name__)
 
 
 async def list_image_models(runtime: LlmRuntime) -> list[str]:
@@ -55,6 +58,28 @@ async def _download_generated_image(url: str) -> tuple[str, bytes]:
     return suffix, content
 
 
+def _provider_error_detail(response: httpx.Response) -> str:
+    try:
+        body = response.json()
+    except ValueError:
+        return response.text[:500]
+    if isinstance(body, dict):
+        error = body.get("error")
+        if isinstance(error, dict):
+            return str(error.get("message") or error.get("code") or error)[:500]
+        return str(body.get("message") or body.get("code") or body)[:500]
+    return str(body)[:500]
+
+
+async def _post_image_request(runtime: LlmRuntime, payload: dict) -> httpx.Response:
+    async with httpx.AsyncClient(timeout=180) as client:
+        return await client.post(
+            f"{runtime.base_url.rstrip('/')}/images/generations",
+            headers={"Authorization": f"Bearer {runtime.api_key}"},
+            json=payload,
+        )
+
+
 async def generate_provider_image(
     runtime: LlmRuntime,
     *,
@@ -73,13 +98,40 @@ async def generate_provider_image(
     if model == "Kwai-Kolors/Kolors":
         payload.update(batch_size=1, num_inference_steps=20, guidance_scale=7.5)
     try:
-        async with httpx.AsyncClient(timeout=180) as client:
-            response = await client.post(
-                f"{runtime.base_url.rstrip('/')}/images/generations",
-                headers={"Authorization": f"Bearer {runtime.api_key}"},
-                json=payload,
+        response: httpx.Response | None = None
+        for attempt in range(2):
+            try:
+                response = await _post_image_request(runtime, payload)
+            except httpx.HTTPError:
+                if attempt == 0:
+                    await asyncio.sleep(0.6)
+                    continue
+                raise
+            if response.is_success:
+                break
+            detail = _provider_error_detail(response)
+            logger.warning(
+                "Image provider rejected request: status=%s trace_id=%s model=%s detail=%s",
+                response.status_code,
+                response.headers.get("x-siliconcloud-trace-id"),
+                model,
+                detail,
             )
-            response.raise_for_status()
+            if attempt == 0 and response.status_code in {400, 429, 503, 504}:
+                await asyncio.sleep(0.6)
+                continue
+            if response.status_code == 400:
+                message = (
+                    "图片改造服务连续两次拒绝了当前图片或描述，原图和现有封面均已保留"
+                    if source_asset
+                    else "图片生成服务连续两次拒绝了当前描述，请调整图片要求后重试"
+                )
+                raise AppException(50221, message, 502)
+            if response.status_code == 429:
+                raise AppException(50221, "图片模型当前请求较多，请稍后重试", 502)
+            raise AppException(50221, "图片模型服务暂时不可用，原图和现有封面均已保留", 502)
+        if response is None or not response.is_success:
+            raise AppException(50221, "图片模型服务暂时不可用", 502)
         result = response.json()
         image_url = result["images"][0]["url"]
         suffix, content = await _download_generated_image(image_url)

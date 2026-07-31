@@ -3,7 +3,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-Platform = Literal["WEIBO", "XIAOHONGSHU", "WECHAT_OFFICIAL"]
+Platform = Literal["WEIBO", "XIAOHONGSHU", "WECHAT_OFFICIAL", "X"]
 
 
 class ArticleCreate(BaseModel):
@@ -31,11 +31,20 @@ class GenerateRequest(BaseModel):
     preserve_meaning: int = Field(default=90, ge=50, le=100)
     generation_mode: Literal["QUICK", "DEEP"] = "QUICK"
     creative_goal: str = Field(default="知识分享", min_length=1, max_length=80)
+    creative_requirements: str = Field(default="", max_length=1000)
 
     @field_validator("platforms")
     @classmethod
     def unique_platforms(cls, value: list[Platform]) -> list[Platform]:
         return list(dict.fromkeys(value))
+
+
+class DeepCandidateSelectRequest(BaseModel):
+    candidate_index: int = Field(ge=0, le=1)
+
+
+class DeepRegenerateRequest(BaseModel):
+    feedback: str = Field(min_length=1, max_length=1000)
 
 
 class VariantUpdate(BaseModel):
@@ -73,6 +82,9 @@ class MediaSelectRequest(BaseModel):
     photographer_url: str | None = None
     alt_text: str | None = None
     search_keyword: str | None = None
+    title: str | None = Field(default=None, max_length=255)
+    license_type: str | None = Field(default=None, max_length=80)
+    license_note: str | None = Field(default=None, max_length=500)
     usage_type: Literal["COVER", "BODY"] = "BODY"
 
 
@@ -92,11 +104,55 @@ class MediaImageTransformRequest(BaseModel):
     usage_type: Literal["COVER", "BODY"] = "COVER"
 
 
+class MediaAssetUpdate(BaseModel):
+    title: str | None = Field(default=None, max_length=255)
+    collection: str | None = Field(default=None, max_length=100)
+    tags: list[str] | None = Field(default=None, max_length=30)
+    favorite: bool | None = None
+    alt_text: str | None = Field(default=None, max_length=500)
+    license_type: str | None = Field(default=None, max_length=80)
+    license_note: str | None = Field(default=None, max_length=500)
+
+
+class MediaAttachRequest(BaseModel):
+    article_id: int
+    usage_type: Literal["COVER", "BODY"] = "BODY"
+
+
+class ResearchItemCreate(BaseModel):
+    title: str = Field(min_length=1, max_length=255)
+    summary: str | None = Field(default=None, max_length=10_000)
+    url: str | None = Field(default=None, max_length=1000)
+    image_url: str | None = Field(default=None, max_length=1000)
+    source: str = Field(default="MANUAL", max_length=50)
+    source_name: str | None = Field(default=None, max_length=100)
+    source_id: str | None = Field(default=None, max_length=150)
+    topic_cluster: str | None = Field(default=None, max_length=100)
+    tags: list[str] = Field(default_factory=list, max_length=30)
+    notes: str | None = Field(default=None, max_length=20_000)
+    status: Literal["INBOX", "RESEARCHING", "READY", "USED"] = "INBOX"
+
+
+class ResearchItemUpdate(BaseModel):
+    title: str | None = Field(default=None, min_length=1, max_length=255)
+    summary: str | None = Field(default=None, max_length=10_000)
+    topic_cluster: str | None = Field(default=None, max_length=100)
+    tags: list[str] | None = Field(default=None, max_length=30)
+    notes: str | None = Field(default=None, max_length=20_000)
+    status: Literal["INBOX", "RESEARCHING", "READY", "USED"] | None = None
+    archived: bool | None = None
+
+
 class RecommendationRequest(BaseModel):
     article_id: int
     variant_id: int | None = None
     platform: Platform
     target_date: date | None = None
+
+
+PublishModeLiteral = Literal[
+    "REAL_API", "DRAFT_ONLY", "MANUAL_CONFIRM", "CDP_PUBLISH", "MCP_PUBLISH"
+]
 
 
 class ScheduleCreate(BaseModel):
@@ -105,13 +161,13 @@ class ScheduleCreate(BaseModel):
     account_id: int | None = None
     platform: Platform
     scheduled_at: datetime
-    publish_mode: Literal["REAL_API", "DRAFT_ONLY", "MANUAL_CONFIRM"] = "MANUAL_CONFIRM"
+    publish_mode: PublishModeLiteral = "MANUAL_CONFIRM"
 
 
 class ScheduleUpdate(BaseModel):
     scheduled_at: datetime | None = None
     account_id: int | None = None
-    publish_mode: Literal["REAL_API", "DRAFT_ONLY", "MANUAL_CONFIRM"] | None = None
+    publish_mode: PublishModeLiteral | None = None
 
 
 class MetricCreate(BaseModel):
@@ -124,6 +180,11 @@ class MetricCreate(BaseModel):
     collects: int = Field(default=0, ge=0)
     shares: int = Field(default=0, ge=0)
     followers: int = Field(default=0, ge=0)
+    # Explicit denominator selector. Defaults to IMPRESSIONS so existing callers
+    # (CSV/XLSX imports, manual entry) keep their current behavior. Callers that
+    # only have follower counts must opt into FOLLOWERS to avoid silent
+    # substitution that previously inflated engagement rates.
+    metric_basis: Literal["IMPRESSIONS", "FOLLOWERS"] = "IMPRESSIONS"
     group_type: Literal["RECOMMENDED_TIME", "FIXED_TIME"] = "RECOMMENDED_TIME"
     data_source: Literal["REAL", "MANUAL", "IMPORTED", "SIMULATED"] = "MANUAL"
 
@@ -170,6 +231,8 @@ class LlmConfigUpdate(BaseModel):
     input_price_per_million: float = Field(default=0, ge=0, le=1_000_000)
     output_price_per_million: float = Field(default=0, ge=0, le=1_000_000)
     currency: Literal["CNY", "USD"] = "CNY"
+    monthly_budget: float = Field(default=0, ge=0, le=100_000_000)
+    budget_warning_percent: int = Field(default=80, ge=1, le=100)
 
     @field_validator("api_key")
     @classmethod

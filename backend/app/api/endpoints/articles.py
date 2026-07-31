@@ -6,7 +6,7 @@ from app.api.deps import get_current_user, require_roles
 from app.core.exceptions import AppException
 from app.core.responses import success_response
 from app.db.session import get_db
-from app.models.business import ContentArticle, ContentVariant, PublishSchedule
+from app.models.business import ContentArticle, ContentVariant, MediaAsset, PublishSchedule
 from app.models.user import User
 from app.schemas.business import (
     ArticleCreate,
@@ -16,7 +16,14 @@ from app.schemas.business import (
     WechatFormatRequest,
 )
 from app.services.audit_service import record_audit
-from app.services.generation_service import count_emoji, edit_ratio, markdown_to_safe_html
+from app.services.generation_service import (
+    compact_weibo_image_payload,
+    count_emoji,
+    edit_ratio,
+    markdown_to_safe_html,
+    normalize_visible_markdown,
+)
+from app.services.platform_content import build_x_post, normalize_topics, x_weighted_length
 from app.services.serializers import model_dict
 from app.services.wechat_formatting import (
     format_wechat_html,
@@ -238,18 +245,62 @@ def update_variant(
     variant = db.get(ContentVariant, variant_id)
     if not variant:
         raise AppException(40402, "内容版本不存在", 404)
-    variant.title = payload.title
-    variant.content_text = payload.content_text
-    if variant.platform == "WECHAT_OFFICIAL" and variant.format_profile_json:
+    clean_title = normalize_visible_markdown(payload.title)
+    clean_content = normalize_visible_markdown(payload.content_text)
+    tag_limits = {"WEIBO": 5, "X": 4, "XIAOHONGSHU": 10, "WECHAT_OFFICIAL": 8}
+    normalized_hashtags = normalize_topics(
+        payload.hashtags, limit=tag_limits.get(variant.platform, 10)
+    )
+    has_selected_media = bool(
+        variant.platform == "WEIBO"
+        and db.scalar(
+            select(func.count(MediaAsset.id)).where(
+                MediaAsset.article_id == variant.article_id,
+                MediaAsset.selected.is_(True),
+            )
+        )
+    )
+    if has_selected_media:
+        fitted = compact_weibo_image_payload(
+            {
+                "title": clean_title,
+                "content": clean_content,
+                "hashtags": normalized_hashtags,
+            }
+        )
+        clean_title = fitted["title"]
+        clean_content = fitted["content"]
+        normalized_hashtags = fitted["hashtags"]
+    title_limits = {"WEIBO": 60, "X": 80, "XIAOHONGSHU": 20, "WECHAT_OFFICIAL": 64}
+    title_limit = title_limits.get(variant.platform, 255)
+    if not clean_title:
+        raise AppException(40029, "标题不能为空")
+    if len(clean_title) > title_limit:
+        raise AppException(40029, f"{variant.platform} 标题最多 {title_limit} 个字符")
+    if not clean_content:
+        raise AppException(40030, "正文不能为空")
+    content_limits = {"XIAOHONGSHU": 1000}
+    content_limit = content_limits.get(variant.platform)
+    if content_limit and len(clean_content) > content_limit:
+        raise AppException(40030, f"{variant.platform} 正文最多 {content_limit} 个字符")
+    variant.title = clean_title
+    variant.content_text = clean_content
+    if variant.platform == "WECHAT_OFFICIAL":
         variant.content_html, variant.format_profile_json = format_wechat_html(
-            payload.content_text, variant.format_profile_json
+            clean_content, variant.format_profile_json or None
         )
     else:
-        variant.content_html = markdown_to_safe_html(payload.content_text)
-    variant.hashtags_json = payload.hashtags
-    variant.emoji_count = count_emoji(payload.title + payload.content_text)
-    variant.word_count = len(payload.content_text)
-    variant.manual_edit_ratio = edit_ratio(variant.original_generated_text, payload.content_text)
+        variant.content_html = markdown_to_safe_html(clean_content)
+    if variant.platform == "X":
+        weighted_length = x_weighted_length(
+            build_x_post(clean_title, clean_content, normalized_hashtags)
+        )
+        if weighted_length > 280:
+            raise AppException(40030, f"X 帖子最多 280 个加权字符，当前为 {weighted_length}")
+    variant.hashtags_json = normalized_hashtags
+    variant.emoji_count = count_emoji(clean_title + clean_content)
+    variant.word_count = len(clean_content)
+    variant.manual_edit_ratio = edit_ratio(variant.original_generated_text, clean_content)
     record_audit(db, request, user, "UPDATE", "CONTENT", "VARIANT", variant.id)
     db.commit()
     db.refresh(variant)
@@ -271,7 +322,7 @@ def preview_wechat_format(
     _: User = Depends(get_current_user),
 ) -> dict:
     data = payload.model_dump()
-    content_text = data.pop("content_text")
+    content_text = normalize_visible_markdown(data.pop("content_text"))
     content_html, profile = format_wechat_html(content_text, data)
     return success_response(request, {"contentHtml": content_html, "profile": profile})
 

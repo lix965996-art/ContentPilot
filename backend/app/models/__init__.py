@@ -16,6 +16,7 @@ from app.models.business import (
     PublishLog,
     PublishRecommendation,
     PublishSchedule,
+    ResearchItem,
     SystemSetting,
 )
 
@@ -34,6 +35,7 @@ __all__ = [
     "PublishLog",
     "PublishRecommendation",
     "PublishSchedule",
+    "ResearchItem",
     "Role",
     "SystemSetting",
     "User",

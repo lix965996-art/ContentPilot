@@ -40,7 +40,16 @@ class Settings(BaseSettings):
     publish_mode: str = "manual"
     platform_credential_key: str = ""
     weibo_api_base_url: str = "https://api.weibo.com"
+    weibo_upload_api_base_url: str = "https://upload.api.weibo.com"
+    x_api_base_url: str = "https://api.x.com"
+    x_oauth_authorize_url: str = "https://x.com/i/oauth2/authorize"
+    x_oauth_token_url: str = "https://api.x.com/2/oauth2/token"
     wechat_api_base_url: str = "https://api.weixin.qq.com"
+    wechat_app_id: str = ""
+    wechat_app_secret: str = ""
+    xhs_mcp_base_url: str = "http://127.0.0.1:18060/mcp"
+    experimental_browser_publishing_enabled: bool = False
+    wechatsync_cli_enabled: bool = False
 
     @property
     def cors_origin_list(self) -> list[str]:

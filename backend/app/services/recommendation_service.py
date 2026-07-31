@@ -7,6 +7,7 @@ from app.models.business import AccountActivityStat, ActivityPrior
 
 DEFAULT_PEAKS = {
     "WEIBO": {8: 78, 12: 82, 18: 88, 20: 96, 21: 91},
+    "X": {8: 80, 12: 86, 17: 82, 20: 94, 22: 88},
     "XIAOHONGSHU": {9: 74, 12: 80, 19: 90, 20: 98, 21: 94, 22: 86},
     "WECHAT_OFFICIAL": {7: 83, 8: 90, 12: 76, 18: 82, 20: 88},
 }

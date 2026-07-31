@@ -72,6 +72,8 @@ def seed_system_settings(db: Session) -> None:
         ("llm.input_price_per_million", "0", False, "每百万输入 Token 价格"),
         ("llm.output_price_per_million", "0", False, "每百万输出 Token 价格"),
         ("llm.currency", "CNY", False, "计费币种"),
+        ("llm.monthly_budget", "0", False, "模型月度预算"),
+        ("llm.budget_warning_percent", "80", False, "预算预警比例"),
         ("media.unsplash_key", settings.unsplash_access_key, True, "Unsplash Access Key"),
         ("publish.mode", settings.publish_mode, False, "默认发布方式"),
         ("app.timezone", settings.app_timezone, False, "系统时区"),
@@ -219,14 +221,11 @@ def seed_demo_business_data(db: Session, roles: dict[str, Role]) -> None:
         ),
     }
     for platform, (publish_mode, auth_type, status, capabilities) in account_defaults.items():
-        if not db.scalar(
-            select(PlatformAccount).where(
-                PlatformAccount.user_id == operator.id, PlatformAccount.platform == platform
-            )
-        ):
+        if not db.scalar(select(PlatformAccount).where(PlatformAccount.platform == platform)):
             db.add(
                 PlatformAccount(
                     user_id=operator.id,
+                    updated_by=operator.id,
                     platform=platform,
                     account_name=f"ContentPilot 演示{platform}",
                     publish_mode=publish_mode,
@@ -258,12 +257,7 @@ def seed_demo_business_data(db: Session, roles: dict[str, Role]) -> None:
         db.commit()
 
     variants = db.scalars(select(ContentVariant).order_by(ContentVariant.id).limit(20)).all()
-    accounts = {
-        row.platform: row
-        for row in db.scalars(
-            select(PlatformAccount).where(PlatformAccount.user_id == operator.id)
-        ).all()
-    }
+    accounts = {row.platform: row for row in db.scalars(select(PlatformAccount)).all()}
     if (db.scalar(select(func.count()).select_from(PublishSchedule)) or 0) == 0:
         now = datetime.now().replace(second=0, microsecond=0)
         for index, variant in enumerate(variants):
@@ -374,6 +368,8 @@ def seed_demo_business_data(db: Session, roles: dict[str, Role]) -> None:
         ("llm.input_price_per_million", "0", False, "每百万输入 Token 价格"),
         ("llm.output_price_per_million", "0", False, "每百万输出 Token 价格"),
         ("llm.currency", "CNY", False, "计费币种"),
+        ("llm.monthly_budget", "0", False, "模型月度预算"),
+        ("llm.budget_warning_percent", "80", False, "预算预警比例"),
         ("media.unsplash_key", "", True, "Unsplash Access Key"),
         ("publish.mode", "official", False, "默认发布适配器"),
         ("app.timezone", "Asia/Shanghai", False, "系统时区"),

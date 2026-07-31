@@ -1,16 +1,25 @@
 from fastapi import APIRouter, Depends, Request
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
+from app.core.exceptions import AppException
 from app.core.responses import success_response
 from app.db.session import get_db
 from app.models.user import User
-from app.schemas.auth import LoginRequest, PasswordUpdateRequest, RefreshRequest
+from app.schemas.auth import (
+    LoginRequest,
+    PasswordUpdateRequest,
+    RefreshRequest,
+    RegistrationRequest,
+)
 from app.schemas.user import UserData
+from app.services.audit_service import record_audit
 from app.services.auth_service import (
     authenticate_user,
     build_tokens,
     refresh_tokens,
+    register_user,
     update_password,
 )
 
@@ -25,6 +34,42 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
         "user": UserData.model_validate(user).model_dump(mode="json"),
     }
     return success_response(request, data, "登录成功")
+
+
+@router.post("/register", summary="注册运营者账号")
+def register(
+    payload: RegistrationRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+) -> dict:
+    user = register_user(
+        db,
+        username=payload.username,
+        password=payload.password,
+        display_name=payload.display_name,
+        email=payload.email,
+    )
+    record_audit(
+        db,
+        request,
+        user,
+        "REGISTER",
+        "AUTH",
+        "USER",
+        user.id,
+        {"role": "OPERATOR"},
+    )
+    try:
+        db.commit()
+    except IntegrityError as exc:
+        db.rollback()
+        raise AppException(40921, "用户名或邮箱已被使用", 409) from exc
+    db.refresh(user)
+    data = {
+        **build_tokens(user),
+        "user": UserData.model_validate(user).model_dump(mode="json"),
+    }
+    return success_response(request, data, "注册成功")
 
 
 @router.post("/logout", summary="退出登录")

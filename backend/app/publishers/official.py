@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import html
+import ipaddress
 import re
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -13,6 +14,7 @@ from app.core.config import BACKEND_DIR, settings
 from app.core.credentials import decrypt_json, decrypt_secret, encrypt_secret
 from app.models.business import PlatformAccount
 from app.publishers.base import PublishResult
+from app.services.platform_content import build_weibo_status, build_xiaohongshu_package
 
 
 class OfficialPublisher:
@@ -106,17 +108,62 @@ class WeiboPublisher(OfficialPublisher):
         token = decrypt_secret(self.account.access_token_encrypted)
         if not token:
             return self.failure("TOKEN_MISSING", "微博 Access Token 未配置。")
-        endpoint = "/2/statuses/upload.json" if request.get("images") else "/2/statuses/share.json"
-        payload = {"access_token": token, "status": request["content"]}
+        operation_ip = str(request.get("operation_ip") or self.config.get("operation_ip") or "")
+        try:
+            parsed_ip = ipaddress.ip_address(operation_ip)
+        except ValueError:
+            parsed_ip = None
+        if parsed_ip is None or not parsed_ip.is_global:
+            return self.failure(
+                "OPERATION_IP_REQUIRED",
+                "微博官方发布接口要求提交实际操作用户的公网 IP（rip）。",
+                action="请在微博账号配置中填写本次发布操作者的真实公网 IP 后重试。",
+            )
+        status = build_weibo_status(
+            request.get("title", ""),
+            request.get("content", ""),
+            request.get("hashtags", []),
+        )
+        if not status:
+            return self.failure("CONTENT_EMPTY", "微博正文不能为空。")
+        requested_images = [str(value) for value in request.get("images", []) if str(value)]
+        try:
+            image_upload = await _first_image_upload(requested_images)
+        except (httpx.HTTPError, ValueError, OSError) as exc:
+            return self.failure(
+                "IMAGE_UNAVAILABLE",
+                f"微博首张配图读取失败：{exc}",
+                action="请移除该图片后重新选择，或上传一张本地图片。",
+            )
+        if requested_images and image_upload is None:
+            return self.failure(
+                "IMAGE_UNAVAILABLE",
+                "微博首张配图无法读取。",
+                action="请移除该图片后重新选择，或上传一张本地图片。",
+            )
+        if image_upload and len(status) > 140:
+            return self.failure(
+                "WEIBO_IMAGE_TEXT_TOO_LONG",
+                f"当前图文微博共 {len(status)} 个字符，官方单图发布接口最多支持 140 个字符。",
+                action="请缩短首句、正文或话题，或者移除图片后改用长文字发布。",
+            )
+        endpoint = "/2/statuses/upload.json" if image_upload else "/2/statuses/update.json"
+        api_base_url = (
+            settings.weibo_upload_api_base_url if image_upload else settings.weibo_api_base_url
+        )
+        payload = {
+            "access_token": token,
+            "status": status,
+            "rip": operation_ip,
+        }
+        if not image_upload and len(status) > 140:
+            payload["is_longtext"] = 1
         files = None
-        image = _first_readable_image(request.get("images", []))
-        if image:
-            files = {"pic": (image.name, image.read_bytes(), "application/octet-stream")}
+        if image_upload:
+            files = {"pic": image_upload}
         try:
             async with httpx.AsyncClient(timeout=30) as client:
-                response = await client.post(
-                    f"{settings.weibo_api_base_url}{endpoint}", data=payload, files=files
-                )
+                response = await client.post(f"{api_base_url}{endpoint}", data=payload, files=files)
             data = response.json()
             external_id = str(data.get("idstr") or data.get("id") or "")
             if response.is_success and external_id:
@@ -126,7 +173,7 @@ class WeiboPublisher(OfficialPublisher):
                     True,
                     self.platform,
                     self.mode,
-                    "SUCCESS",
+                    "PUBLISHED",
                     external_id,
                     url,
                     detail={"real": True},
@@ -149,26 +196,36 @@ class WechatDraftPublisher(OfficialPublisher):
     platform = "WECHAT_OFFICIAL"
     mode = "DRAFT_ONLY"
 
+    # ------------------------------------------------------------------
+    # capabilities
+    # ------------------------------------------------------------------
     async def get_capabilities(self) -> list[str]:
-        base = ["MATERIAL_UPLOAD", "DRAFT_CREATE"]
+        """Return the capabilities that were *actually* detected via API probe."""
+        caps = list(self.account.capabilities_json or [])
+        if not caps:
+            caps = ["DRAFT_CREATE"]  # conservative fallback
         if self.config.get("allow_submit_publish"):
-            base.append("SUBMIT_PUBLISH")
-        return base
+            caps.append("SUBMIT_PUBLISH")
+        return caps
 
+    # ------------------------------------------------------------------
+    # access_token (unchanged logic, but kept for clarity)
+    # ------------------------------------------------------------------
     async def _access_token(self) -> str:
         cached = decrypt_secret(self.account.access_token_encrypted)
         if cached and self.account.token_expires_at:
             if self.account.token_expires_at > datetime.now() + timedelta(minutes=2):
                 return cached
-        app_secret = self.config.get("app_secret")
-        if not self.account.app_id or not app_secret:
+        app_id = self.account.app_id or settings.wechat_app_id
+        app_secret = self.config.get("app_secret") or settings.wechat_app_secret
+        if not app_id or not app_secret:
             raise ValueError("微信公众号 AppID/AppSecret 未配置")
         async with httpx.AsyncClient(timeout=15) as client:
             response = await client.get(
                 f"{settings.wechat_api_base_url}/cgi-bin/token",
                 params={
                     "grant_type": "client_credential",
-                    "appid": self.account.app_id,
+                    "appid": app_id,
                     "secret": app_secret,
                 },
             )
@@ -183,16 +240,108 @@ class WechatDraftPublisher(OfficialPublisher):
         self.db.flush()
         return token
 
+    # ------------------------------------------------------------------
+    # validate_credentials: step 1 – token, step 2 – draft list probe
+    # ------------------------------------------------------------------
     async def validate_credentials(self) -> PublishResult:
         try:
-            await self._access_token()
-            return PublishResult(True, self.platform, self.mode, "CONNECTED")
+            token = await self._access_token()
         except WechatApiError as exc:
             return self.failure(exc.code, exc.message, action=exc.suggested_action)
         except (httpx.HTTPError, ValueError) as exc:
             return self.failure(
                 "CONNECTION_FAILED", str(exc), retryable=isinstance(exc, httpx.HTTPError)
             )
+
+        # Probe draft + material capabilities via real API calls.
+        probe = await self._probe_drafts(token)
+
+        # Only update capabilities_json when the response is authoritative
+        # (non-empty list means the probe succeeded and reported real
+        # permissions).  An empty list means the API call itself failed
+        # (e.g. 48001), so we preserve whatever the user configured.
+        if probe["capabilities"]:
+            self.account.capabilities_json = probe["capabilities"]
+        self.db.flush()
+
+        # Connection status reflects authentication: token obtained = CONNECTED.
+        # Capabilities (draft_create / material_upload / direct_publish) are
+        # tracked separately via capabilities_json and publishHint.
+        self.account.status = "CONNECTED"
+        return PublishResult(
+            True,
+            self.platform,
+            self.mode,
+            "CONNECTED",
+            detail={"draft_probe": probe},
+        )
+
+    async def _probe_drafts(self, token: str) -> dict[str, Any]:
+        """Call draft/count → draft/list → material/add_material → report."""
+        result: dict[str, Any] = {
+            "token_ok": True,
+            "draft_create": False,
+            "draft_update": False,
+            "draft_read": False,
+            "draft_delete": False,
+            "material_upload": False,
+            "capabilities": [],
+            "draft_count_error": None,
+            "material_upload_error": None,
+        }
+        # ── draft count ──
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.get(
+                f"{settings.wechat_api_base_url}/cgi-bin/draft/count",
+                params={"access_token": token},
+            )
+        data = resp.json()
+        errcode = data.get("errcode", 0)
+        if errcode == 0:
+            result["draft_read"] = True
+            result["draft_create"] = True  # same permission group
+            result["draft_update"] = True
+            result["draft_delete"] = True
+            result["capabilities"] = [
+                "DRAFT_CREATE",
+                "DRAFT_UPDATE",
+                "DRAFT_READ",
+                "DRAFT_DELETE",
+            ]
+        else:
+            result["draft_count_error"] = {
+                "errcode": errcode,
+                "errmsg": data.get("errmsg", ""),
+            }
+
+        # ── material upload ──
+        # Use a minimal 1×1 PNG to avoid consuming quota; we only check the
+        # errcode, not whether the upload is practically usable.
+        minimal_png = (
+            b"\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01"
+            b"\x08\x02\x00\x00\x00\x90wS\xde\x00\x00\x00\x0cIDATx\x9cc\xf8\x0f"
+            b"\x00\x00\x01\x01\x00\x05\x18\xd8N\x00\x00\x00\x00IEND\xaeB`\x82"
+        )
+        try:
+            async with httpx.AsyncClient(timeout=20) as client:
+                resp = await client.post(
+                    f"{settings.wechat_api_base_url}/cgi-bin/material/add_material",
+                    params={"access_token": token, "type": "thumb"},
+                    files={"media": ("_probe.png", minimal_png, "image/png")},
+                )
+            mat_data = resp.json()
+            if mat_data.get("errcode", 0) == 0:
+                result["material_upload"] = True
+                result["capabilities"].append("MATERIAL_UPLOAD")
+            else:
+                result["material_upload_error"] = {
+                    "errcode": mat_data.get("errcode"),
+                    "errmsg": mat_data.get("errmsg", ""),
+                }
+        except (httpx.HTTPError, OSError) as exc:
+            result["material_upload_error"] = {"errcode": "NETWORK", "errmsg": str(exc)}
+
+        return result
 
     async def _upload_image(self, token: str, path: Path, *, permanent: bool) -> str:
         endpoint = "/cgi-bin/material/add_material" if permanent else "/cgi-bin/media/uploadimg"
@@ -217,19 +366,55 @@ class WechatDraftPublisher(OfficialPublisher):
         try:
             token = await self._access_token()
             images = [path for value in request.get("images", []) if (path := _local_image(value))]
+
+            # Resolve cover media_id:
+            #   1) pre-configured default_cover_media_id
+            #   2) upload local cover image as permanent material
+            #   3) download default_cover_url → upload as permanent material
             thumb_media_id = str(self.config.get("default_cover_media_id") or "")
+            material_upload_failed = None
+
             if not thumb_media_id and images:
-                thumb_media_id = await self._upload_image(token, images[0], permanent=True)
+                try:
+                    thumb_media_id = await self._upload_image(token, images[0], permanent=True)
+                except WechatApiError as exc:
+                    material_upload_failed = {
+                        "errcode": exc.code,
+                        "errmsg": exc.message,
+                    }
+
             if not thumb_media_id and self.config.get("default_cover_url"):
-                thumb_media_id = await self._upload_image_url(
-                    token, str(self.config["default_cover_url"]), permanent=True
-                )
+                if not material_upload_failed:
+                    try:
+                        thumb_media_id = await self._upload_image_url(
+                            token, str(self.config["default_cover_url"]), permanent=True
+                        )
+                    except WechatApiError as exc:
+                        material_upload_failed = {
+                            "errcode": exc.code,
+                            "errmsg": exc.message,
+                        }
+
             if not thumb_media_id:
-                raise ValueError("请配置默认封面素材 ID，或为文章选择一张本地图片")
+                hint = (
+                    f"素材上传失败 [{material_upload_failed['errcode']}]: "
+                    f"{material_upload_failed['errmsg']}. "
+                    if material_upload_failed
+                    else ""
+                )
+                raise ValueError(
+                    f"{hint}请配置默认封面素材 ID (default_cover_media_id)，"
+                    f"或在文章中选择一张本地图片作为封面"
+                )
+
             body_html = request.get("content_html") or markdown_to_wechat_html(request["content"])
             for path in images[1:]:
-                image_url = await self._upload_image(token, path, permanent=False)
-                body_html += f'<p><img src="{html.escape(image_url)}" /></p>'
+                try:
+                    image_url = await self._upload_image(token, path, permanent=False)
+                    body_html += f'<p><img src="{html.escape(image_url)}" /></p>'
+                except WechatApiError:
+                    pass  # body images are optional
+
             article = {
                 "title": request["title"][:64],
                 "author": self.config.get("default_author", "")[:16],
@@ -258,7 +443,11 @@ class WechatDraftPublisher(OfficialPublisher):
                 self.mode,
                 "DRAFT_CREATED",
                 external_id=draft_id,
-                detail={"draftId": draft_id, "real": True},
+                detail={
+                    "draftId": draft_id,
+                    "real": True,
+                    "materialUploadFailed": material_upload_failed,
+                },
             )
         except WechatApiError as exc:
             return self.failure(
@@ -270,7 +459,17 @@ class WechatDraftPublisher(OfficialPublisher):
             )
 
     async def query_status(self, task_id: str) -> dict[str, Any]:
-        return {"media_id": task_id, "status": "DRAFT_CREATED"}
+        token = await self._access_token()
+        async with httpx.AsyncClient(timeout=15) as client:
+            resp = await client.post(
+                f"{settings.wechat_api_base_url}/cgi-bin/draft/get",
+                params={"access_token": token},
+                json={"media_id": task_id},
+            )
+        data = resp.json()
+        if data.get("errcode"):
+            raise WechatApiError(data)
+        return {"media_id": task_id, "status": "DRAFT_CREATED", "detail": data}
 
     async def _upload_image_url(self, token: str, url: str, *, permanent: bool) -> str:
         local = _local_image(url)
@@ -367,12 +566,12 @@ class XiaohongshuManualPublisher:
 
     async def publish(self, request: dict[str, Any]) -> PublishResult:
         package = {
-            "title": request["title"],
-            "content": request["content"],
-            "hashtags": request.get("hashtags", []),
-            "coverImage": (request.get("images") or [""])[0],
-            "images": request.get("images", []),
-            "imageOrder": list(range(1, len(request.get("images", [])) + 1)),
+            **build_xiaohongshu_package(
+                title=request.get("title", ""),
+                content=request.get("content", ""),
+                hashtags=request.get("hashtags", []),
+                images=request.get("images", []),
+            ),
             "creatorUrl": "https://creator.xiaohongshu.com/publish/publish",
             "notice": "小红书当前采用人工确认发布，不属于服务器无人值守自动发布。",
         }
@@ -456,5 +655,39 @@ def _local_image(value: str) -> Path | None:
     return path if path.is_file() else None
 
 
-def _first_readable_image(values: list[str]) -> Path | None:
-    return next((path for value in values if (path := _local_image(value))), None)
+async def _first_image_upload(values: list[str]) -> tuple[str, bytes, str] | None:
+    """Load the first selected image from local storage or its original public URL."""
+    if not values:
+        return None
+    value = values[0]
+    local = _local_image(value)
+    if local:
+        return local.name, local.read_bytes(), "application/octet-stream"
+
+    try:
+        parsed = httpx.URL(value)
+    except httpx.InvalidURL as exc:
+        raise ValueError("图片地址无效") from exc
+    if parsed.scheme not in {"http", "https"}:
+        raise ValueError("图片地址必须使用 HTTP 或 HTTPS")
+    host = parsed.host or ""
+    if host.lower() == "localhost":
+        raise ValueError("不允许读取本机图片地址")
+    try:
+        host_ip = ipaddress.ip_address(host)
+    except ValueError:
+        host_ip = None
+    if host_ip is not None and not host_ip.is_global:
+        raise ValueError("不允许读取内网图片地址")
+    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
+        response = await client.get(value)
+        response.raise_for_status()
+    if not response.content:
+        raise ValueError("图片文件为空")
+    if len(response.content) > 5 * 1024 * 1024:
+        raise ValueError("图片不能超过 5MB")
+    content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
+    if content_type and not content_type.startswith("image/"):
+        raise ValueError("远程地址返回的不是图片")
+    filename = Path(parsed.path).name or "weibo-image.jpg"
+    return filename, response.content, content_type or "application/octet-stream"
