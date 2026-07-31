@@ -30,6 +30,8 @@ class Settings(BaseSettings):
 
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     app_demo_mode: bool = False
+    allow_registration: bool = True
+    admin_initial_password: str = ""
     llm_provider: str = "openai-compatible"
     llm_base_url: str = ""
     llm_api_key: str = ""

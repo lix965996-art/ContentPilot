@@ -33,6 +33,15 @@ DEMO_USERS = (
 )
 
 
+def user_definitions() -> tuple[tuple[str, str, str, str, str], ...]:
+    """Demo mode keeps the three walkthrough accounts; production seeds a single admin."""
+    if settings.app_demo_mode:
+        return DEMO_USERS
+    admin = DEMO_USERS[0]
+    password = settings.admin_initial_password or admin[1]
+    return ((admin[0], password, admin[2], admin[3], admin[4]),)
+
+
 def seed_database(db: Session) -> None:
     roles: dict[str, Role] = {}
     for code, (name, description) in ROLE_DEFINITIONS.items():
@@ -43,7 +52,7 @@ def seed_database(db: Session) -> None:
             db.flush()
         roles[code] = role
 
-    for username, password, display_name, email, role_code in DEMO_USERS:
+    for username, password, display_name, email, role_code in user_definitions():
         user = db.scalar(select(User).where(User.username == username))
         if user is None:
             user = User(

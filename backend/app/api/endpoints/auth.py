@@ -3,6 +3,7 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user
+from app.core.config import settings
 from app.core.exceptions import AppException
 from app.core.responses import success_response
 from app.db.session import get_db
@@ -36,12 +37,25 @@ def login(payload: LoginRequest, request: Request, db: Session = Depends(get_db)
     return success_response(request, data, "登录成功")
 
 
+@router.get("/options", summary="登录页公开配置")
+def auth_options(request: Request) -> dict:
+    return success_response(
+        request,
+        {
+            "allowRegistration": settings.allow_registration,
+            "demoMode": settings.app_demo_mode,
+        },
+    )
+
+
 @router.post("/register", summary="注册运营者账号")
 def register(
     payload: RegistrationRequest,
     request: Request,
     db: Session = Depends(get_db),
 ) -> dict:
+    if not settings.allow_registration:
+        raise AppException(40303, "当前部署已关闭自助注册，请联系管理员开通账号", 403)
     user = register_user(
         db,
         username=payload.username,
