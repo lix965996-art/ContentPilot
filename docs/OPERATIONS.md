@@ -66,7 +66,39 @@ docker compose down
 - 本地启动失败：运行 `.\contentpilot.ps1 logs`；
 - Docker 启动失败：运行 `docker compose ps` 和 `docker compose logs` 查看具体服务。
 
-## 2. 真实平台连接指南
+## 2. 客户交付：一个客户一套实例
+
+给客户交付时不共用实例：每个客户一个独立的 Docker Compose 项目，各自拥有数据库卷、上传卷、端口和密钥，数据天然隔离。
+
+### 开通一个新客户
+
+```powershell
+.\scripts\new-customer.ps1 -Name acme -Port 8081 -ApiPort 8001
+cd ..\contentpilot-customers\acme
+.\start.ps1
+```
+
+脚本会在输出目录生成该客户专属的 `.env`（随机 MySQL 密码、`JWT_SECRET`、`PLATFORM_CREDENTIAL_KEY`、管理员初始密码）和启动脚本。多个客户实例可同时运行在同一台服务器上，只要端口不冲突。
+
+### 客户实例的安全默认值
+
+| 变量 | 客户实例取值 | 效果 |
+| --- | --- | --- |
+| `ALLOW_REGISTRATION` | `false` | 登录页不显示注册入口，注册接口直接返回 403；账号由管理员在“设置 → 用户管理”中创建 |
+| `APP_DEMO_MODE` | `false` | 不创建 operator/viewer 演示账号，不写入演示业务数据，登录页不显示演示账号快捷方式 |
+| `ADMIN_INITIAL_PASSWORD` | 随机生成 | 首次初始化时管理员使用该密码，而不是公开的演示密码 |
+
+### 交付检查清单
+
+1. 通过安全渠道把管理员密码交给客户，并要求首次登录后修改；
+2. 客户管理员在“设置 → 模型服务”配置自己的 LLM Key（各实例独立加密存储）；
+3. 平台账号（微博/X/公众号）由客户管理员自行授权，不同客户互不可见；
+4. 升级：在客户目录执行 `.\start.ps1`（拉取新代码后重新构建），数据保存在卷中不受影响；
+5. 备份：备份该 compose 项目的 `mysql_data` 与 `uploads` 卷即可，不同客户的卷相互独立。
+
+> 本地开发（`backend/.env`）保持 `ALLOW_REGISTRATION=true`、`APP_DEMO_MODE` 按需开启，开发体验不变。
+
+## 3. 真实平台连接指南
 
 ContentPilot 不提供模拟连接或模拟发布成功。微博、X 与微信公众号只有在官方接口实际返回成功后才显示“已连接”；小红书在没有获批的官方内容发布接口时只显示“仅人工交付”。
 
@@ -154,7 +186,7 @@ X 发帖调用官方 `POST /2/tweets`，成功后保存真实 Post ID 和公开�
 - 小红书始终显示 `MANUAL_ONLY`，不会显示“已连接”；
 - 测试代码可以拦截外部 HTTP 边界，但产品运行代码没有模拟成功发布器。
 
-## 3. 答辩演示流程（8–12 分钟）
+## 4. 答辩演示流程（8–12 分钟）
 
 1. 运行 `.\contentpilot.ps1 start`，说明本地依赖只在首次安装，并打开登录页（30 秒）；
 2. 用 operator 登录，展示工作台真实业务摘要（30 秒）；
