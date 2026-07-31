@@ -1,23 +1,57 @@
 <script setup lang="ts">
-import { computed, onMounted, reactive, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { ElMessage, ElMessageBox } from 'element-plus'
-import { CheckCircle2, Link2, RefreshCw, Settings2, ShieldAlert, Unlink } from 'lucide-vue-next'
+import {
+  CheckCircle2,
+  Link2,
+  QrCode,
+  RefreshCw,
+  Settings2,
+  ShieldAlert,
+  Unlink,
+} from 'lucide-vue-next'
 import PageHeader from '@/components/PageHeader.vue'
 import PlatformIcon from '@/components/PlatformIcon.vue'
 import { workflowApi } from '@/api/workflow'
 import { getApiErrorMessage } from '@/api/client'
 import type { Platform, PlatformAccount } from '@/types/business'
+import { useAuthStore } from '@/stores/auth'
+import { presentOperationError } from '@/utils/operation-error'
 
 const accounts = ref<PlatformAccount[]>([])
+const auth = useAuthStore()
+const isAdmin = computed(() => auth.hasRole(['ADMIN']))
 const route = useRoute()
 const router = useRouter()
 const loading = ref(false)
 const testing = ref<Platform | ''>('')
 const drawer = ref(false)
 const logDrawer = ref(false)
+const qrDialog = ref(false)
+const qrLoading = ref(false)
+const qrImage = ref('')
+const qrMessage = ref('')
+const qrPolling = ref(false)
+const sessionClock = ref(Date.now())
 const logs = ref<Array<Record<string, unknown>>>([])
 const current = ref<PlatformAccount>()
+let qrPollTimer: number | undefined
+let sessionClockTimer: number | undefined
+
+function accountErrorMessage(account: PlatformAccount) {
+  const raw = account.lastError || ''
+  const looksTechnical =
+    /\b(?:rid|request.?id|external_id|default_cover_media_id|client_id|client_secret|access_token|refresh_token)\b|api unauthorized|\b(?:exception|traceback)\b|\bHTTP\s+[45]\d\d\b|\[\d{4,}\]|https?:\/\/|[{}]/i.test(
+      raw,
+    )
+  if (!looksTechnical) return raw
+  const issue = presentOperationError(raw, {
+    type: 'PUBLISH',
+    platform: account.platform,
+  })
+  return issue ? `${issue.title}：${issue.description}` : '平台连接异常，请重新验证账号连接。'
+}
 
 const form = reactive({
   account_name: '',
@@ -30,10 +64,12 @@ const form = reactive({
   refresh_token: '',
   token_expires_at: '',
   redirect_uri: '',
+  operation_ip: '',
   default_author: '',
   default_cover_media_id: '',
   default_cover_url: '',
   allow_submit_publish: false,
+  allow_public_publish: false,
   enabled: true,
 })
 
@@ -56,19 +92,56 @@ const statusNames: Record<string, string> = {
   INVALID: '连接无效',
   DISABLED: '已停用',
   MANUAL_ONLY: '仅人工交付',
+  READY: '已就绪',
+  LOGIN_REQUIRED: '需要登录',
 }
 const statusType = (status: string) =>
-  status === 'CONNECTED'
+  status === 'CONNECTED' || status === 'READY'
     ? 'success'
     : ['CONNECTING', 'MANUAL_ONLY'].includes(status)
       ? 'warning'
       : 'danger'
 const title = computed(() => current.value?.platformName || '平台配置')
+const xOAuthCredentialsReady = computed(
+  () =>
+    current.value?.platform !== 'X' ||
+    Boolean(form.client_id.trim() && (form.app_secret.trim() || current.value?.secretConfigured)),
+)
 const publishModeNames: Record<string, string> = {
-  REAL_API: '微博官方 API',
-  DRAFT_ONLY: '真实草稿箱',
+  REAL_API: '官方 API',
+  DRAFT_ONLY: '真实草稿箱 (API)',
   SUBMIT_PUBLISH: '真实提交发布',
   MANUAL_CONFIRM: '人工发布交付',
+  CDP_PUBLISH: 'Chrome 自动发布',
+  WECHATSYNC_CLI: 'Wechatsync CLI',
+  MCP_PUBLISH: '本机自动发布（仅自己可见）',
+}
+function publishModeLabel(account: PlatformAccount): string {
+  if (account.publishMode === 'REAL_API' && account.platform === 'WEIBO') return '微博官方 API'
+  if (account.publishMode === 'REAL_API' && account.platform === 'X') return 'X 官方 API'
+  return publishModeNames[account.publishMode] || account.publishMode
+}
+
+function formatDateTime(value?: string): string {
+  return value ? new Date(value).toLocaleString('zh-CN') : '尚未记录'
+}
+
+function loginDuration(account: PlatformAccount): string {
+  if (account.status !== 'CONNECTED' || !account.lastLoginAt) return '当前未登录'
+  const startedAt = new Date(account.lastLoginAt).getTime()
+  if (!Number.isFinite(startedAt)) return '时间未知'
+  const totalMinutes = Math.max(0, Math.floor((sessionClock.value - startedAt) / 60_000))
+  if (totalMinutes < 1) return '不足 1 分钟'
+  const days = Math.floor(totalMinutes / 1440)
+  const hours = Math.floor((totalMinutes % 1440) / 60)
+  const minutes = totalMinutes % 60
+  return [
+    days ? `${days} 天` : '',
+    hours ? `${hours} 小时` : '',
+    minutes || (!days && !hours) ? `${minutes} 分钟` : '',
+  ]
+    .filter(Boolean)
+    .join(' ')
 }
 
 async function load() {
@@ -83,16 +156,25 @@ async function load() {
 function edit(account: PlatformAccount) {
   current.value = account
   Object.assign(form, {
-    account_name: account.accountName === '未配置' ? '' : account.accountName,
+    account_name:
+      account.accountName === '未配置'
+        ? account.platform === 'XIAOHONGSHU'
+          ? 'ContentPilot 小红书'
+          : account.platform === 'X'
+            ? 'ContentPilot X'
+            : ''
+        : account.accountName,
     auth_type:
-      account.platform === 'WEIBO'
+      account.platform === 'WEIBO' || account.platform === 'X'
         ? 'OAUTH2'
         : account.platform === 'WECHAT_OFFICIAL'
           ? 'APP_SECRET'
           : 'NONE',
     publish_mode:
       account.platform === 'XIAOHONGSHU'
-        ? 'MANUAL_CONFIRM'
+        ? account.availablePublishModes.includes(account.publishMode)
+          ? account.publishMode
+          : 'MANUAL_CONFIRM'
         : account.platform === 'WECHAT_OFFICIAL'
           ? account.publishMode || 'DRAFT_ONLY'
           : 'REAL_API',
@@ -104,11 +186,15 @@ function edit(account: PlatformAccount) {
     token_expires_at: account.tokenExpiresAt?.slice(0, 16) || '',
     redirect_uri:
       account.config.redirect_uri ||
-      'http://127.0.0.1:8000/api/platform-accounts/WEIBO/oauth/callback',
+      `http://127.0.0.1:8000/api/platform-accounts/${
+        account.platform === 'X' ? 'X' : 'WEIBO'
+      }/oauth/callback`,
+    operation_ip: account.config.operation_ip || '',
     default_author: account.config.default_author || '',
     default_cover_media_id: account.config.default_cover_media_id || '',
     default_cover_url: account.config.default_cover_url || '',
     allow_submit_publish: Boolean(account.config.allow_submit_publish),
+    allow_public_publish: Boolean(account.config.allow_public_publish),
     enabled: account.status !== 'DISABLED',
   })
   drawer.value = true
@@ -123,6 +209,7 @@ async function save(closeDrawer = true): Promise<boolean> {
     if (!form.refresh_token) delete payload.refresh_token
     if (!form.token_expires_at) delete payload.token_expires_at
     if (!form.redirect_uri) delete payload.redirect_uri
+    if (!form.operation_ip) delete payload.operation_ip
     if (!form.default_cover_url) delete payload.default_cover_url
     await workflowApi.savePlatformAccount(current.value.platform, payload)
     ElMessage.success('平台账号配置已保存')
@@ -140,7 +227,9 @@ async function test(account: PlatformAccount) {
   try {
     const result = await workflowApi.testPlatformAccount(account.platform)
     if (result.result.success) {
-      ElMessage.success('官方接口验证通过')
+      ElMessage.success(
+        account.platform === 'XIAOHONGSHU' ? '小红书本地登录状态验证通过' : '官方接口验证通过',
+      )
     } else {
       ElMessage.error(
         [result.result.error_message, result.result.suggested_action].filter(Boolean).join(' '),
@@ -154,10 +243,85 @@ async function test(account: PlatformAccount) {
   }
 }
 
+function stopXhsLoginPolling() {
+  if (qrPollTimer) window.clearInterval(qrPollTimer)
+  qrPollTimer = undefined
+  qrPolling.value = false
+}
+
+function startXhsLoginPolling() {
+  stopXhsLoginPolling()
+  qrPolling.value = true
+  const expiresAt = Date.now() + 4 * 60_000
+  qrPollTimer = window.setInterval(async () => {
+    if (Date.now() >= expiresAt) {
+      stopXhsLoginPolling()
+      qrMessage.value = '二维码已过期，请重新获取。'
+      return
+    }
+    try {
+      const result = await workflowApi.testPlatformAccount('XIAOHONGSHU')
+      if (result.status !== 'CONNECTED') return
+      stopXhsLoginPolling()
+      await load()
+      current.value = accounts.value.find((item) => item.platform === 'XIAOHONGSHU')
+      qrDialog.value = false
+      ElMessage.success(`小红书账号 ${result.loginUsername || ''} 登录成功`)
+    } catch {
+      // The MCP server can be busy while waiting for the QR scan. Keep polling
+      // until the QR expires instead of showing a new error every few seconds.
+    }
+  }, 3000)
+}
+
+async function loadXhsQrcode(account?: PlatformAccount) {
+  if (account) current.value = account
+  qrLoading.value = true
+  qrImage.value = ''
+  qrMessage.value = ''
+  qrDialog.value = true
+  try {
+    const result = await workflowApi.xiaohongshuLoginQrcode()
+    qrImage.value = result.imageDataUrl
+    qrMessage.value = result.message
+    startXhsLoginPolling()
+  } catch (error) {
+    qrDialog.value = false
+    ElMessage.error(getApiErrorMessage(error))
+  } finally {
+    qrLoading.value = false
+  }
+}
+
+async function loadXhsQrcodeFromEditor() {
+  if (!form.account_name.trim()) form.account_name = 'ContentPilot 小红书'
+  form.publish_mode = 'MCP_PUBLISH'
+  if (!(await save(false))) return
+  current.value = accounts.value.find((item) => item.platform === 'XIAOHONGSHU')
+  await loadXhsQrcode(current.value)
+}
+
+async function logoutXhs() {
+  try {
+    await ElMessageBox.confirm(
+      '将退出当前小红书本地登录并清除 MCP Cookie，退出后需要重新扫码。确定继续吗？',
+      '退出小红书登录',
+      { type: 'warning' },
+    )
+    await workflowApi.xiaohongshuLogout()
+    ElMessage.success('已退出小红书登录，可以重新扫码')
+    await load()
+  } catch (error) {
+    if (error !== 'cancel') ElMessage.error(getApiErrorMessage(error))
+  }
+}
+
 async function disconnect(account: PlatformAccount) {
   try {
     await ElMessageBox.confirm(
-      '将删除该平台配置及保存的所有 Token 和密钥，确定继续吗？',
+      account.platform === 'XIAOHONGSHU'
+        ? '将退出小红书本地登录、清除 MCP Cookie，并删除 ContentPilot 中的账号配置。确定继续吗？'
+        : '将删除该平台配置及保存的所有 Token 和密钥，确定继续吗？',
       '解除连接',
       {
         type: 'warning',
@@ -171,15 +335,33 @@ async function disconnect(account: PlatformAccount) {
   }
 }
 
-async function oauth() {
+async function oauth(platform: Platform) {
   try {
+    if (platform === 'X' && !xOAuthCredentialsReady.value) {
+      ElMessage.warning('请先在 X Developer Portal 创建应用，并填写 Client ID 和 Client Secret')
+      openOfficialPlatform()
+      return
+    }
+    if (!form.redirect_uri.trim()) {
+      ElMessage.warning('请填写与 X Developer Portal 完全一致的 Redirect URI')
+      return
+    }
     if (!(await save(false))) return
     if (!form.redirect_uri) return
-    const result = await workflowApi.startWeiboOAuth(form.redirect_uri)
+    const result =
+      platform === 'X'
+        ? await workflowApi.startXOAuth(form.redirect_uri)
+        : await workflowApi.startWeiboOAuth(form.redirect_uri)
     window.location.assign(result.authorizationUrl)
   } catch (error) {
     ElMessage.error(getApiErrorMessage(error))
   }
+}
+
+function openOfficialPlatform() {
+  const url = current.value?.connectionGuide.consoleUrl
+  if (!url) return
+  window.open(url, '_blank', 'noopener,noreferrer')
 }
 
 async function showLogs(account: PlatformAccount) {
@@ -189,11 +371,21 @@ async function showLogs(account: PlatformAccount) {
 }
 
 onMounted(async () => {
+  sessionClockTimer = window.setInterval(() => {
+    sessionClock.value = Date.now()
+  }, 30_000)
   await load()
   if (route.query.oauth === 'weibo_success') {
     ElMessage.success('微博官方 OAuth 授权成功，已取得真实 Access Token')
     await router.replace({ name: 'platform-accounts' })
+  } else if (route.query.oauth === 'x_success') {
+    ElMessage.success('X 官方 OAuth 授权成功，已取得真实 Access Token')
+    await router.replace({ name: 'platform-accounts' })
   }
+})
+onBeforeUnmount(() => {
+  stopXhsLoginPolling()
+  if (sessionClockTimer) window.clearInterval(sessionClockTimer)
 })
 </script>
 
@@ -201,13 +393,29 @@ onMounted(async () => {
   <div>
     <PageHeader
       title="平台账号"
-      description="管理官方授权、发布能力与 Token 状态；所有敏感凭证仅加密保存在服务端。"
+      :description="
+        isAdmin
+          ? '统一管理团队共享的平台授权与发布能力；所有敏感凭证仅加密保存在服务端。'
+          : '查看团队共享平台账号的连接和发布能力；授权与敏感配置由管理员维护。'
+      "
     >
       <el-button :loading="loading" @click="load"><RefreshCw :size="15" />刷新</el-button>
     </PageHeader>
+    <el-alert
+      v-if="!isAdmin"
+      class="mb-4"
+      title="当前为运营者只读视图：你可以检测连接并使用已授权账号发布，但不能查看密钥、扫码授权或解除连接。"
+      type="info"
+      :closable="false"
+    />
 
     <div v-loading="loading" class="account-grid">
-      <article v-for="account in accounts" :key="account.platform" class="account-card">
+      <article
+        v-for="account in accounts"
+        :key="account.platform"
+        class="account-card"
+        :data-testid="`platform-account-${account.platform}`"
+      >
         <header>
           <PlatformIcon :platform="account.platform" />
           <div>
@@ -223,7 +431,23 @@ onMounted(async () => {
           <ShieldAlert :size="16" />授权已过期，请重新授权后再创建真实发布任务。
         </div>
         <div v-if="account.platform === 'XIAOHONGSHU'" class="account-notice">
-          小红书没有在这里伪装成已连接：当前只生成真实交付包，由运营人员前往创作中心发布并回填链接。
+          {{
+            account.publishMode === 'MCP_PUBLISH' && account.localPublishingEnabled
+              ? account.status === 'CONNECTED'
+                ? `本机 MCP 已登录${account.loginUsername ? `，当前账号：${account.loginUsername}` : ''}。`
+                : '本机 MCP 尚未登录，请点击下方“扫码登录”，成功后系统会自动更新状态。'
+              : '当前使用人工发布交付包；本地 MCP 自动发布默认关闭，不会伪装成已连接。'
+          }}
+        </div>
+        <div
+          v-else-if="
+            account.platform === 'X' &&
+            account.status === 'CONNECTED' &&
+            !account.publicPublishEnabled
+          "
+          class="account-notice account-notice--real"
+        >
+          X OAuth 已连接，但真实发布开关仍为关闭状态；连接测试不会发送帖子。
         </div>
         <div v-else-if="account.status !== 'CONNECTED'" class="account-notice account-notice--real">
           尚未通过官方接口验证。保存真实平台凭证并完成授权前，系统不会创建发布任务。
@@ -232,19 +456,29 @@ onMounted(async () => {
         <dl class="account-meta">
           <div>
             <dt>发布方式</dt>
-            <dd>{{ publishModeNames[account.publishMode] || account.publishMode }}</dd>
+            <dd>{{ publishModeLabel(account) }}</dd>
           </div>
           <div>
             <dt>最近检测</dt>
-            <dd>
-              {{
-                account.lastTestAt
-                  ? new Date(account.lastTestAt).toLocaleString('zh-CN')
-                  : '尚未检测'
-              }}
-            </dd>
+            <dd>{{ account.lastTestAt ? formatDateTime(account.lastTestAt) : '尚未检测' }}</dd>
           </div>
-          <div>
+          <div v-if="account.platform === 'XIAOHONGSHU'">
+            <dt>登录账号</dt>
+            <dd>{{ account.loginUsername || '尚未获取' }}</dd>
+          </div>
+          <div v-if="account.platform === 'XIAOHONGSHU'">
+            <dt>上次登录</dt>
+            <dd>{{ formatDateTime(account.lastLoginAt) }}</dd>
+          </div>
+          <div v-if="account.platform === 'XIAOHONGSHU'">
+            <dt>已登录时长</dt>
+            <dd>{{ loginDuration(account) }}</dd>
+          </div>
+          <div v-if="account.platform === 'XIAOHONGSHU'">
+            <dt>本机会话</dt>
+            <dd>{{ account.status === 'CONNECTED' ? '已保存在 MCP' : '未登录' }}</dd>
+          </div>
+          <div v-else>
             <dt>Token</dt>
             <dd>
               {{ account.tokenHint || (account.accessTokenConfigured ? '已配置' : '未配置') }}
@@ -252,32 +486,68 @@ onMounted(async () => {
           </div>
         </dl>
 
+        <p v-if="account.publishHint" class="account-hint">{{ account.publishHint }}</p>
+
         <section class="capability-list">
           <p>目标能力（最终以平台审核和接口权限为准）</p>
           <span v-for="capability in account.capabilities" :key="capability">
             <CheckCircle2 :size="13" />{{ capabilityNames[capability] || capability }}
           </span>
         </section>
-        <p v-if="account.lastError" class="account-error">{{ account.lastError }}</p>
+        <p v-if="account.lastError && account.status !== 'CONNECTED'" class="account-error">
+          {{ accountErrorMessage(account) }}
+        </p>
 
         <footer>
           <el-button
-            v-if="account.platform !== 'XIAOHONGSHU'"
+            v-if="
+              isAdmin &&
+              account.platform === 'XIAOHONGSHU' &&
+              account.localPublishingEnabled &&
+              account.publishMode === 'MCP_PUBLISH' &&
+              account.status !== 'CONNECTED'
+            "
+            :loading="qrLoading"
+            @click="loadXhsQrcode(account)"
+          >
+            <QrCode :size="14" />扫码登录
+          </el-button>
+          <el-button
+            v-if="
+              isAdmin &&
+              account.platform === 'XIAOHONGSHU' &&
+              account.localPublishingEnabled &&
+              account.publishMode === 'MCP_PUBLISH' &&
+              account.status === 'CONNECTED'
+            "
+            @click="logoutXhs"
+          >
+            <Unlink :size="14" />退出登录
+          </el-button>
+          <el-button
+            v-if="
+              account.platform !== 'XIAOHONGSHU' ||
+              (account.localPublishingEnabled && account.publishMode === 'MCP_PUBLISH')
+            "
             :disabled="
-              !account.id || (account.platform === 'WEIBO' && !account.accessTokenConfigured)
+              !account.id ||
+              (['WEIBO', 'X'].includes(account.platform) && !account.accessTokenConfigured) ||
+              (account.platform === 'XIAOHONGSHU' && account.publishMode !== 'MCP_PUBLISH')
             "
             :loading="testing === account.platform"
             @click="test(account)"
             ><Link2 :size="14" />{{
-              account.platform === 'WEIBO' && !account.accessTokenConfigured
+              ['WEIBO', 'X'].includes(account.platform) && !account.accessTokenConfigured
                 ? '请先完成 OAuth'
-                : '验证真实连接'
+                : account.platform === 'XIAOHONGSHU'
+                  ? '检测本地登录'
+                  : '验证真实连接'
             }}</el-button
           >
-          <el-button type="primary" @click="edit(account)"
+          <el-button v-if="isAdmin" type="primary" @click="edit(account)"
             ><Settings2 :size="14" />编辑配置</el-button
           >
-          <el-dropdown v-if="account.id" trigger="click">
+          <el-dropdown v-if="isAdmin && account.id" trigger="click">
             <el-button>更多</el-button>
             <template #dropdown>
               <el-dropdown-menu>
@@ -323,6 +593,13 @@ onMounted(async () => {
           <el-form-item label="Redirect URI" required
             ><el-input v-model="form.redirect_uri"
           /></el-form-item>
+          <el-form-item label="发布操作用户公网 IP">
+            <el-input v-model="form.operation_ip" placeholder="填写实际公网 IPv4 或 IPv6" />
+            <small class="field-help"
+              >微博发布接口要求 rip 参数。请填写实际点击排期或发布的操作用户公网
+              IP；系统能直接识别公网访问时会优先使用当次请求 IP。</small
+            >
+          </el-form-item>
           <el-form-item label="Access Token"
             ><el-input
               v-model="form.access_token"
@@ -345,6 +622,45 @@ onMounted(async () => {
           >
           <el-alert
             title="真实发布权限取决于微博开放平台应用审核和账号授权范围。"
+            type="info"
+            :closable="false"
+          />
+        </template>
+
+        <template v-else-if="current.platform === 'X'">
+          <el-form-item label="OAuth 2.0 Client ID" required
+            ><el-input v-model="form.client_id"
+          /></el-form-item>
+          <el-form-item label="Client Secret">
+            <el-input
+              v-model="form.app_secret"
+              type="password"
+              show-password
+              placeholder="留空表示保持原值"
+            />
+          </el-form-item>
+          <el-form-item label="Redirect URI" required
+            ><el-input v-model="form.redirect_uri"
+          /></el-form-item>
+          <el-form-item label="发布方式"
+            ><el-tag type="success">X 官方 OAuth 2.0 API</el-tag></el-form-item
+          >
+          <el-checkbox v-model="form.allow_public_publish">
+            我已了解真实发布会将内容发送到 X，允许该共享账号创建真实帖子
+          </el-checkbox>
+          <el-alert
+            class="mt-4"
+            :title="
+              form.allow_public_publish
+                ? '公开发布开关已开启。每次立即发布时仍会要求再次确认。'
+                : '默认安全模式：仅保存授权并验证连接，不允许创建真实 X 帖子。'
+            "
+            :type="form.allow_public_publish ? 'warning' : 'info'"
+            :closable="false"
+          />
+          <el-alert
+            class="mt-3"
+            title="需要在 X Developer Portal 中启用 OAuth 2.0，并授予 tweet.read、tweet.write、users.read、offline.access。连接测试只读取账号信息，不会发送测试帖。"
             type="info"
             :closable="false"
           />
@@ -384,10 +700,36 @@ onMounted(async () => {
         </template>
 
         <template v-else>
-          <el-form-item label="发布方式"><el-tag type="warning">人工发布交付</el-tag></el-form-item>
+          <el-form-item label="发布方式">
+            <el-select v-model="form.publish_mode" class="w-full">
+              <el-option label="人工发布交付（默认）" value="MANUAL_CONFIRM" />
+              <el-option
+                label="本地 xiaohongshu-mcp 试运行（仅自己可见）"
+                value="MCP_PUBLISH"
+                :disabled="!current.localPublishingEnabled"
+              />
+            </el-select>
+          </el-form-item>
           <el-alert
-            title="不会保存小红书 Cookie 或密码，也不会执行 Selenium、Playwright 或浏览器注入。排期到点后生成文案与图片发布包。"
+            v-if="!current.localPublishingEnabled"
+            title="本地 MCP 发布默认关闭。当前只生成文案与图片交付包，不会保存小红书 Cookie 或伪装发布成功。"
             type="warning"
+            :closable="false"
+          />
+          <template v-else-if="form.publish_mode === 'MCP_PUBLISH'">
+            <el-alert
+              title="实验性本地功能：Cookie 只由本机 xiaohongshu-mcp 保存。首次建议使用“仅自己可见”验证，平台风控或页面变化可能导致失败。"
+              type="warning"
+              :closable="false"
+            />
+            <el-button class="mt-4" :loading="qrLoading" @click="loadXhsQrcodeFromEditor">
+              <QrCode :size="15" />获取扫码登录二维码
+            </el-button>
+          </template>
+          <el-alert
+            v-else
+            title="人工交付模式不会操作浏览器；排期到点后生成文案与图片发布包。"
+            type="info"
             :closable="false"
           />
         </template>
@@ -396,9 +738,27 @@ onMounted(async () => {
         <div class="drawer-actions">
           <el-button @click="drawer = false">取消</el-button>
           <el-button
-            v-if="current?.platform === 'WEIBO' && form.publish_mode === 'REAL_API'"
-            @click="oauth"
-            >保存并前往微博官方授权</el-button
+            v-if="current?.platform === 'X' && !xOAuthCredentialsReady"
+            tag="a"
+            :href="current.connectionGuide.consoleUrl"
+            target="_blank"
+            rel="noopener noreferrer"
+            type="primary"
+            plain
+            data-testid="open-x-developer-portal"
+          >
+            第 1 步：打开 X 开发者后台
+          </el-button>
+          <el-button
+            v-if="
+              current &&
+              ['WEIBO', 'X'].includes(current.platform) &&
+              form.publish_mode === 'REAL_API' &&
+              (current.platform !== 'X' || xOAuthCredentialsReady)
+            "
+            :data-testid="`start-${current.platform.toLowerCase()}-oauth`"
+            @click="oauth(current.platform)"
+            >保存并前往{{ current.platform === 'X' ? ' X' : '微博' }}官方授权</el-button
           >
           <el-button type="primary" data-testid="save-platform-account" @click="save()"
             >保存配置</el-button
@@ -420,13 +780,28 @@ onMounted(async () => {
       </el-timeline>
       <el-empty v-else description="暂无授权日志" />
     </el-drawer>
+
+    <el-dialog
+      v-model="qrDialog"
+      title="小红书扫码登录"
+      width="420px"
+      @closed="stopXhsLoginPolling"
+    >
+      <div v-loading="qrLoading" class="qr-login-panel">
+        <img v-if="qrImage" :src="qrImage" alt="小红书登录二维码" />
+        <el-empty v-else-if="!qrLoading" description="没有收到二维码" />
+        <p v-if="qrMessage">{{ qrMessage }}</p>
+        <small v-if="qrPolling">请使用小红书 App 扫码，系统正在自动检测登录结果。</small>
+        <small v-else>请使用小红书 App 扫码；二维码过期后可以重新获取。</small>
+      </div>
+    </el-dialog>
   </div>
 </template>
 
 <style scoped>
 .account-grid {
   display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
+  grid-template-columns: repeat(2, minmax(0, 1fr));
   gap: 18px;
 }
 .account-card {
@@ -450,6 +825,23 @@ onMounted(async () => {
 .account-meta dt {
   color: #64748b;
   font-size: 12px;
+}
+.qr-login-panel {
+  min-height: 260px;
+  display: grid;
+  place-items: center;
+  gap: 12px;
+  text-align: center;
+}
+.qr-login-panel img {
+  width: 240px;
+  height: 240px;
+  object-fit: contain;
+}
+.qr-login-panel p,
+.qr-login-panel small {
+  color: #64748b;
+  line-height: 1.6;
 }
 .account-warning,
 .account-notice {
@@ -509,6 +901,15 @@ onMounted(async () => {
   color: #dc2626;
   font-size: 12px;
 }
+.account-hint {
+  margin-top: 14px;
+  padding: 8px 12px;
+  border-radius: 8px;
+  background: #ecfdf5;
+  color: #065f46;
+  font-size: 12px;
+  line-height: 1.6;
+}
 .account-card footer {
   display: flex;
   gap: 8px;
@@ -543,6 +944,13 @@ onMounted(async () => {
 .connection-guide ol {
   margin: 9px 0 0;
   padding-left: 20px;
+}
+.field-help {
+  display: block;
+  margin-top: 6px;
+  color: #64748b;
+  font-size: 12px;
+  line-height: 1.55;
 }
 @media (max-width: 1100px) {
   .account-grid {

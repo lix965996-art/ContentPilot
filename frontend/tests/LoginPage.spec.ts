@@ -23,6 +23,22 @@ vi.mock('@/api/auth', () => ({
       roles: [{ code: 'ADMIN', name: '管理员' }],
     },
   }),
+  register: vi.fn().mockResolvedValue({
+    access_token: 'registered-access-token',
+    refresh_token: 'registered-refresh-token',
+    token_type: 'bearer',
+    expires_in: 7200,
+    user: {
+      id: 9,
+      username: 'new_operator',
+      display_name: '新运营者',
+      email: 'new@example.com',
+      avatar_url: null,
+      status: 'ACTIVE',
+      last_login_at: null,
+      roles: [{ code: 'OPERATOR', name: '运营者' }],
+    },
+  }),
   fetchCurrentUser: vi.fn(),
   logout: vi.fn(),
 }))
@@ -31,7 +47,8 @@ async function renderPage() {
   const router = createRouter({
     history: createMemoryHistory(),
     routes: [
-      { path: '/login', component: LoginPage },
+      { path: '/login', name: 'login', component: LoginPage },
+      { path: '/register', name: 'register', component: LoginPage },
       { path: '/', component: { template: '<div>工作台</div>' } },
     ],
   })
@@ -66,5 +83,22 @@ describe('LoginPage', () => {
     expect(screen.getByText('管理员')).toBeTruthy()
     expect(screen.getByText('运营者')).toBeTruthy()
     expect(screen.getByText('查看者')).toBeTruthy()
+  })
+
+  it('registers a new operator and enters the workspace', async () => {
+    const router = await renderPage()
+    await fireEvent.click(screen.getByTestId('auth-mode-switch'))
+    await waitFor(() => expect(router.currentRoute.value.path).toBe('/register'))
+
+    await fireEvent.update(screen.getByTestId('display-name-input'), '新运营者')
+    await fireEvent.update(screen.getByTestId('username-input'), 'new_operator')
+    await fireEvent.update(screen.getByTestId('email-input'), 'new@example.com')
+    await fireEvent.update(screen.getByTestId('password-input'), 'Content123')
+    expect(screen.getByTestId('password-strength').textContent).toContain('符合要求')
+    await fireEvent.update(screen.getByTestId('confirm-password-input'), 'Content123')
+    await fireEvent.click(screen.getByTestId('register-button'))
+
+    await waitFor(() => expect(router.currentRoute.value.path).toBe('/'))
+    expect(localStorage.getItem('contentpilot_access_token')).toBe('registered-access-token')
   })
 })

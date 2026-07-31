@@ -8,6 +8,7 @@ const labelMap: Record<string, string> = {
   ARCHIVED: '已归档',
   PENDING: '待执行',
   RUNNING: '执行中',
+  PUBLISHING: '发布中',
   RETRYING: '重试中',
   SUCCESS: '成功',
   PARTIAL_SUCCESS: '部分成功',
@@ -21,6 +22,10 @@ const labelMap: Record<string, string> = {
   FINISHED: '已结束',
   ACTIVE: '启用',
   DISABLED: '停用',
+  INBOX: '收件箱',
+  RESEARCHING: '研究中',
+  READY: '可创作',
+  USED: '已使用',
 }
 const tone = computed(() =>
   [
@@ -35,13 +40,13 @@ const tone = computed(() =>
     ? 'success'
     : ['FAILED', 'DISABLED', 'REJECTED'].includes(props.status)
       ? 'danger'
-      : ['RUNNING', 'RETRYING', 'GENERATED'].includes(props.status)
+      : ['RUNNING', 'PUBLISHING', 'RETRYING', 'GENERATED', 'RESEARCHING'].includes(props.status)
         ? 'primary'
-        : ['WAITING_MANUAL_CONFIRM', 'PARTIAL_SUCCESS'].includes(props.status)
+        : ['WAITING_MANUAL_CONFIRM', 'PARTIAL_SUCCESS', 'READY'].includes(props.status)
           ? 'warning'
           : 'neutral',
 )
 </script>
 <template>
-  <span class="status-badge" :data-tone="tone"><i />{{ labelMap[status] || status }}</span>
+  <span class="status-badge" :data-tone="tone"><i />{{ labelMap[status] || '状态待确认' }}</span>
 </template>

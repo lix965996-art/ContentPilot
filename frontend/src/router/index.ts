@@ -27,6 +27,12 @@ const router = createRouter({
       meta: { public: true },
     },
     {
+      path: '/register',
+      name: 'register',
+      component: LoginPage,
+      meta: { public: true },
+    },
+    {
       path: '/',
       component: AppLayout,
       children: [
@@ -52,7 +58,7 @@ const router = createRouter({
           path: 'trends',
           name: 'trends',
           component: () => import('@/pages/HotTopicsPage.vue'),
-          meta: { roles: ['ADMIN', 'OPERATOR'], title: '热点选题' },
+          meta: { roles: ['ADMIN', 'OPERATOR'], title: '选题研究' },
         },
         {
           path: 'media',
@@ -77,6 +83,12 @@ const router = createRouter({
           name: 'publish',
           component: () => import('@/pages/PublishCenterPage.vue'),
           meta: { roles: ['ADMIN', 'OPERATOR'], title: '发布' },
+        },
+        {
+          path: 'runs',
+          name: 'runs',
+          component: () => import('@/pages/RunCenterPage.vue'),
+          meta: { roles: ['ADMIN', 'OPERATOR'], title: '运行中心' },
         },
         {
           path: 'platform-accounts',
@@ -123,7 +135,9 @@ router.beforeEach(async (to) => {
   const auth = useAuthStore()
   await auth.bootstrap()
 
-  if (to.name === 'login' && auth.isAuthenticated) return { name: 'dashboard' }
+  if (['login', 'register'].includes(String(to.name)) && auth.isAuthenticated) {
+    return { name: 'dashboard' }
+  }
   if (!to.meta.public && !auth.isAuthenticated) {
     return { name: 'login', query: { redirect: to.fullPath } }
   }

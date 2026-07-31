@@ -21,6 +21,11 @@ export interface LoginPayload {
   password: string
 }
 
+export interface RegisterPayload extends LoginPayload {
+  display_name: string
+  email: string
+}
+
 export interface AuthData {
   access_token: string
   refresh_token: string

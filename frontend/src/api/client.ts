@@ -106,7 +106,14 @@ apiClient.interceptors.response.use(
 
 export function getApiErrorMessage(error: unknown, fallback = '请求失败，请稍后重试'): string {
   if (axios.isAxiosError<ApiResponse<unknown>>(error)) {
-    if (error.response?.data?.message) return error.response.data.message
+    if (error.response?.data?.message) {
+      const message = error.response.data.message
+      const looksTechnical =
+        /\b(?:rid|request.?id|external_id|client_id|client_secret|access_token|refresh_token)\b|api unauthorized|\bexception\b|\btraceback\b|\bHTTP\s+[45]\d\d\b|[{}]|\b[a-z]+_[a-z_]+\b/i.test(
+          message,
+        )
+      return looksTechnical ? fallback : message
+    }
     if (error.code === 'ECONNABORTED') return '请求超时，请检查后端服务'
     if (!error.response) return '无法连接后端服务，请确认服务已启动'
   }
