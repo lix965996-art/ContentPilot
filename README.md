@@ -167,7 +167,7 @@ Copy-Item backend\.env.example backend\.env
 
 管理员在“平台账号”页为各平台统一配置凭证和发布模式；运营者只能检测连接并使用已授权账号，不能读取或修改凭证。真实凭证仅在服务端加密保存。
 
-完整申请步骤、回调地址和常见错误见 [真实平台连接指南](docs/PLATFORM_CONNECTION.md)。
+完整申请步骤、回调地址和常见错误见 [运维与操作手册](docs/OPERATIONS.md)。
 
 ### 可选的本机发布连接
 
@@ -255,7 +255,7 @@ socialflow-ai/
 └─ README.md
 ```
 
-更多文档：[Windows 部署](docs/DEPLOYMENT_WINDOWS.md)、[系统设计](docs/SYSTEM_DESIGN.md)、[API 设计](docs/API_DESIGN.md)、[测试报告](docs/TEST_REPORT.md)。
+更多文档：[设计文档](docs/DESIGN.md)（需求、架构、数据库、API、Prompt、实验、测试计划）、[运维与操作手册](docs/OPERATIONS.md)（部署、平台连接、答辩演示）；历史快照见 [docs/archive/](docs/archive/)。
 
 ## License
 

@@ -1,8 +1,76 @@
-# 真实平台连接指南
+# ContentPilot 运维与操作手册
+
+> 本文合并自原 DEPLOYMENT_WINDOWS / PLATFORM_CONNECTION / DEFENSE_DEMO 三份文档（2026-07-31），原件见 git 历史。
+
+## 1. 启动与部署
+
+### 正式环境：Docker Compose
+
+正式环境使用 `compose.yaml` 管理三个服务：
+
+- `web`：Nginx 提供前端静态文件，并反向代理 `/api` 与 `/uploads`；
+- `backend`：FastAPI API、数据库迁移、初始化和任务调度；
+- `db`：MySQL 8.4，数据写入命名卷 `mysql_data`。
+
+首次部署：
+
+```powershell
+Copy-Item .env.example .env
+# 修改 .env 中的数据库密码、JWT_SECRET 和 PLATFORM_CREDENTIAL_KEY
+docker compose up -d --build
+docker compose ps
+```
+
+`backend` 每次启动都会幂等执行 Alembic migration 和基础数据 seed。`web` 只会在 API 健康检查通过后启动。MySQL 数据与用户上传文件保存在 Docker 卷中，普通的 `docker compose down` 不会删除它们。
+
+更新与排障：
+
+```powershell
+docker compose up -d --build
+docker compose logs -f backend
+docker compose logs -f web
+docker compose logs -f db
+docker compose down
+```
+
+不要在生产环境提交 `.env`，不要使用示例密钥，也不要轻易执行 `docker compose down --volumes`。
+
+### Windows 本地开发
+
+本地模式需要 Python 3.12、Node.js 20+ 和 MySQL 8。所有用户操作统一通过根目录的 `contentpilot.ps1`：
+
+```powershell
+.\contentpilot.ps1 setup
+.\contentpilot.ps1 start
+.\contentpilot.ps1 status
+.\contentpilot.ps1 logs -Follow
+.\contentpilot.ps1 stop
+```
+
+启动器会：
+
+1. 检查后端虚拟环境和前端依赖；
+2. 执行 Alembic migration；
+3. 分别启动 API 与 Vite 开发服务器；
+4. 将 PID 和启动时间写入 `.runtime/`；
+5. 将日志写入 `logs/`；
+6. 等待健康检查通过后打开浏览器。
+
+本地 Web 为 `http://127.0.0.1:5173`，API 文档为 `http://127.0.0.1:8000/docs`。
+
+### 常见问题
+
+- PowerShell 拒绝执行脚本：先运行 `Set-ExecutionPolicy -Scope Process Bypass`；
+- 端口 5173/8000 被占用：运行 `.\contentpilot.ps1 status`，不要直接结束未知进程；
+- MySQL 连接失败：检查 `backend/.env`，需要时运行 `.\contentpilot.ps1 db`；
+- 本地启动失败：运行 `.\contentpilot.ps1 logs`；
+- Docker 启动失败：运行 `docker compose ps` 和 `docker compose logs` 查看具体服务。
+
+## 2. 真实平台连接指南
 
 ContentPilot 不提供模拟连接或模拟发布成功。微博、X 与微信公众号只有在官方接口实际返回成功后才显示“已连接”；小红书在没有获批的官方内容发布接口时只显示“仅人工交付”。
 
-## 微博：开放平台应用 + OAuth2
+### 微博：开放平台应用 + OAuth2
 
 准备工作：
 
@@ -18,7 +86,7 @@ ContentPilot 不提供模拟连接或模拟发布成功。微博、X 与微信�
 
 相关官方接口：[OAuth2 authorize](https://open.weibo.com/wiki/Oauth2/authorize)、[OAuth2 access_token](https://open.weibo.com/wiki/Oauth2/access_token)。发布能力还取决于应用审核状态和获批接口权限。
 
-### 错误码 21324
+#### 错误码 21324
 
 `21324 client_id或client_secret参数无效` 是微博官方返回的错误，不是 ContentPilot 本地错误。常见原因：
 
@@ -29,7 +97,7 @@ ContentPilot 不提供模拟连接或模拟发布成功。微博、X 与微信�
 
 应回到微博开放平台应用后台重新复制同一应用的 App Key/App Secret。截图中出现该错误时，ContentPilot 必须保持“连接无效/待授权”，不能显示连接成功。
 
-## X：官方 OAuth 2.0 + PKCE
+### X：官方 OAuth 2.0 + PKCE
 
 1. 登录 [X Developer Portal](https://developer.x.com/en/portal/dashboard)，创建 Project 和 Web App。
 2. 在应用认证设置中启用 OAuth 2.0，选择 Read and write 权限。
@@ -45,7 +113,7 @@ X 发帖调用官方 `POST /2/tweets`，成功后保存真实 Post ID 和公开�
 
 注意：X API 的可用能力和费用取决于 Developer Console 中的套餐、余额、应用环境与审核状态。OAuth 成功不等于一定拥有发帖额度。当前版本只发布文字；图片和视频不会被伪装成已上传。
 
-## 微信公众号：AppID/AppSecret + IP 白名单
+### 微信公众号：AppID/AppSecret + IP 白名单
 
 1. 登录[微信公众平台](https://mp.weixin.qq.com/)，进入开发接口相关设置。
 2. 获取公众号真实 `AppID` 和 `AppSecret`。不要填写微信号、原始 ID、小程序 AppID 或模型服务 Key。
@@ -65,7 +133,7 @@ X 发帖调用官方 `POST /2/tweets`，成功后保存真实 Post ID 和公开�
 - `48001/48002`：公众号没有相应接口权限；
 - `40001/40014/42001`：Token 无效或过期，需要重新验证。
 
-## 小红书：人工交付边界
+### 小红书：人工交付边界
 
 当前项目没有获批、可供普通账号使用的小红书官方笔记发布接口。小红书开放平台公开能力主要面向获准的业务场景，不能把账号密码、Cookie 或浏览器自动化包装成“官方连接”。
 
@@ -78,10 +146,26 @@ X 发帖调用官方 `POST /2/tweets`，成功后保存真实 Post ID 和公开�
 
 如果以后获得小红书书面批准的合作方接口，应新增独立官方适配器和接口验签测试，不能复用 Cookie、Selenium 或 Playwright 登录发布。
 
-## 如何判断是不是真连接
+### 如何判断是不是真连接
 
 - “保存配置”只代表密钥已加密保存，不代表连接成功；
 - “验证真实连接”必须调用平台官方域名并取得真实账号标识或 Access Token；
 - 微博/公众号状态不是 `CONNECTED` 时，后端会拒绝创建真实发布任务；
 - 小红书始终显示 `MANUAL_ONLY`，不会显示“已连接”；
 - 测试代码可以拦截外部 HTTP 边界，但产品运行代码没有模拟成功发布器。
+
+## 3. 答辩演示流程（8–12 分钟）
+
+1. 运行 `.\contentpilot.ps1 start`，说明本地依赖只在首次安装，并打开登录页（30 秒）；
+2. 用 operator 登录，展示工作台真实业务摘要（30 秒）；
+3. 内容管理新建一篇原文（45 秒）；
+4. AI 工作室选择多平台并生成，展示 Prompt 版本、耗时、质量、编辑比例和审核（90 秒）；
+5. 配图推荐展示中英文关键词、本地降级和署名信息（45 秒）；
+6. 时间推荐展示曲线、贡献分、置信度和备选时段（60 秒）；
+7. 展示未授权账号的发布拦截；使用小红书人工交付包演示排期、下载和确认（90 秒）；
+8. 数据复盘下载模板、导入样例、展示平台/时间组图表和摘要（90 秒）；
+9. 实验管理展示分组、样本和汇总结果（60 秒）；
+10. admin 查看配置脱敏、用户角色和审计日志（45 秒）；
+11. 强调官方授权边界、`SIMULATED` 互动样本与真实数据采集计划（30 秒）。
+
+演示前运行全量测试并保留 [docs/archive/TEST_REPORT.md](archive/TEST_REPORT.md)；外部网络不可用时不演示微博或公众号发布成功，直接展示明确的连接失败与授权引导。
