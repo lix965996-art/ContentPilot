@@ -1,6 +1,6 @@
 # 真实平台连接指南
 
-ContentPilot 不提供模拟连接或模拟发布成功。微博与微信公众号只有在官方接口实际返回成功后才显示“已连接”；小红书在没有获批的官方内容发布接口时只显示“仅人工交付”。
+ContentPilot 不提供模拟连接或模拟发布成功。微博、X 与微信公众号只有在官方接口实际返回成功后才显示“已连接”；小红书在没有获批的官方内容发布接口时只显示“仅人工交付”。
 
 ## 微博：开放平台应用 + OAuth2
 
@@ -28,6 +28,22 @@ ContentPilot 不提供模拟连接或模拟发布成功。微博与微信公众�
 - 应用类型、审核状态或 OAuth 回调配置不满足当前授权要求。
 
 应回到微博开放平台应用后台重新复制同一应用的 App Key/App Secret。截图中出现该错误时，ContentPilot 必须保持“连接无效/待授权”，不能显示连接成功。
+
+## X：官方 OAuth 2.0 + PKCE
+
+1. 登录 [X Developer Portal](https://developer.x.com/en/portal/dashboard)，创建 Project 和 Web App。
+2. 在应用认证设置中启用 OAuth 2.0，选择 Read and write 权限。
+3. 配置最小授权范围：`tweet.read`、`tweet.write`、`users.read`、`offline.access`。
+4. 将回调地址逐字加入应用的 Callback URI / Redirect URL：
+   - 本地开发：`http://127.0.0.1:8000/api/platform-accounts/X/oauth/callback`
+   - 正式环境：`https://你的域名/api/platform-accounts/X/oauth/callback`
+5. 管理员在“平台账号 → X → 编辑配置”填写 Client ID、Client Secret 和同一回调地址。
+6. 先保存配置并前往 X 官方页面授权，再点击“验证真实连接”。系统只调用 `/2/users/me`，不会发送测试帖。
+7. 确认账号和应用权限无误后，管理员显式开启“允许真实公开发布”；运营者才可用该共享账号排期。
+
+X 发帖调用官方 `POST /2/tweets`，成功后保存真实 Post ID 和公开链接。Access Token 到期时系统会使用加密保存的 Refresh Token 自动刷新；解除连接时会请求 X 官方撤销 Token 并清除本地密文。
+
+注意：X API 的可用能力和费用取决于 Developer Console 中的套餐、余额、应用环境与审核状态。OAuth 成功不等于一定拥有发帖额度。当前版本只发布文字；图片和视频不会被伪装成已上传。
 
 ## 微信公众号：AppID/AppSecret + IP 白名单
 

@@ -6,6 +6,7 @@ backend/**/__pycache__/
 backend/.pytest_cache/
 backend/.ruff_cache/
 backend/*.db
+backend/app/tests/.e2e_socialflow.db
 
 # Node
 frontend/node_modules/
@@ -25,3 +26,12 @@ uploads/
 logs/
 Thumbs.db
 .DS_Store
+
+# Local platform sessions and browser-automation artifacts
+cookies.json
+**/cookies.json
+*_qrcode.png
+*_qr_code.png
+xhs_*_img.png
+test_xhs_*.png
+.local-private/

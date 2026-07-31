@@ -1,6 +1,6 @@
 # ContentPilot 项目规格摘要
 
-项目严格依据 `socialflow_ai_codex_final_prompt.md` 实现，固定技术栈为 Vue 3 + TypeScript + FastAPI + MySQL 8。
+项目严格依据 [docs/archive/socialflow_ai_codex_final_prompt.md](docs/archive/socialflow_ai_codex_final_prompt.md) 实现，固定技术栈为 Vue 3 + TypeScript + FastAPI + MySQL 8。
 
 核心研究问题：
 
