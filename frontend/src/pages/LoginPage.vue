@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import type { FormInstance, FormRules } from 'element-plus'
 import { ElMessage } from 'element-plus'
@@ -19,6 +19,7 @@ import {
 
 import BrandMark from '@/components/BrandMark.vue'
 import PlatformIcon from '@/components/PlatformIcon.vue'
+import { fetchAuthOptions } from '@/api/auth'
 import { getApiErrorMessage } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
 
@@ -43,6 +44,20 @@ const accounts = [
   { label: '查看者', username: 'viewer', password: 'Viewer@123456' },
 ]
 const isRegister = computed(() => route.name === 'register')
+const allowRegistration = ref(true)
+const demoMode = ref(false)
+onMounted(async () => {
+  try {
+    const options = await fetchAuthOptions()
+    allowRegistration.value = options.allowRegistration
+    demoMode.value = options.demoMode
+    if (!options.allowRegistration && isRegister.value) {
+      await router.replace({ name: 'login', query: route.query })
+    }
+  } catch {
+    // 拿不到配置时保持默认展示，提交时后端仍会拦截
+  }
+})
 const passwordChecks = computed(() => [
   { label: '至少 8 位', passed: form.password.length >= 8 },
   { label: '包含字母', passed: /[A-Za-z]/.test(form.password) },
@@ -135,7 +150,11 @@ function fill(account: (typeof accounts)[number]) {
   form.username = account.username
   form.password = account.password
 }
-watch(isRegister, async () => {
+watch(isRegister, async (value) => {
+  if (value && !allowRegistration.value) {
+    await router.replace({ name: 'login', query: route.query })
+    return
+  }
   form.display_name = ''
   form.username = ''
   form.email = ''
@@ -333,7 +352,7 @@ watch(isRegister, async () => {
             <ArrowRight v-if="!auth.loading" :size="17" class="ml-2" />
           </el-button>
         </el-form>
-        <p class="auth-mode-switch">
+        <p v-if="allowRegistration" class="auth-mode-switch">
           {{ isRegister ? '已经有账号？' : '还没有账号？' }}
           <router-link
             :to="{
@@ -345,7 +364,7 @@ watch(isRegister, async () => {
             {{ isRegister ? '返回登录' : '立即注册' }}
           </router-link>
         </p>
-        <details v-if="!isRegister" class="account-shortcuts">
+        <details v-if="!isRegister && demoMode" class="account-shortcuts">
           <summary>使用演示账号</summary>
           <div>
             <button

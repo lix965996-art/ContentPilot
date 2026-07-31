@@ -33,3 +33,8 @@ export interface AuthData {
   expires_in: number
   user: User
 }
+
+export interface AuthOptions {
+  allowRegistration: boolean
+  demoMode: boolean
+}
