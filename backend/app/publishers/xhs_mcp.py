@@ -7,9 +7,15 @@ Xiaohongshu cookies in ContentPilot and is disabled unless
 
 from __future__ import annotations
 
+import asyncio
 import re
+import socket
+import subprocess
+import sys
 import uuid
+from pathlib import Path
 from typing import Any
+from urllib.parse import urlparse
 
 import httpx
 
@@ -36,6 +42,100 @@ VISIBILITY_ALIASES = {
 }
 
 _session: dict[str, Any] = {"id": None, "client": None}
+_local_process: subprocess.Popen[bytes] | None = None
+_local_start_lock = asyncio.Lock()
+
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+XHS_RUNTIME_DIR = PROJECT_ROOT / ".runtime" / "xiaohongshu-mcp"
+
+
+def _mcp_host_port() -> tuple[str, int]:
+    parsed = urlparse(XHS_MCP_URL)
+    return parsed.hostname or "127.0.0.1", parsed.port or 80
+
+
+async def _port_is_open(host: str, port: int) -> bool:
+    def check() -> bool:
+        try:
+            with socket.create_connection((host, port), timeout=0.35):
+                return True
+        except OSError:
+            return False
+
+    return await asyncio.to_thread(check)
+
+
+def _find_local_binary() -> Path | None:
+    configured = str(settings.xhs_mcp_binary_path or "").strip()
+    if configured:
+        candidate = Path(configured).expanduser()
+        if not candidate.is_absolute():
+            candidate = PROJECT_ROOT / candidate
+        if candidate.is_file():
+            return candidate.resolve()
+
+    binary_name = (
+        "xiaohongshu-mcp-windows-amd64.exe"
+        if sys.platform == "win32"
+        else "xiaohongshu-mcp-linux-amd64"
+    )
+    candidates = sorted(
+        XHS_RUNTIME_DIR.glob(f"*/{binary_name}"),
+        key=lambda path: path.parent.name,
+        reverse=True,
+    )
+    return candidates[0].resolve() if candidates else None
+
+
+async def _ensure_local_service() -> None:
+    """Start the bundled local MCP bridge on demand after a reboot or process exit."""
+    global _local_process
+
+    host, port = _mcp_host_port()
+    if host not in {"127.0.0.1", "localhost", "::1"}:
+        return
+    if await _port_is_open(host, port):
+        return
+
+    async with _local_start_lock:
+        if await _port_is_open(host, port):
+            return
+        binary = _find_local_binary()
+        if binary is None:
+            raise RuntimeError("小红书本地 MCP 服务未安装。请先安装 xiaohongshu-mcp Windows 程序。")
+
+        PROJECT_ROOT.joinpath(".runtime").mkdir(parents=True, exist_ok=True)
+        stdout_path = PROJECT_ROOT / ".runtime" / "xhs-mcp.stdout.log"
+        stderr_path = PROJECT_ROOT / ".runtime" / "xhs-mcp.stderr.log"
+        creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        with stdout_path.open("ab") as stdout_file, stderr_path.open("ab") as stderr_file:
+            _local_process = subprocess.Popen(
+                [str(binary), "-headless=true", f"-port=:{port}"],
+                cwd=str(binary.parent),
+                stdin=subprocess.DEVNULL,
+                stdout=stdout_file,
+                stderr=stderr_file,
+                creationflags=creationflags,
+            )
+
+        for _ in range(40):
+            if await _port_is_open(host, port):
+                return
+            if _local_process.poll() is not None:
+                break
+            await asyncio.sleep(0.5)
+        raise RuntimeError("小红书本地 MCP 服务启动失败。请查看 .runtime/xhs-mcp.stderr.log。")
+
+
+def _friendly_mcp_error(exc: Exception) -> str:
+    detail = str(exc)
+    lower_detail = detail.lower()
+    if any(
+        marker in lower_detail
+        for marker in ("bad gateway", "connect", "connection", "18060", "502", "503")
+    ):
+        return "小红书本地 MCP 服务未启动或连接失败，请稍后重试。"
+    return _safe_detail(detail)
 
 
 def _get_client() -> httpx.AsyncClient:
@@ -49,6 +149,7 @@ async def _ensure_session() -> str:
     if _session["id"]:
         return str(_session["id"])
 
+    await _ensure_local_service()
     client = _get_client()
     response = await client.post(
         XHS_MCP_URL,
@@ -82,29 +183,34 @@ async def _rpc_call(
     method: str, params: dict[str, Any] | None = None, timeout: float = 30
 ) -> dict[str, Any]:
     """Send one JSON-RPC request within an initialized MCP session."""
-    session_id = await _ensure_session()
-    try:
-        response = await _get_client().post(
-            XHS_MCP_URL,
-            json={
-                "jsonrpc": "2.0",
-                "method": method,
-                "params": params or {},
-                "id": uuid.uuid4().hex[:8],
-            },
-            headers={"Mcp-Session-Id": session_id},
-            timeout=timeout,
-        )
-        response.raise_for_status()
-        payload = response.json()
-        if not isinstance(payload, dict):
-            raise ValueError("xiaohongshu-mcp 返回内容不是 JSON 对象")
-        return payload
-    except (httpx.HTTPError, ValueError):
-        # A local MCP restart invalidates its session id. Do not keep retrying
-        # with stale state; the next request will perform a new handshake.
-        _session["id"] = None
-        raise
+    for attempt in range(2):
+        session_id = await _ensure_session()
+        try:
+            response = await _get_client().post(
+                XHS_MCP_URL,
+                json={
+                    "jsonrpc": "2.0",
+                    "method": method,
+                    "params": params or {},
+                    "id": uuid.uuid4().hex[:8],
+                },
+                headers={"Mcp-Session-Id": session_id},
+                timeout=timeout,
+            )
+            response.raise_for_status()
+            payload = response.json()
+            if not isinstance(payload, dict):
+                raise ValueError("xiaohongshu-mcp 返回内容不是 JSON 对象")
+            return payload
+        except (httpx.HTTPError, ValueError):
+            # A local MCP restart invalidates its session id. Clear it and retry
+            # once so a crashed bridge can be started again transparently.
+            _session["id"] = None
+            if attempt == 0:
+                continue
+            raise
+
+    raise RuntimeError("xiaohongshu-mcp request failed")
 
 
 def _content_blocks(rpc_response: dict[str, Any]) -> list[dict[str, Any]]:
@@ -177,7 +283,7 @@ async def mcp_check_login() -> tuple[bool, str]:
         )
         return logged_in, _safe_detail(text)
     except Exception as exc:
-        return False, _safe_detail(str(exc))
+        return False, _friendly_mcp_error(exc)
 
 
 async def mcp_get_qrcode() -> dict[str, str]:
@@ -192,7 +298,7 @@ async def mcp_get_qrcode() -> dict[str, str]:
             "message": _safe_detail(_extract_text(response)),
         }
     except Exception as exc:
-        return {"image_data_url": "", "message": f"获取二维码失败: {_safe_detail(str(exc))}"}
+        return {"image_data_url": "", "message": f"获取二维码失败：{_friendly_mcp_error(exc)}"}
 
 
 async def mcp_logout() -> tuple[bool, str]:
@@ -209,7 +315,7 @@ async def mcp_logout() -> tuple[bool, str]:
         )
         return success, text or ("本地登录会话已清除" if success else "未能清除本地登录会话")
     except Exception as exc:
-        return False, _safe_detail(str(exc))
+        return False, _friendly_mcp_error(exc)
     finally:
         _session["id"] = None
 

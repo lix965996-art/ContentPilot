@@ -1,3 +1,4 @@
+import asyncio
 from datetime import datetime, timedelta
 
 import httpx
@@ -10,8 +11,10 @@ from app.core.credentials import decrypt_json, decrypt_secret, encrypt_secret
 from app.db.session import SessionLocal
 from app.models.business import ContentVariant, MediaAsset, PlatformAccount
 from app.models.user import User
+from app.publishers import wechat_browser
 from app.publishers.base import PublishResult
 from app.publishers.official import WechatDraftPublisher
+from app.publishers.wechat_browser import WechatBrowserDraftPublisher
 from app.services import platform_account_service, publish_service
 
 
@@ -44,6 +47,25 @@ def _variant_for(client, auth: dict[str, str], platform: str) -> tuple[int, int]
 def _account_id(client, auth: dict[str, str], platform: str) -> int:
     rows = client.get("/api/platform-accounts", headers=auth).json()["data"]
     return next(int(item["id"]) for item in rows if item["platform"] == platform)
+
+
+def test_wechat_browser_resolves_local_http_upload_url(tmp_path, monkeypatch) -> None:
+    backend_dir = tmp_path / "backend"
+    image = tmp_path / "uploads" / "media" / "cover.png"
+    image.parent.mkdir(parents=True)
+    image.write_bytes(b"png")
+    monkeypatch.setattr(wechat_browser, "BACKEND_DIR", backend_dir)
+
+    resolved = wechat_browser._local_image(
+        "http://127.0.0.1:8000/uploads/media/cover.png?version=1"
+    )
+
+    assert resolved == image.resolve()
+    assert wechat_browser._local_image("https://example.com/uploads/media/cover.png") is None
+
+
+def test_wechat_browser_accepts_text_only_draft_without_image_input() -> None:
+    assert asyncio.run(wechat_browser._append_images(None, [])) == 0
 
 
 def test_credentials_are_encrypted_and_api_is_redacted(client, login_as) -> None:
@@ -260,6 +282,85 @@ def test_wechat_real_draft_uses_official_publisher(client, login_as, monkeypatch
     assert data["resultMode"] == "DRAFT_ONLY"
     assert not data["publishedUrl"]
     assert data["externalId"] == "official-draft-media-id"
+
+
+def test_wechat_browser_qrcode_and_direct_draft_flow(client, login_as, monkeypatch) -> None:
+    auth = _admin_auth(client, login_as)
+    configured = client.put(
+        "/api/platform-accounts/WECHAT_OFFICIAL",
+        headers=auth,
+        json={
+            "account_name": "本机扫码公众号",
+            "auth_type": "QR_LOGIN",
+            "publish_mode": "BROWSER_DRAFT",
+            "default_author": "ContentPilot",
+        },
+    )
+    assert configured.status_code == 200, configured.text
+    assert configured.json()["data"]["status"] == "LOGIN_REQUIRED"
+    assert "BROWSER_DRAFT" in configured.json()["data"]["availablePublishModes"]
+
+    async def fake_qrcode(_account_id: int) -> dict[str, str | bool]:
+        return {
+            "connected": False,
+            "image_data_url": "data:image/png;base64,aW1hZ2U=",
+            "message": "请使用微信扫码",
+        }
+
+    monkeypatch.setattr(
+        platform_accounts_endpoint,
+        "get_wechat_login_qrcode",
+        fake_qrcode,
+    )
+    qrcode = client.post(
+        "/api/platform-accounts/WECHAT_OFFICIAL/login-qrcode",
+        headers=auth,
+    )
+    assert qrcode.status_code == 200, qrcode.text
+    assert qrcode.json()["data"]["imageDataUrl"] == "data:image/png;base64,aW1hZ2U="
+
+    account_id = configured.json()["data"]["id"]
+    with SessionLocal() as db:
+        account = db.get(PlatformAccount, account_id)
+        assert account is not None
+        account.status = "CONNECTED"
+        # A token left by an earlier official-API configuration is irrelevant
+        # after the account switches to browser QR mode.
+        account.token_expires_at = datetime.now() - timedelta(days=1)
+        db.commit()
+
+    account_rows = client.get("/api/platform-accounts", headers=auth)
+    browser_account = next(
+        row for row in account_rows.json()["data"] if row["platform"] == "WECHAT_OFFICIAL"
+    )
+    assert browser_account["status"] == "CONNECTED"
+    assert browser_account["sessionDurationSeconds"] >= 0
+
+    captured: dict = {}
+
+    async def browser_draft(_self, request):
+        captured.update(request)
+        return PublishResult(
+            True,
+            "WECHAT_OFFICIAL",
+            "BROWSER_DRAFT",
+            "DRAFT_CREATED",
+            external_id="browser-appmsg-id",
+            published_url="https://mp.weixin.qq.com/cgi-bin/appmsg?appmsgid=browser-appmsg-id",
+            detail={"method": "local_browser"},
+        )
+
+    monkeypatch.setattr(WechatBrowserDraftPublisher, "publish", browser_draft)
+    _, variant_id = _variant_for(client, auth, "WECHAT_OFFICIAL")
+    saved = client.post(f"/api/variants/{variant_id}/wechat-draft", headers=auth)
+
+    assert saved.status_code == 200, saved.text
+    data = saved.json()["data"]
+    assert data["status"] == "DRAFT_CREATED"
+    assert data["draftId"] == "browser-appmsg-id"
+    assert data["resultMode"] == "BROWSER_DRAFT"
+    assert captured["content_html"].startswith("<section")
+    assert captured["title"]
 
 
 def test_xiaohongshu_package_download_and_manual_confirmation(

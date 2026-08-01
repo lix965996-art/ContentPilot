@@ -2,7 +2,7 @@ from dataclasses import dataclass
 
 from app.models.business import ContentArticle
 
-PROMPT_VERSION = "3.4.0"
+PROMPT_VERSION = "3.5.0"
 
 SYSTEM_PROMPT = (
     "你是资深中文内容编辑。只依据用户提供的原文改写，"
@@ -90,6 +90,23 @@ PLATFORM_PROFILES = {
         output_schema=(
             '{"title":"...","summary":"...","content":"一、小标题\\n\\n正文",'
             '"author":"","hashtags":[],"cover_prompt":"...","warnings":["..."]}'
+        ),
+    ),
+    "TOUTIAO": PlatformPromptProfile(
+        name="今日头条",
+        objective="形成适合头条号信息流阅读的完整文章，以明确标题、事实密度和清晰结构吸引阅读。",
+        format_rules=(
+            "标题为 2～30 个字符，准确具体，不使用标题党、虚假悬念或未经原文支持的结论",
+            "正文使用短段落和清晰小标题，适合移动端阅读；重要事实、限定条件和来源语境不得遗漏",
+            "正文使用纯文本，不输出井号标题、星号加粗、代码块或 HTML；系统会转换为安全富文本",
+            "summary 为 40～120 字摘要，不得引入正文之外的新事实",
+            "hashtags 仅作为后台关键词，最多 8 个；关闭标签时必须返回空数组",
+            "cover_prompt 用于封面配图检索或生成，不得包含侵权品牌、虚构人物或误导性画面",
+            "关闭 Emoji 时标题、摘要和正文不得出现 Emoji；即使允许，也只可克制使用",
+        ),
+        output_schema=(
+            '{"title":"...","summary":"...","content":"一、标题\\n\\n正文",'
+            '"hashtags":["#关键词"],"cover_prompt":"...","warnings":["..."]}'
         ),
     ),
 }

@@ -730,6 +730,10 @@ button:active:not(:disabled),
   background: rgba(15, 23, 42, 0.08);
   color: #0f172a;
 }
+.platform-icon.is-toutiao {
+  color: #f04438;
+  background: #fff0ee;
+}
 
 .platform-icon.is-sm {
   width: 20px;
@@ -1313,7 +1317,7 @@ button:active:not(:disabled),
   z-index: 1;
   display: grid;
   height: 44px;
-  grid-template-columns: repeat(4, minmax(0, 1fr));
+  grid-template-columns: repeat(5, minmax(0, 1fr));
   align-items: center;
   gap: 2px;
   border-bottom: 1px solid var(--sf-line);
@@ -2888,6 +2892,15 @@ button:active:not(:disabled),
 .app-workspace .el-button--primary.is-plain,
 .app-workspace .el-button--primary.is-link {
   color: #0066d6;
+}
+.app-workspace .el-button--primary.is-plain {
+  --el-button-bg-color: #eef6ff;
+  --el-button-border-color: #9ecbff;
+  --el-button-text-color: #005cc8;
+  --el-button-hover-bg-color: #e0efff;
+  --el-button-hover-border-color: #69aef8;
+  --el-button-hover-text-color: #004fae;
+  color: #005cc8;
 }
 .app-workspace .el-input__wrapper,
 .app-workspace .el-select__wrapper {

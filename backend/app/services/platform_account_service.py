@@ -17,21 +17,27 @@ from app.publishers.official import (
     WeiboPublisher,
     XiaohongshuManualPublisher,
 )
+from app.publishers.toutiao_browser import ToutiaoBrowserPublisher
+from app.publishers.toutiao_browser import check_login as toutiao_check_login
+from app.publishers.wechat_browser import WechatBrowserDraftPublisher
+from app.publishers.wechat_browser import check_login as wechat_check_login
 from app.publishers.x_official import XPublisher
 from app.publishers.xhs_mcp import XiaohongshuMCPPublisher, mcp_check_login
 from app.schemas.platform_account import PlatformAccountUpsert
 
-PLATFORMS = ("WEIBO", "WECHAT_OFFICIAL", "XIAOHONGSHU", "X")
+PLATFORMS = ("WEIBO", "WECHAT_OFFICIAL", "XIAOHONGSHU", "TOUTIAO", "X")
 PLATFORM_NAMES = {
     "WEIBO": "微博",
     "WECHAT_OFFICIAL": "微信公众号",
     "XIAOHONGSHU": "小红书",
+    "TOUTIAO": "今日头条",
     "X": "X",
 }
 DEFAULT_CAPABILITIES = {
     "WEIBO": ["TEXT_PUBLISH", "IMAGE_PUBLISH", "STATUS_READ"],
     "WECHAT_OFFICIAL": ["DRAFT_CREATE", "DRAFT_UPDATE", "DRAFT_READ", "DRAFT_DELETE"],
     "XIAOHONGSHU": ["COPYWRITING", "IMAGE_PACKAGE", "MANUAL_CONFIRM"],
+    "TOUTIAO": ["ARTICLE_PUBLISH", "STATUS_READ"],
     "X": ["TEXT_PUBLISH", "STATUS_READ"],
 }
 
@@ -41,6 +47,7 @@ DEFAULT_PUBLISH_MODES = {
     "WEIBO": "REAL_API",
     "WECHAT_OFFICIAL": "DRAFT_ONLY",
     "XIAOHONGSHU": "MANUAL_CONFIRM",
+    "TOUTIAO": "BROWSER_PUBLISH",
     "X": "REAL_API",
 }
 CONNECTION_GUIDES = {
@@ -56,13 +63,13 @@ CONNECTION_GUIDES = {
         ],
     },
     "WECHAT_OFFICIAL": {
-        "mode": "APP_SECRET",
+        "mode": "LOCAL_BROWSER_QR",
         "consoleUrl": "https://mp.weixin.qq.com/",
         "steps": [
-            "在公众号后台的开发接口管理中获取 AppID 和 AppSecret",
-            "将运行 ContentPilot 的服务器出口 IP 加入公众号 IP 白名单",
-            "确认公众号具有草稿接口权限；自动发布还需要发布接口权限",
-            "保存后点击“验证真实连接”，系统会向微信官方接口获取 Access Token",
+            "推荐选择本机扫码登录，使用公众号管理员或运营者微信扫码确认",
+            "扫码会话只保存在这台电脑的独立 Chrome 目录，不进入数据库",
+            "如公众号具备开发接口权限，也可选择 AppID/AppSecret 官方 API",
+            "两种方式都只创建真实草稿，不会把草稿显示成已经公开发布",
         ],
     },
     "XIAOHONGSHU": {
@@ -85,6 +92,16 @@ CONNECTION_GUIDES = {
             "users.read 和 offline.access",
             "将本系统显示的回调地址原样加入应用的 Callback URI / Redirect URL",
             "保存 Client ID 和 Client Secret 后，点击“前往 X 授权”并使用目标账号确认授权",
+        ],
+    },
+    "TOUTIAO": {
+        "mode": "LOCAL_BROWSER_QR",
+        "consoleUrl": "https://mp.toutiao.com/",
+        "steps": [
+            "保存账号名称并获取登录二维码",
+            "使用抖音或今日头条 App 扫码，并在手机端确认登录",
+            "系统仅在本机保存独立 Chrome 会话，数据库不会保存 Cookie 或密码",
+            "检测登录通过后，可先关闭真实发布开关进行预检；确认无误后再允许真实发布",
         ],
     },
 }
@@ -114,19 +131,24 @@ def public_account(
     include_configuration: bool = True,
 ) -> dict[str, Any]:
     local_publishing_enabled = (
-        platform == "XIAOHONGSHU" and settings.experimental_browser_publishing_enabled
+        (platform == "XIAOHONGSHU" and settings.experimental_browser_publishing_enabled)
+        or (platform == "TOUTIAO" and settings.toutiao_browser_publishing_enabled)
+        or (platform == "WECHAT_OFFICIAL" and settings.wechat_browser_publishing_enabled)
     )
-    available_publish_modes = (
-        []
-        if platform == "X"
-        else ["MANUAL_CONFIRM", "MCP_PUBLISH"]
-        if local_publishing_enabled
-        else ["MANUAL_CONFIRM"]
-        if platform == "XIAOHONGSHU"
-        else ["DRAFT_ONLY", "SUBMIT_PUBLISH"]
-        if platform == "WECHAT_OFFICIAL"
-        else ["REAL_API"]
-    )
+    if platform == "TOUTIAO":
+        available_publish_modes = ["BROWSER_PUBLISH"] if local_publishing_enabled else []
+    elif platform == "X":
+        available_publish_modes = []
+    elif platform == "XIAOHONGSHU":
+        available_publish_modes = (
+            ["MANUAL_CONFIRM", "MCP_PUBLISH"] if local_publishing_enabled else ["MANUAL_CONFIRM"]
+        )
+    elif platform == "WECHAT_OFFICIAL":
+        available_publish_modes = ["DRAFT_ONLY", "SUBMIT_PUBLISH"]
+        if local_publishing_enabled:
+            available_publish_modes.insert(0, "BROWSER_DRAFT")
+    else:
+        available_publish_modes = ["REAL_API"]
     if not account:
         return {
             "id": None,
@@ -136,7 +158,13 @@ def public_account(
             "authType": "NONE",
             "publishMode": DEFAULT_PUBLISH_MODES[platform],
             "publishHint": _build_publish_hint(platform, DEFAULT_CAPABILITIES[platform], {}),
-            "status": "MANUAL_ONLY" if platform == "XIAOHONGSHU" else "NOT_CONFIGURED",
+            "status": (
+                "MANUAL_ONLY"
+                if platform == "XIAOHONGSHU"
+                else "LOGIN_REQUIRED"
+                if platform == "TOUTIAO"
+                else "NOT_CONFIGURED"
+            ),
             "capabilities": DEFAULT_CAPABILITIES[platform],
             "lastTestAt": None,
             "lastError": None,
@@ -168,6 +196,7 @@ def public_account(
             "default_cover_url",
             "allow_submit_publish",
             "allow_public_publish",
+            "wechat_connection_method",
         )
         if config.get(key) not in (None, "")
     }
@@ -176,7 +205,9 @@ def public_account(
         and not settings.experimental_browser_publishing_enabled
         and account.publish_mode in {"CDP_PUBLISH", "MCP_PUBLISH"}
     )
-    public_publish_enabled = bool(platform == "X" and config.get("allow_public_publish") is True)
+    public_publish_enabled = bool(
+        platform in {"X", "TOUTIAO"} and config.get("allow_public_publish") is True
+    )
     if platform == "X":
         available_publish_modes = ["REAL_API"] if public_publish_enabled else []
     caps = (
@@ -189,13 +220,19 @@ def public_account(
     last_login_at = _parse_datetime(
         config.get("xhs_last_login_at")
         if platform == "XIAOHONGSHU"
+        else config.get("toutiao_last_login_at")
+        if platform == "TOUTIAO"
         else config.get("x_authorized_at")
         if platform == "X"
+        else config.get("wechat_last_login_at")
+        if platform == "WECHAT_OFFICIAL" and account.auth_type == "QR_LOGIN"
         else None
     )
     session_duration_seconds = (
         max(0, int((datetime.now() - last_login_at).total_seconds()))
-        if platform == "XIAOHONGSHU" and effective_status(account) == "CONNECTED" and last_login_at
+        if platform in {"XIAOHONGSHU", "TOUTIAO", "WECHAT_OFFICIAL"}
+        and effective_status(account) == "CONNECTED"
+        and last_login_at
         else 0
     )
     return {
@@ -213,8 +250,12 @@ def public_account(
         "loginUsername": (
             config.get("xhs_login_username", "")
             if platform == "XIAOHONGSHU"
+            else config.get("toutiao_login_username", "")
+            if platform == "TOUTIAO"
             else config.get("x_username", "")
             if platform == "X"
+            else config.get("wechat_login_username", "")
+            if platform == "WECHAT_OFFICIAL" and account.auth_type == "QR_LOGIN"
             else ""
         ),
         "lastLoginAt": last_login_at.isoformat() if last_login_at else None,
@@ -240,12 +281,22 @@ def public_account(
 def effective_status(account: PlatformAccount) -> str:
     if account.status == "DISABLED":
         return "DISABLED"
-    if account.token_expires_at and account.token_expires_at <= datetime.now():
-        return "TOKEN_EXPIRED"
     if account.platform == "XIAOHONGSHU":
         if not settings.experimental_browser_publishing_enabled:
             return "MANUAL_ONLY"
         return account.status or "LOGIN_REQUIRED"
+    if account.platform == "TOUTIAO":
+        if not settings.toutiao_browser_publishing_enabled:
+            return "DISABLED"
+        return account.status or "LOGIN_REQUIRED"
+    if account.platform == "WECHAT_OFFICIAL" and (
+        account.auth_type == "QR_LOGIN" or account.publish_mode == "BROWSER_DRAFT"
+    ):
+        if not settings.wechat_browser_publishing_enabled:
+            return "DISABLED"
+        return account.status or "LOGIN_REQUIRED"
+    if account.token_expires_at and account.token_expires_at <= datetime.now():
+        return "TOKEN_EXPIRED"
     return account.status
 
 
@@ -289,6 +340,52 @@ def clear_xhs_session_metadata(account: PlatformAccount) -> None:
     account.last_error = None
 
 
+def record_toutiao_session(account: PlatformAccount, username: str, checked_at: datetime) -> None:
+    config = decrypt_json(account.credentials_encrypted)
+    previous_username = str(config.get("toutiao_login_username") or "")
+    if username:
+        config["toutiao_login_username"] = username[:100]
+    if not config.get("toutiao_last_login_at") or (username and username != previous_username):
+        config["toutiao_last_login_at"] = checked_at.isoformat()
+    config["toutiao_last_seen_at"] = checked_at.isoformat()
+    account.credentials_encrypted = encrypt_json(config)
+
+
+def record_wechat_session(account: PlatformAccount, username: str, checked_at: datetime) -> None:
+    config = decrypt_json(account.credentials_encrypted)
+    previous_username = str(config.get("wechat_login_username") or "")
+    if username:
+        config["wechat_login_username"] = username[:100]
+    if not config.get("wechat_last_login_at") or (username and username != previous_username):
+        config["wechat_last_login_at"] = checked_at.isoformat()
+    config["wechat_last_seen_at"] = checked_at.isoformat()
+    account.credentials_encrypted = encrypt_json(config)
+    account.status = "CONNECTED"
+    account.last_error = None
+    if account.auth_type == "QR_LOGIN" or account.publish_mode == "BROWSER_DRAFT":
+        account.access_token_encrypted = None
+        account.refresh_token_encrypted = None
+        account.token_expires_at = None
+
+
+def clear_toutiao_session_metadata(account: PlatformAccount) -> None:
+    config = decrypt_json(account.credentials_encrypted)
+    for key in ("toutiao_login_username", "toutiao_last_login_at", "toutiao_last_seen_at"):
+        config.pop(key, None)
+    account.credentials_encrypted = encrypt_json(config)
+    account.status = "LOGIN_REQUIRED"
+    account.last_error = None
+
+
+def clear_wechat_session_metadata(account: PlatformAccount) -> None:
+    config = decrypt_json(account.credentials_encrypted)
+    for key in ("wechat_login_username", "wechat_last_login_at", "wechat_last_seen_at"):
+        config.pop(key, None)
+    account.credentials_encrypted = encrypt_json(config)
+    account.status = "LOGIN_REQUIRED"
+    account.last_error = None
+
+
 def _build_publish_hint(platform: str, caps: list[str], config: dict) -> str:
     """Return a short note describing what the connected platform can actually do."""
     if platform == "WEIBO":
@@ -299,7 +396,17 @@ def _build_publish_hint(platform: str, caps: list[str], config: dict) -> str:
         if not settings.experimental_browser_publishing_enabled:
             return "到点生成文案与图片交付包，由运营人员前往小红书创作中心人工发布。"
         return "实验性浏览器发布已启用；会话仅限本机使用，失败时回退人工交付。"
+    if platform == "TOUTIAO":
+        if not settings.toutiao_browser_publishing_enabled:
+            return "今日头条本机浏览器发布已被系统管理员关闭。"
+        if config.get("allow_public_publish"):
+            return (
+                "使用本机 Chrome 真实发布头条号文章；登录失效或遇到安全验证时会停止并提示人工处理。"
+            )
+        return "本机扫码登录和连接检测可用；真实发布安全开关尚未开启，不会发送文章。"
     if platform == "WECHAT_OFFICIAL":
+        if config.get("wechat_connection_method") == "local_browser":
+            return "使用本机 Chrome 扫码登录并保存真实公众号草稿；不会自动公开发布"
         caps_set = set(caps)
         has_draft = bool(caps_set & WECHAT_DRAFT_CAPABILITIES)
         has_publish = WECHAT_PUBLISH_CAPABILITY in caps_set or config.get("allow_submit_publish")
@@ -355,6 +462,13 @@ def upsert_account(
             else None,
             "allow_submit_publish": payload.allow_submit_publish,
             "allow_public_publish": payload.allow_public_publish,
+            "wechat_connection_method": (
+                "local_browser"
+                if platform == "WECHAT_OFFICIAL" and payload.auth_type == "QR_LOGIN"
+                else "official_api"
+                if platform == "WECHAT_OFFICIAL"
+                else config.get("wechat_connection_method")
+            ),
         }
     )
     if payload.app_secret:
@@ -381,6 +495,16 @@ def upsert_account(
         account.token_expires_at = (
             expires.astimezone(UTC).replace(tzinfo=None) if expires.tzinfo else expires
         )
+    if (
+        platform == "WECHAT_OFFICIAL"
+        and payload.auth_type == "QR_LOGIN"
+        and payload.publish_mode == "BROWSER_DRAFT"
+    ):
+        # Browser login is the credential in this mode. Old API token state
+        # must not override a successful QR login.
+        account.access_token_encrypted = None
+        account.refresh_token_encrypted = None
+        account.token_expires_at = None
     account.capabilities_json = DEFAULT_CAPABILITIES[platform]
     account.status = "NOT_CONFIGURED" if not payload.enabled else _configured_status(account)
     account.last_error = None
@@ -396,8 +520,13 @@ def _configured_status(account: PlatformAccount) -> str:
         if not settings.experimental_browser_publishing_enabled:
             return "MANUAL_ONLY"
         return "LOGIN_REQUIRED"  # must pass the local MCP login check before READY
-    if account.platform == "WECHAT_OFFICIAL" and account.app_id:
-        return "CONNECTING"
+    if account.platform == "TOUTIAO":
+        return "LOGIN_REQUIRED" if settings.toutiao_browser_publishing_enabled else "DISABLED"
+    if account.platform == "WECHAT_OFFICIAL":
+        if account.auth_type == "QR_LOGIN":
+            return "LOGIN_REQUIRED" if settings.wechat_browser_publishing_enabled else "DISABLED"
+        if account.app_id:
+            return "CONNECTING"
     if account.platform == "WEIBO" and account.client_id:
         return "CONNECTING"
     if account.platform == "X" and account.client_id:
@@ -409,15 +538,117 @@ def account_validator(db: Session, account: PlatformAccount) -> PlatformPublishe
     if account.platform == "WEIBO":
         return WeiboPublisher(db, account)
     if account.platform == "WECHAT_OFFICIAL":
+        if account.auth_type == "QR_LOGIN" or account.publish_mode == "BROWSER_DRAFT":
+            return WechatBrowserDraftPublisher(account.id)
         return WechatDraftPublisher(db, account)
     if account.platform == "X":
         return XPublisher(db, account)
+    if account.platform == "TOUTIAO":
+        return ToutiaoBrowserPublisher(account.id)
     if not settings.experimental_browser_publishing_enabled:
         return XiaohongshuManualPublisher(account)
     return XiaohongshuMCPPublisher()  # type: ignore[return-value]
 
 
 async def test_account(db: Session, account: PlatformAccount) -> PublishResult:
+    if account.platform == "WECHAT_OFFICIAL" and (
+        account.auth_type == "QR_LOGIN" or account.publish_mode == "BROWSER_DRAFT"
+    ):
+        checked_at = datetime.now()
+        account.last_test_at = checked_at
+        if not settings.wechat_browser_publishing_enabled:
+            result = PublishResult(
+                False,
+                account.platform,
+                "BROWSER_DRAFT",
+                "DISABLED",
+                error_code="FEATURE_DISABLED",
+                error_message="微信公众号本机扫码登录功能已关闭",
+                suggested_action="请在后端环境配置中启用该功能。",
+            )
+        else:
+            logged, info = await wechat_check_login(account.id)
+            if logged:
+                account.status = "CONNECTED"
+                account.capabilities_json = ["DRAFT_CREATE", "DRAFT_UPDATE", "DRAFT_READ"]
+                account.last_error = None
+                record_wechat_session(account, info, checked_at)
+                result = PublishResult(
+                    True,
+                    account.platform,
+                    "BROWSER_DRAFT",
+                    "CONNECTED",
+                    detail={"method": "local_browser", "username": info},
+                )
+            else:
+                account.status = "LOGIN_REQUIRED"
+                account.last_error = info
+                result = PublishResult(
+                    False,
+                    account.platform,
+                    "BROWSER_DRAFT",
+                    "LOGIN_REQUIRED",
+                    error_code="LOGIN_REQUIRED",
+                    error_message="微信公众号后台尚未登录",
+                    suggested_action="请获取二维码并完成扫码登录。",
+                )
+        log_auth(
+            db,
+            account,
+            "TEST_CONNECTION",
+            "SUCCESS" if result.success else "FAILED",
+            result.error_message or "微信公众号本机登录检测通过",
+        )
+        db.flush()
+        return result
+    if account.platform == "TOUTIAO":
+        checked_at = datetime.now()
+        account.last_test_at = checked_at
+        if not settings.toutiao_browser_publishing_enabled:
+            result = PublishResult(
+                False,
+                account.platform,
+                "BROWSER_PUBLISH",
+                "DISABLED",
+                error_code="FEATURE_DISABLED",
+                error_message="今日头条本机浏览器发布未启用",
+                suggested_action="请在后端环境配置中启用该可选功能。",
+            )
+        else:
+            logged, info = await toutiao_check_login(account.id)
+            if logged:
+                account.status = "CONNECTED"
+                account.capabilities_json = DEFAULT_CAPABILITIES["TOUTIAO"]
+                account.last_error = None
+                record_toutiao_session(account, info, checked_at)
+                result = PublishResult(
+                    True,
+                    account.platform,
+                    "BROWSER_PUBLISH",
+                    "CONNECTED",
+                    detail={"method": "local_browser", "username": info},
+                )
+            else:
+                account.status = "LOGIN_REQUIRED"
+                account.last_error = info
+                result = PublishResult(
+                    False,
+                    account.platform,
+                    "BROWSER_PUBLISH",
+                    "LOGIN_REQUIRED",
+                    error_code="LOGIN_REQUIRED",
+                    error_message="今日头条创作中心尚未登录",
+                    suggested_action="请获取二维码并完成扫码登录。",
+                )
+        log_auth(
+            db,
+            account,
+            "TEST_CONNECTION",
+            "SUCCESS" if result.success else "FAILED",
+            result.error_message or "今日头条本机登录检测通过",
+        )
+        db.flush()
+        return result
     if account.platform == "XIAOHONGSHU":
         checked_at = datetime.now()
         account.last_test_at = checked_at

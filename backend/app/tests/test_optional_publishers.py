@@ -8,6 +8,37 @@ from app.publishers.xhs_mcp import XiaohongshuMCPPublisher
 
 
 @pytest.mark.asyncio
+async def test_xiaohongshu_mcp_retries_once_after_stale_session(monkeypatch) -> None:
+    calls = 0
+
+    class FakeResponse:
+        def raise_for_status(self) -> None:
+            return None
+
+        def json(self) -> dict:
+            return {"result": {"content": []}}
+
+    class FakeClient:
+        async def post(self, *_args, **_kwargs):
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise ValueError("stale session")
+            return FakeResponse()
+
+    async def fake_session() -> str:
+        return "session-id"
+
+    monkeypatch.setattr(xhs_mcp, "_ensure_session", fake_session)
+    monkeypatch.setattr(xhs_mcp, "_get_client", lambda: FakeClient())
+
+    result = await xhs_mcp._rpc_call("tools/list")
+
+    assert result == {"result": {"content": []}}
+    assert calls == 2
+
+
+@pytest.mark.asyncio
 async def test_xiaohongshu_mcp_uses_upstream_argument_contract(monkeypatch) -> None:
     captured: dict = {}
 

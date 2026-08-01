@@ -49,8 +49,15 @@ class Settings(BaseSettings):
     wechat_api_base_url: str = "https://api.weixin.qq.com"
     wechat_app_id: str = ""
     wechat_app_secret: str = ""
+    wechat_browser_publishing_enabled: bool = True
+    wechat_browser_headless: bool = True
+    wechat_browser_profile_root: str = ""
     xhs_mcp_base_url: str = "http://127.0.0.1:18060/mcp"
+    xhs_mcp_binary_path: str = ""
     experimental_browser_publishing_enabled: bool = False
+    toutiao_browser_publishing_enabled: bool = True
+    toutiao_browser_headless: bool = True
+    toutiao_browser_profile_root: str = ""
     wechatsync_cli_enabled: bool = False
 
     @property

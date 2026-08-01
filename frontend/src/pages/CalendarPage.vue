@@ -71,11 +71,15 @@ function canUseXApi(account?: PlatformAccount): boolean {
   )
 }
 function defaultPublishMode(platform: Platform, account?: PlatformAccount): PublishMode {
+  if (platform === 'TOUTIAO') return 'BROWSER_PUBLISH'
   if (platform === 'XIAOHONGSHU') {
     return canUseXiaohongshuMcp(account) ? 'MCP_PUBLISH' : 'MANUAL_CONFIRM'
   }
   if (platform === 'X') return 'REAL_API'
-  return platform === 'WECHAT_OFFICIAL' ? 'DRAFT_ONLY' : 'REAL_API'
+  if (platform === 'WECHAT_OFFICIAL') {
+    return account?.publishMode === 'BROWSER_DRAFT' ? 'BROWSER_DRAFT' : 'DRAFT_ONLY'
+  }
+  return 'REAL_API'
 }
 const publishModes = computed<Array<{ value: PublishMode; label: string; disabled?: boolean }>>(
   () => {
@@ -95,11 +99,32 @@ const publishModes = computed<Array<{ value: PublishMode; label: string; disable
       ]
     if (form.value.platform === 'WECHAT_OFFICIAL')
       return [
+        ...(account?.availablePublishModes.includes('BROWSER_DRAFT')
+          ? [
+              {
+                value: 'BROWSER_DRAFT' as PublishMode,
+                label: '本机扫码保存到草稿箱',
+                disabled:
+                  account?.status !== 'CONNECTED' || account.publishMode !== 'BROWSER_DRAFT',
+              },
+            ]
+          : []),
         { value: 'DRAFT_ONLY', label: '自动进入草稿箱', disabled: account?.status !== 'CONNECTED' },
         {
           value: 'REAL_API',
           label: '提交发布',
           disabled: account?.status !== 'CONNECTED' || account.publishMode !== 'SUBMIT_PUBLISH',
+        },
+      ]
+    if (form.value.platform === 'TOUTIAO')
+      return [
+        {
+          value: 'BROWSER_PUBLISH',
+          label: '本机浏览器发布（真实文章）',
+          disabled:
+            account?.status !== 'CONNECTED' ||
+            account.publishMode !== 'BROWSER_PUBLISH' ||
+            !account.publicPublishEnabled,
         },
       ]
     if (form.value.platform === 'X')
@@ -120,6 +145,8 @@ const publishModeNames: Record<PublishMode, string> = {
   MANUAL_CONFIRM: '人工发布确认',
   CDP_PUBLISH: '浏览器自动发布',
   MCP_PUBLISH: '本机自动发布',
+  BROWSER_PUBLISH: '本机浏览器发布',
+  BROWSER_DRAFT: '本机浏览器保存草稿',
   WECHATSYNC_CLI: 'Wechatsync CLI',
 }
 const accountStatusNames: Record<string, string> = {
@@ -143,6 +170,7 @@ const platformGlyphs: Record<Platform, string> = {
   XIAOHONGSHU: '红',
   WECHAT_OFFICIAL: '公',
   X: 'X',
+  TOUTIAO: '头',
 }
 const filteredBacklog = computed(() =>
   backlog.value.filter(
@@ -469,6 +497,20 @@ onBeforeUnmount(() => backlogDraggable?.destroy())
               : '当前不会发布：请先由管理员完成 X OAuth，并明确开启真实发布开关。'
           "
           :type="canUseXApi(selectedAccount) ? 'warning' : 'info'"
+          :closable="false"
+        />
+        <el-alert
+          v-else-if="form.platform === 'TOUTIAO'"
+          :title="
+            selectedAccount?.status === 'CONNECTED' && selectedAccount.publicPublishEnabled
+              ? '到点后会使用本机 Chrome 会话向今日头条发送真实文章；遇到登录失效或安全验证会停止并提示处理。'
+              : '当前不会发布：请先由管理员完成今日头条扫码登录，并开启真实发布安全开关。'
+          "
+          :type="
+            selectedAccount?.status === 'CONNECTED' && selectedAccount.publicPublishEnabled
+              ? 'warning'
+              : 'info'
+          "
           :closable="false"
         />
       </el-form>

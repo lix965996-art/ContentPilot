@@ -327,6 +327,37 @@ export const workflowApi = {
   xiaohongshuLogout() {
     return unwrap<PlatformAccount>(apiClient.post('/platform-accounts/XIAOHONGSHU/logout'))
   },
+  toutiaoLoginQrcode() {
+    return unwrap<{ connected: boolean; imageDataUrl: string; message: string }>(
+      apiClient.post('/platform-accounts/TOUTIAO/login-qrcode'),
+    )
+  },
+  toutiaoLogout() {
+    return unwrap<PlatformAccount>(apiClient.post('/platform-accounts/TOUTIAO/logout'))
+  },
+  wechatLoginQrcode() {
+    return unwrap<{ connected: boolean; imageDataUrl: string; message: string }>(
+      apiClient.post('/platform-accounts/WECHAT_OFFICIAL/login-qrcode', undefined, {
+        timeout: 60_000,
+      }),
+    )
+  },
+  wechatLogout() {
+    return unwrap<PlatformAccount>(
+      apiClient.post('/platform-accounts/WECHAT_OFFICIAL/logout', undefined, {
+        timeout: 60_000,
+      }),
+    )
+  },
+  saveWechatDraft(variantId: number) {
+    return unwrap<{
+      scheduleId: number
+      status: string
+      draftId: string
+      draftUrl?: string
+      resultMode: string
+    }>(apiClient.post(`/variants/${variantId}/wechat-draft`, undefined, { timeout: 180_000 }))
+  },
   disconnectPlatformAccount(platform: Platform) {
     return unwrap<PlatformAccount>(apiClient.delete(`/platform-accounts/${platform}`))
   },

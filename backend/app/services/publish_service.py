@@ -22,6 +22,8 @@ from app.publishers.official import (
     WeiboPublisher,
     XiaohongshuManualPublisher,
 )
+from app.publishers.toutiao_browser import ToutiaoBrowserPublisher
+from app.publishers.wechat_browser import WechatBrowserDraftPublisher
 from app.publishers.wechatsync_cli import WechatsyncPublisher
 from app.publishers.x_official import XPublisher
 from app.publishers.xhs_mcp import XiaohongshuMCPPublisher
@@ -47,6 +49,14 @@ def x_public_publish_enabled(account: PlatformAccount | None) -> bool:
     return bool(
         account
         and account.platform == "X"
+        and decrypt_json(account.credentials_encrypted).get("allow_public_publish") is True
+    )
+
+
+def toutiao_public_publish_enabled(account: PlatformAccount | None) -> bool:
+    return bool(
+        account
+        and account.platform == "TOUTIAO"
         and decrypt_json(account.credentials_encrypted).get("allow_public_publish") is True
     )
 
@@ -80,6 +90,18 @@ def resolve_publisher(
             raise AppException(40078, "本地 MCP 发布默认关闭，请使用人工交付模式")
         return _get_xhs_mcp()  # type: ignore[return-value]
 
+    if platform == "TOUTIAO":
+        if mode != "BROWSER_PUBLISH":
+            raise AppException(40081, "今日头条仅支持本机浏览器发布")
+        if not settings.toutiao_browser_publishing_enabled:
+            raise AppException(40082, "今日头条本机浏览器发布功能已关闭")
+        return ToutiaoBrowserPublisher(account.id)
+
+    if platform == "WECHAT_OFFICIAL" and mode == "BROWSER_DRAFT":
+        if not settings.wechat_browser_publishing_enabled:
+            raise AppException(40084, "微信公众号本机扫码草稿功能已关闭")
+        return WechatBrowserDraftPublisher(account.id)
+
     if mode in {"DRAFT_ONLY", "REAL_API"} and platform == "WECHAT_OFFICIAL":
         if mode == "REAL_API":
             return WechatPublishPublisher(db, account)
@@ -100,6 +122,18 @@ def validate_schedule_account(schedule: PublishSchedule, account: PlatformAccoun
         raise AppException(40073, "平台账号与目标平台不匹配")
     if schedule.platform == "X" and not x_public_publish_enabled(account):
         raise AppException(40080, "X 公开发布安全开关未开启，请由管理员确认后启用")
+    if schedule.platform == "TOUTIAO":
+        if schedule.publish_mode != "BROWSER_PUBLISH":
+            raise AppException(40081, "今日头条仅支持本机浏览器发布")
+        if not settings.toutiao_browser_publishing_enabled:
+            raise AppException(40082, "今日头条本机浏览器发布功能已关闭")
+        if account.publish_mode != "BROWSER_PUBLISH":
+            raise AppException(40075, "今日头条账号未启用本机浏览器发布")
+        if effective_status(account) != "CONNECTED":
+            raise AppException(40075, "今日头条账号尚未扫码登录或登录已失效")
+        if not toutiao_public_publish_enabled(account):
+            raise AppException(40083, "今日头条真实发布开关未开启，请由管理员确认后启用")
+        return
 
     if schedule.platform == "XIAOHONGSHU":
         if schedule.publish_mode != "MCP_PUBLISH":
@@ -110,6 +144,15 @@ def validate_schedule_account(schedule: PublishSchedule, account: PlatformAccoun
             raise AppException(40075, "小红书账号未启用本地 MCP 发布")
         if effective_status(account) != "CONNECTED":
             raise AppException(40075, "小红书本地 MCP 尚未登录或连接检测未通过")
+        return
+
+    if schedule.platform == "WECHAT_OFFICIAL" and schedule.publish_mode == "BROWSER_DRAFT":
+        if not settings.wechat_browser_publishing_enabled:
+            raise AppException(40084, "微信公众号本机扫码草稿功能已关闭")
+        if account.publish_mode != "BROWSER_DRAFT" or account.auth_type != "QR_LOGIN":
+            raise AppException(40075, "微信公众号账号未启用本机扫码草稿模式")
+        if effective_status(account) != "CONNECTED":
+            raise AppException(40075, "微信公众号后台尚未扫码登录或登录已失效")
         return
 
     if schedule.publish_mode in {"REAL_API", "DRAFT_ONLY"}:

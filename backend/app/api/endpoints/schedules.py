@@ -36,6 +36,7 @@ from app.services.platform_account_service import effective_status
 from app.services.publish_service import (
     TEXT_REAL_API_PLATFORMS,
     execute_publish,
+    toutiao_public_publish_enabled,
     validate_schedule_account,
     x_public_publish_enabled,
 )
@@ -207,6 +208,22 @@ def create_schedule(
         raise AppException(40072, "创建排期时必须选择平台账号")
     if payload.platform == "X" and not x_public_publish_enabled(account):
         raise AppException(40080, "X 公开发布安全开关未开启，请由管理员确认后启用")
+    if payload.platform == "TOUTIAO":
+        if payload.publish_mode != "BROWSER_PUBLISH":
+            raise AppException(40081, "今日头条仅支持本机浏览器发布")
+        if not account or account.publish_mode != "BROWSER_PUBLISH":
+            raise AppException(40075, "今日头条账号未启用本机浏览器发布")
+        if effective_status(account) != "CONNECTED":
+            raise AppException(40075, "今日头条账号尚未扫码登录或登录已失效")
+        if not toutiao_public_publish_enabled(account):
+            raise AppException(40083, "今日头条真实发布开关未开启，请由管理员确认后启用")
+    if payload.platform == "WECHAT_OFFICIAL" and payload.publish_mode == "BROWSER_DRAFT":
+        if not settings.wechat_browser_publishing_enabled:
+            raise AppException(40084, "微信公众号本机扫码草稿功能已关闭")
+        if not account or account.publish_mode != "BROWSER_DRAFT":
+            raise AppException(40075, "微信公众号账号未启用本机扫码草稿模式")
+        if effective_status(account) != "CONNECTED":
+            raise AppException(40075, "微信公众号后台尚未扫码登录或登录已失效")
     if payload.publish_mode in {"REAL_API", "DRAFT_ONLY"}:
         allowed_account_modes = (
             {"REAL_API"}

@@ -83,6 +83,18 @@ def intercept_llm_transport(monkeypatch):
                 "cover_text": "内容运营重点",
                 "warnings": [],
             }
+        elif "目标平台：今日头条" in prompt:
+            payload = {
+                "title": "内容运营如何形成稳定工作流",
+                "summary": "依据原文梳理内容运营的主要事实、执行步骤与必要限制。",
+                "content": (
+                    "一、核心信息\n\n这是依据原文生成的今日头条测试正文，保留主要事实。"
+                    "\n\n二、执行建议\n\n发布前仍需由编辑复核来源和限定条件。"
+                ),
+                "hashtags": [],
+                "cover_prompt": "内容运营工作台，真实编辑场景",
+                "warnings": [],
+            }
         else:
             payload = {
                 "title": "内容运营信息速览",

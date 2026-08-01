@@ -11,6 +11,7 @@ const config = computed(
       WEIBO: { title: '微博', className: 'is-weibo' },
       XIAOHONGSHU: { title: '小红书', className: 'is-xiaohongshu' },
       WECHAT_OFFICIAL: { title: '微信', className: 'is-wechat' },
+      TOUTIAO: { title: '今日头条', className: 'is-toutiao' },
       X: { title: 'X', className: 'is-x' },
     })[props.platform],
 )
@@ -40,6 +41,10 @@ const config = computed(
       <path
         v-else-if="platform === 'X'"
         d="M18.244 2H21.5l-7.113 8.13L22.75 22h-6.548l-5.128-6.705L5.21 22H1.95l7.61-8.7L1.54 2h6.714l4.637 6.13L18.244 2zm-1.143 17.91h1.804L7.274 3.98H5.338L17.101 19.91z"
+      />
+      <path
+        v-else-if="platform === 'TOUTIAO'"
+        d="M5 3h14a2 2 0 0 1 2 2v14a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2zm2.1 4.1v2h3.7v1.7H7.7v2h3.1v3.1H7v2h4.8a1 1 0 0 0 1-1v-4.1h3.5v3.1h-2v2H17a1 1 0 0 0 1-1v-6.1h-5.2V9.1H17v-2H7.1z"
       />
     </svg>
   </span>

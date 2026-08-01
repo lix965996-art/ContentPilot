@@ -33,6 +33,7 @@ import WeiboPreview from '@/components/platform-preview/WeiboPreview.vue'
 import XiaohongshuPreview from '@/components/platform-preview/XiaohongshuPreview.vue'
 import WechatPreview from '@/components/platform-preview/WechatPreview.vue'
 import XPreview from '@/components/platform-preview/XPreview.vue'
+import ToutiaoPreview from '@/components/platform-preview/ToutiaoPreview.vue'
 import type {
   Article,
   GenerationTask,
@@ -44,6 +45,12 @@ import type {
 } from '@/types/business'
 import { platformNames } from '@/types/business'
 import { presentOperationError } from '@/utils/operation-error'
+
+const previewPlatformNames: Record<Platform, string> = {
+  ...platformNames,
+  WECHAT_OFFICIAL: '公众号',
+  TOUTIAO: '头条',
+}
 
 const route = useRoute()
 const router = useRouter()
@@ -68,6 +75,8 @@ const deepWorkbenchPlatform = ref<Platform>('WEIBO')
 const selectingCandidate = ref<number>()
 const regeneratingDeepPlatform = ref(false)
 const reviewing = ref(false)
+const savingWechatDraft = ref(false)
+const wechatDraftStartedAt = ref<number>()
 const reviewResult = ref<Record<string, unknown>>()
 const saved = ref(true)
 const savedToast = ref(false)
@@ -108,7 +117,7 @@ let syncingEditor = false
 const autoFittedWeiboVariantIds = new Set<number>()
 
 const options = reactive({
-  platforms: ['WEIBO', 'XIAOHONGSHU', 'WECHAT_OFFICIAL', 'X'] as Platform[],
+  platforms: ['WEIBO', 'XIAOHONGSHU', 'WECHAT_OFFICIAL', 'TOUTIAO', 'X'] as Platform[],
   style: '专业自然',
   length: 'MEDIUM' as 'SHORT' | 'MEDIUM' | 'LONG',
   target_audience: '',
@@ -162,6 +171,18 @@ const saveStateLabel = computed(() => {
   if (autosaveState.value === 'DIRTY') return '修改已暂存，等待自动保存'
   if (lastSavedAt.value) return '已自动保存'
   return saved.value ? '已保存' : '有未保存修改'
+})
+const wechatDraftElapsedSeconds = computed(() =>
+  savingWechatDraft.value && wechatDraftStartedAt.value
+    ? Math.max(0, Math.floor((clock.value - wechatDraftStartedAt.value) / 1000))
+    : 0,
+)
+const wechatDraftProgressLabel = computed(() => {
+  const seconds = wechatDraftElapsedSeconds.value
+  if (seconds < 3) return '正在准备草稿'
+  if (seconds < 15) return '正在打开公众号编辑器'
+  if (seconds < 40) return '正在写入内容并保存'
+  return '微信响应较慢，仍在等待'
 })
 
 function snapshotEditing(): VariantDraftPayload {
@@ -413,6 +434,15 @@ const editorPlatformConfig = computed(
         contentHint: `正文与标签当前合计约 ${xStatusLength.value}/280 字符，最终以 X 官方校验为准`,
         tagPlaceholder: '添加 X 话题',
         tagHint: '发布时自动转换为 #话题，内部标题不会单独发送',
+      },
+      TOUTIAO: {
+        titleLabel: '头条文章标题',
+        titlePlaceholder: '2～30 个字，准确具体',
+        titleMax: 30,
+        contentMax: 30000,
+        contentHint: '正文将转换为安全富文本并填写到头条号文章编辑器',
+        tagPlaceholder: '添加头条关键词',
+        tagHint: '关键词用于内容管理和平台话题，不会插入正文',
       },
     })[activePlatform.value],
 )
@@ -924,6 +954,50 @@ async function save() {
   await persistVariant(current.value.id, snapshotEditing(), true)
 }
 
+async function saveWechatDraft() {
+  if (!current.value || current.value.platform !== 'WECHAT_OFFICIAL') return
+  const account = accounts.value.find((item) => item.platform === 'WECHAT_OFFICIAL')
+  if (!account?.id || account.status !== 'CONNECTED') {
+    try {
+      await ElMessageBox.confirm(
+        '请先在“平台账号”完成微信公众号扫码登录或 API 配置。',
+        '公众号尚未连接',
+        { confirmButtonText: '去连接', cancelButtonText: '取消', type: 'warning' },
+      )
+      await router.push({ name: 'platform-accounts', query: { platform: 'WECHAT_OFFICIAL' } })
+    } catch {
+      // 用户选择留在当前编辑页。
+    }
+    return
+  }
+
+  try {
+    await ElMessageBox.confirm(
+      '将先保存当前修改，再将文章存入该公众号的草稿箱。此操作不会公开发布。',
+      '保存到公众号草稿箱',
+      { confirmButtonText: '保存草稿', cancelButtonText: '取消', type: 'info' },
+    )
+  } catch {
+    return
+  }
+
+  savingWechatDraft.value = true
+  wechatDraftStartedAt.value = Date.now()
+  try {
+    await save()
+    if (autosaveState.value === 'ERROR') return
+    const result = await workflowApi.saveWechatDraft(current.value.id)
+    ElMessage.success(
+      result.draftId ? `已保存到公众号草稿箱（${result.draftId}）` : '已保存到公众号草稿箱',
+    )
+  } catch (error) {
+    ElMessage.error(getApiErrorMessage(error, '保存到公众号草稿箱失败'))
+  } finally {
+    savingWechatDraft.value = false
+    wechatDraftStartedAt.value = undefined
+  }
+}
+
 function restoreLocalDraft() {
   if (!recoveryDraft.value || recoveryDraft.value.variantId !== current.value?.id) return
   const draft = recoveryDraft.value
@@ -1306,6 +1380,21 @@ onMounted(() => {
       <el-button :disabled="!current || autosaveState === 'SAVING'" @click="save"
         ><Save :size="15" class="mr-1" />保存</el-button
       >
+      <span v-if="savingWechatDraft" class="wechat-draft-progress" aria-live="polite">
+        {{ wechatDraftProgressLabel }} · {{ wechatDraftElapsedSeconds }} 秒
+      </span>
+      <el-button
+        v-if="current?.platform === 'WECHAT_OFFICIAL'"
+        type="primary"
+        :loading="savingWechatDraft"
+        :disabled="autosaveState === 'SAVING'"
+        data-testid="save-wechat-draft"
+        @click="saveWechatDraft"
+      >
+        <Send :size="15" class="mr-1" />{{
+          savingWechatDraft ? `处理中 ${wechatDraftElapsedSeconds} 秒` : '存入公众号草稿箱'
+        }}
+      </el-button>
     </PageHeader>
 
     <section
@@ -2015,10 +2104,11 @@ onMounted(() => {
             <button
               v-for="(name, key) in platformNames"
               :key="key"
+              :title="name"
               :class="{ active: activePlatform === key }"
               @click="activePlatform = key"
             >
-              <PlatformIcon :platform="key" size="sm" />{{ name }}
+              <PlatformIcon :platform="key" size="sm" />{{ previewPlatformNames[key] }}
             </button>
             <small>发布效果模拟</small>
           </div>
@@ -2062,6 +2152,17 @@ onMounted(() => {
               :content-html="wechatPreviewHtml || previewHtml"
               :media="previewMedia"
               :loading="wechatPreviewLoading"
+              :removing-id="removingMediaId"
+              @remove="removePreviewMedia"
+              @set-cover="setPreviewCover"
+            />
+            <ToutiaoPreview
+              v-else-if="activePlatform === 'TOUTIAO'"
+              :account-name="currentAccount?.accountName || '未配置今日头条账号'"
+              :title="editing.title"
+              :content-html="previewHtml"
+              :tags="editing.hashtags"
+              :media="previewMedia"
               :removing-id="removingMediaId"
               @remove="removePreviewMedia"
               @set-cover="setPreviewCover"

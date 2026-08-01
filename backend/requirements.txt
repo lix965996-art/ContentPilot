@@ -19,3 +19,4 @@ cryptography==45.0.5
 pytest==8.4.1
 pytest-asyncio==1.0.0
 ruff==0.12.4
+playwright==1.61.0

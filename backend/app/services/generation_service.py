@@ -49,6 +49,7 @@ PLATFORM_NAMES = {
     "X": "X",
     "XIAOHONGSHU": "小红书",
     "WECHAT_OFFICIAL": "微信公众号",
+    "TOUTIAO": "今日头条",
 }
 MAX_STRUCTURED_ATTEMPTS = 3
 StatusCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
@@ -161,6 +162,20 @@ def _baseline_variant(
             "content": f"给{audience}的重点整理{emoji}\n\n{sections}\n\n以上内容均来自原文。",
             "hashtags": [f"#{item}" for item in keywords[:6]] if include_tags else [],
             "cover_text": article.title[:20],
+            "warnings": [f"Prompt 回归基线：本地规则按“{style}”风格生成"],
+        }
+    if platform == "TOUTIAO":
+        section_numbers = ("一", "二", "三", "四", "五", "六")
+        sections = "\n\n".join(
+            f"{section_numbers[index]}、{point[:22]}\n\n{point}。"
+            for index, point in enumerate(selected)
+        )
+        return {
+            "title": article.title[:30],
+            "summary": (article.summary or selected[0])[:120],
+            "content": f"{article.title}\n\n{sections}\n\n以上内容基于原文整理。",
+            "hashtags": [f"#{item}" for item in keywords[:6]] if include_tags else [],
+            "cover_prompt": f"{article.topic or article.title}，新闻编辑配图，真实克制",
             "warnings": [f"Prompt 回归基线：本地规则按“{style}”风格生成"],
         }
     section_numbers = ("一", "二", "三", "四", "五", "六")
@@ -783,6 +798,12 @@ def rule_quality_review(
     if platform == "XIAOHONGSHU" and len(content) > 1000:
         format_score -= 30
         issues.append("小红书正文超过 1000 个字符")
+    if platform == "TOUTIAO" and not 2 <= len(data.get("title", "")) <= 30:
+        format_score -= 30
+        issues.append("今日头条标题必须为 2～30 个字符")
+    if platform == "TOUTIAO" and len(content) < 50:
+        format_score -= 25
+        issues.append("今日头条正文过短")
     if platform == "WEIBO" and len(content) > 2000:
         format_score -= 30
         issues.append("微博正文过长")
@@ -888,7 +909,9 @@ def save_variant(
     data["title"] = normalize_visible_markdown(data.get("title") or article.title)
     data["hashtags"] = normalize_topics(
         data.get("hashtags", []),
-        limit={"WEIBO": 5, "X": 4, "XIAOHONGSHU": 10, "WECHAT_OFFICIAL": 8}.get(platform, 10),
+        limit={"WEIBO": 5, "X": 4, "XIAOHONGSHU": 10, "WECHAT_OFFICIAL": 8, "TOUTIAO": 8}.get(
+            platform, 10
+        ),
     )
     if platform == "WECHAT_OFFICIAL":
         content_html, format_profile = format_wechat_html(content)

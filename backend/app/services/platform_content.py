@@ -159,5 +159,12 @@ def validate_platform_publish(
             errors.append("微信公众号标题不能为空")
         elif len(clean_title) > 64:
             errors.append("微信公众号标题最多 64 个字符")
+    elif platform == "TOUTIAO":
+        if not clean_title:
+            errors.append("今日头条标题不能为空")
+        elif not 2 <= len(clean_title) <= 30:
+            errors.append("今日头条标题必须为 2～30 个字符")
+        if len(clean_content) < 50:
+            errors.append("今日头条正文至少需要 50 个字符")
 
     return errors

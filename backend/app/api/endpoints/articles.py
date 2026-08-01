@@ -1,3 +1,6 @@
+import uuid
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
@@ -23,7 +26,9 @@ from app.services.generation_service import (
     markdown_to_safe_html,
     normalize_visible_markdown,
 )
+from app.services.platform_account_service import get_platform_account
 from app.services.platform_content import build_x_post, normalize_topics, x_weighted_length
+from app.services.publish_service import execute_publish
 from app.services.serializers import model_dict
 from app.services.wechat_formatting import (
     format_wechat_html,
@@ -247,7 +252,7 @@ def update_variant(
         raise AppException(40402, "内容版本不存在", 404)
     clean_title = normalize_visible_markdown(payload.title)
     clean_content = normalize_visible_markdown(payload.content_text)
-    tag_limits = {"WEIBO": 5, "X": 4, "XIAOHONGSHU": 10, "WECHAT_OFFICIAL": 8}
+    tag_limits = {"WEIBO": 5, "X": 4, "XIAOHONGSHU": 10, "WECHAT_OFFICIAL": 8, "TOUTIAO": 8}
     normalized_hashtags = normalize_topics(
         payload.hashtags, limit=tag_limits.get(variant.platform, 10)
     )
@@ -271,7 +276,7 @@ def update_variant(
         clean_title = fitted["title"]
         clean_content = fitted["content"]
         normalized_hashtags = fitted["hashtags"]
-    title_limits = {"WEIBO": 60, "X": 80, "XIAOHONGSHU": 20, "WECHAT_OFFICIAL": 64}
+    title_limits = {"WEIBO": 60, "X": 80, "XIAOHONGSHU": 20, "WECHAT_OFFICIAL": 64, "TOUTIAO": 30}
     title_limit = title_limits.get(variant.platform, 255)
     if not clean_title:
         raise AppException(40029, "标题不能为空")
@@ -347,6 +352,71 @@ def format_wechat_variant(
     db.commit()
     db.refresh(variant)
     return success_response(request, model_dict(variant, camel=True), "公众号排版已保存")
+
+
+@router.post("/variants/{variant_id}/wechat-draft")
+async def save_wechat_variant_to_draft(
+    variant_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+) -> dict:
+    """Save the current edited WeChat variant to the real account draft box now."""
+    variant = db.get(ContentVariant, variant_id)
+    if not variant:
+        raise AppException(40402, "内容版本不存在", 404)
+    if variant.platform != "WECHAT_OFFICIAL":
+        raise AppException(40078, "只有微信公众号版本可以保存到公众号草稿箱")
+    account = get_platform_account(db, "WECHAT_OFFICIAL")
+    if not account:
+        raise AppException(40411, "请先连接微信公众号账号", 404)
+
+    if account.publish_mode == "BROWSER_DRAFT":
+        publish_mode = "BROWSER_DRAFT"
+    elif account.publish_mode in {"DRAFT_ONLY", "SUBMIT_PUBLISH"}:
+        publish_mode = "DRAFT_ONLY"
+    else:
+        raise AppException(40075, "微信公众号账号没有启用可用的草稿保存方式")
+
+    variant.content_html, variant.format_profile_json = format_wechat_html(
+        variant.content_text,
+        variant.format_profile_json or {},
+    )
+    row = PublishSchedule(
+        article_id=variant.article_id,
+        variant_id=variant.id,
+        account_id=account.id,
+        platform="WECHAT_OFFICIAL",
+        scheduled_at=datetime.now(),
+        publish_mode=publish_mode,
+        status="PENDING",
+        publish_package_json={"trigger": "studio_save_draft"},
+        idempotency_key=str(uuid.uuid4()),
+        created_by=user.id,
+    )
+    db.add(row)
+    db.flush()
+    record_audit(db, request, user, "CREATE_DRAFT", "CONTENT", "VARIANT", variant.id)
+    db.commit()
+
+    result = await execute_publish(db, row.id)
+    if result.status != "DRAFT_CREATED":
+        raise AppException(
+            50218,
+            result.error_message or "微信公众号草稿保存失败，请查看发布中心详情",
+            502,
+        )
+    return success_response(
+        request,
+        {
+            "scheduleId": result.id,
+            "status": result.status,
+            "draftId": result.external_id or "",
+            "draftUrl": result.published_url or "",
+            "resultMode": result.result_mode or publish_mode,
+        },
+        "文章已保存到微信公众号草稿箱",
+    )
 
 
 @router.post("/variants/{variant_id}/approve")

@@ -364,8 +364,8 @@ watch(isRegister, async (value) => {
             {{ isRegister ? '返回登录' : '立即注册' }}
           </router-link>
         </p>
-        <details v-if="!isRegister && demoMode" class="account-shortcuts">
-          <summary>使用演示账号</summary>
+        <details v-if="!isRegister && demoMode" class="account-shortcuts" open>
+          <summary>管理员 / 用户快捷登录</summary>
           <div>
             <button
               v-for="account in accounts"

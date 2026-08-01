@@ -1,4 +1,4 @@
-export type Platform = 'WEIBO' | 'XIAOHONGSHU' | 'WECHAT_OFFICIAL' | 'X'
+export type Platform = 'WEIBO' | 'XIAOHONGSHU' | 'WECHAT_OFFICIAL' | 'TOUTIAO' | 'X'
 
 export interface Article {
   id: number
@@ -273,6 +273,8 @@ export type PublishMode =
   | 'MANUAL_CONFIRM'
   | 'CDP_PUBLISH'
   | 'MCP_PUBLISH'
+  | 'BROWSER_PUBLISH'
+  | 'BROWSER_DRAFT'
   | 'WECHATSYNC_CLI'
 
 export type PlatformAccountStatus =
@@ -291,7 +293,7 @@ export interface PlatformAccount {
   platform: Platform
   platformName: string
   accountName: string
-  authType: 'NONE' | 'OAUTH2' | 'APP_SECRET'
+  authType: 'NONE' | 'OAUTH2' | 'APP_SECRET' | 'QR_LOGIN'
   publishMode: PublishMode
   status: PlatformAccountStatus
   capabilities: string[]
@@ -321,7 +323,13 @@ export interface PlatformAccount {
     allow_public_publish?: boolean
   }
   connectionGuide: {
-    mode: 'OFFICIAL_OAUTH' | 'APP_SECRET' | 'MANUAL_ONLY' | 'MANUAL_DELIVERY'
+    mode:
+      | 'OFFICIAL_OAUTH'
+      | 'OFFICIAL_OAUTH2_PKCE'
+      | 'APP_SECRET'
+      | 'MANUAL_ONLY'
+      | 'MANUAL_DELIVERY'
+      | 'LOCAL_BROWSER_QR'
     consoleUrl: string
     callbackPath?: string
     steps: string[]
@@ -410,6 +418,7 @@ export const platformNames: Record<Platform, string> = {
   WEIBO: '微博',
   XIAOHONGSHU: '小红书',
   WECHAT_OFFICIAL: '微信公众号',
+  TOUTIAO: '今日头条',
   X: 'X',
 }
 
@@ -417,5 +426,6 @@ export const platformColors: Record<Platform, string> = {
   WEIBO: '#f59e0b',
   XIAOHONGSHU: '#ef4444',
   WECHAT_OFFICIAL: '#16a34a',
+  TOUTIAO: '#f04438',
   X: '#111827',
 }

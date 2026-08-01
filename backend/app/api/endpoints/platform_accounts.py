@@ -19,6 +19,10 @@ from app.core.responses import success_response
 from app.db.session import get_db
 from app.models.business import PlatformAccount, PlatformAuthLog
 from app.models.user import User
+from app.publishers.toutiao_browser import get_login_qrcode
+from app.publishers.toutiao_browser import logout as toutiao_logout
+from app.publishers.wechat_browser import get_login_qrcode as get_wechat_login_qrcode
+from app.publishers.wechat_browser import logout as wechat_logout
 from app.publishers.x_official import (
     XPublisher,
     exchange_x_authorization_code,
@@ -34,10 +38,14 @@ from app.schemas.platform_account import (
 from app.services.audit_service import record_audit
 from app.services.platform_account_service import (
     PLATFORMS,
+    clear_toutiao_session_metadata,
+    clear_wechat_session_metadata,
     clear_xhs_session_metadata,
     disconnect_account,
     get_platform_account,
     public_account,
+    record_toutiao_session,
+    record_wechat_session,
     test_account,
     upsert_account,
 )
@@ -141,13 +149,26 @@ def save_account(
             raise AppException(40062, "X 只允许使用 OAuth2 官方接口")
         if not payload.client_id or not _secret_is_available(existing, payload.app_secret):
             raise AppException(40063, "请填写 X Developer Portal 的 Client ID 和 Client Secret")
+    if platform == "TOUTIAO":
+        if payload.auth_type != "QR_LOGIN" or payload.publish_mode != "BROWSER_PUBLISH":
+            raise AppException(40062, "今日头条只支持本机扫码登录与浏览器发布")
+        if not settings.toutiao_browser_publishing_enabled:
+            raise AppException(40064, "今日头条本机浏览器发布功能已关闭")
     if platform == "WECHAT_OFFICIAL" and payload.publish_mode == "REAL_API":
         payload.publish_mode = "SUBMIT_PUBLISH"
     if platform == "WECHAT_OFFICIAL":
-        if payload.publish_mode not in {"DRAFT_ONLY", "SUBMIT_PUBLISH"}:
-            raise AppException(40062, "微信公众号只允许真实草稿或真实提交发布")
-        if not payload.app_id or not _secret_is_available(existing, payload.app_secret):
-            raise AppException(40063, "请填写微信公众号后台真实 AppID 和 AppSecret")
+        if payload.publish_mode == "BROWSER_DRAFT":
+            if payload.auth_type != "QR_LOGIN":
+                raise AppException(40062, "公众号本机草稿模式必须使用扫码登录")
+            if not settings.wechat_browser_publishing_enabled:
+                raise AppException(40064, "微信公众号本机扫码登录功能已关闭")
+        else:
+            if payload.publish_mode not in {"DRAFT_ONLY", "SUBMIT_PUBLISH"}:
+                raise AppException(40062, "微信公众号只允许真实草稿或真实提交发布")
+            if payload.auth_type != "APP_SECRET":
+                raise AppException(40062, "公众号官方 API 必须使用 AppID/AppSecret")
+            if not payload.app_id or not _secret_is_available(existing, payload.app_secret):
+                raise AppException(40063, "请填写微信公众号后台真实 AppID 和 AppSecret")
     account = upsert_account(db, user, platform, payload)
     record_audit(db, request, user, "CONFIGURE", "PLATFORM_ACCOUNT", "ACCOUNT", account.id)
     db.commit()
@@ -247,6 +268,124 @@ async def xiaohongshu_logout(
     )
 
 
+@router.post("/TOUTIAO/login-qrcode")
+async def toutiao_login_qrcode(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("ADMIN")),
+) -> dict:
+    if not settings.toutiao_browser_publishing_enabled:
+        raise AppException(40064, "今日头条本机浏览器发布功能已关闭")
+    account = get_platform_account(db, "TOUTIAO")
+    if not account:
+        raise AppException(40411, "请先保存今日头条账号配置", 404)
+    result = await get_login_qrcode(account.id)
+    if result.get("connected"):
+        checked_at = datetime.now()
+        account.status = "CONNECTED"
+        account.last_test_at = checked_at
+        account.last_error = None
+        record_toutiao_session(account, str(result.get("username") or ""), checked_at)
+        db.commit()
+        return success_response(
+            request,
+            {"connected": True, "imageDataUrl": "", "message": result.get("message", "")},
+            "今日头条账号已登录",
+        )
+    image_data_url = str(result.get("image_data_url") or "")
+    if not image_data_url:
+        raise AppException(50214, str(result.get("message") or "未获取到登录二维码"), 502)
+    return success_response(
+        request,
+        {"connected": False, "imageDataUrl": image_data_url, "message": result.get("message", "")},
+        "请扫码登录今日头条",
+    )
+
+
+@router.post("/WECHAT_OFFICIAL/login-qrcode")
+async def wechat_login_qrcode(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("ADMIN")),
+) -> dict:
+    if not settings.wechat_browser_publishing_enabled:
+        raise AppException(40064, "微信公众号本机扫码登录功能已关闭")
+    account = get_platform_account(db, "WECHAT_OFFICIAL")
+    if not account or account.publish_mode != "BROWSER_DRAFT":
+        raise AppException(40411, "请先保存微信公众号本机扫码配置", 404)
+    result = await get_wechat_login_qrcode(account.id)
+    if result.get("connected"):
+        checked_at = datetime.now()
+        account.status = "CONNECTED"
+        account.last_test_at = checked_at
+        account.last_error = None
+        record_wechat_session(account, str(result.get("username") or ""), checked_at)
+        db.commit()
+        return success_response(
+            request,
+            {"connected": True, "imageDataUrl": "", "message": result.get("message", "")},
+            "微信公众号账号已登录",
+        )
+    image_data_url = str(result.get("image_data_url") or "")
+    if not image_data_url:
+        raise AppException(50216, str(result.get("message") or "未获取到登录二维码"), 502)
+    return success_response(
+        request,
+        {
+            "connected": False,
+            "imageDataUrl": image_data_url,
+            "message": result.get("message", ""),
+        },
+        "请扫码登录微信公众号",
+    )
+
+
+@router.post("/WECHAT_OFFICIAL/logout")
+async def wechat_account_logout(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("ADMIN")),
+) -> dict:
+    account = get_platform_account(db, "WECHAT_OFFICIAL")
+    if not account:
+        raise AppException(40411, "微信公众号账号尚未配置", 404)
+    ok, detail = await wechat_logout(account.id)
+    if not ok:
+        raise AppException(50217, detail, 502)
+    clear_wechat_session_metadata(account)
+    record_audit(db, request, user, "LOGOUT", "PLATFORM_ACCOUNT", "ACCOUNT", account.id)
+    db.commit()
+    db.refresh(account)
+    return success_response(
+        request,
+        public_account(account, "WECHAT_OFFICIAL"),
+        "微信公众号本机登录已退出，可以重新扫码",
+    )
+
+
+@router.post("/TOUTIAO/logout")
+async def toutiao_account_logout(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("ADMIN")),
+) -> dict:
+    account = get_platform_account(db, "TOUTIAO")
+    if not account:
+        raise AppException(40411, "今日头条账号尚未配置", 404)
+    ok, detail = await toutiao_logout(account.id)
+    if not ok:
+        raise AppException(50215, detail, 502)
+    clear_toutiao_session_metadata(account)
+    record_audit(db, request, user, "LOGOUT", "PLATFORM_ACCOUNT", "ACCOUNT", account.id)
+    db.commit()
+    db.refresh(account)
+    return success_response(
+        request,
+        public_account(account, "TOUTIAO"),
+        "今日头条本机登录已退出，可以重新扫码",
+    )
+
+
 @router.delete("/{platform}")
 async def disconnect(
     platform: Platform,
@@ -261,6 +400,14 @@ async def disconnect(
         logged_out, detail = await mcp_logout()
         if not logged_out:
             raise AppException(50212, f"无法清除小红书本地登录：{detail}", 502)
+    if platform == "TOUTIAO" and settings.toutiao_browser_publishing_enabled:
+        logged_out, detail = await toutiao_logout(account.id)
+        if not logged_out:
+            raise AppException(50215, detail, 502)
+    if platform == "WECHAT_OFFICIAL" and account.publish_mode == "BROWSER_DRAFT":
+        logged_out, detail = await wechat_logout(account.id)
+        if not logged_out:
+            raise AppException(50217, detail, 502)
     if platform == "X":
         revoked = await XPublisher(db, account).disconnect()
         if not revoked.success:

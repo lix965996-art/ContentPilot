@@ -35,6 +35,7 @@ const publishModeNames: Record<string, string> = {
   SUBMIT_PUBLISH: '提交平台发布',
   MANUAL_CONFIRM: '人工发布确认',
   MCP_PUBLISH: '本机自动发布',
+  BROWSER_DRAFT: '本机浏览器保存草稿',
 }
 function publishModeLabel(platform: string, mode: string): string {
   if (platform === 'WEIBO' && mode === 'REAL_API') return '微博官方 API'

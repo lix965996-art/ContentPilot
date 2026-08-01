@@ -76,12 +76,12 @@ def test_user_options_are_written_into_prompt() -> None:
         "hashtags（是否生成标签）：禁止生成",
     ):
         assert expected in prompt
-    assert len(PLATFORM_PROFILES) == 4
+    assert len(PLATFORM_PROFILES) == 5
     assert "280 加权字符限制" in PLATFORM_PROFILES["X"].render()
     assert "可见文本" in prompt
     assert "严禁出现井号字符" in prompt
     assert "不超过 140 字" in PLATFORM_PROFILES["WEIBO"].render()
-    assert PROMPT_VERSION == "3.4.0"
+    assert PROMPT_VERSION == "3.5.0"
 
 
 def test_visible_markdown_markers_and_hash_characters_are_cleaned() -> None:

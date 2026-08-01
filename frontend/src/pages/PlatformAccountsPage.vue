@@ -33,6 +33,7 @@ const qrLoading = ref(false)
 const qrImage = ref('')
 const qrMessage = ref('')
 const qrPolling = ref(false)
+const qrPlatform = ref<'XIAOHONGSHU' | 'TOUTIAO' | 'WECHAT_OFFICIAL'>('XIAOHONGSHU')
 const sessionClock = ref(Date.now())
 const logs = ref<Array<Record<string, unknown>>>([])
 const current = ref<PlatformAccount>()
@@ -83,6 +84,7 @@ const capabilityNames: Record<string, string> = {
   COPYWRITING: '文案生成',
   IMAGE_PACKAGE: '图片打包',
   MANUAL_CONFIRM: '人工确认',
+  ARTICLE_PUBLISH: '文章发布',
 }
 const statusNames: Record<string, string> = {
   NOT_CONFIGURED: '未配置',
@@ -115,6 +117,8 @@ const publishModeNames: Record<string, string> = {
   CDP_PUBLISH: 'Chrome 自动发布',
   WECHATSYNC_CLI: 'Wechatsync CLI',
   MCP_PUBLISH: '本机自动发布（仅自己可见）',
+  BROWSER_PUBLISH: '本机浏览器发布',
+  BROWSER_DRAFT: '本机扫码保存草稿',
 }
 function publishModeLabel(account: PlatformAccount): string {
   if (account.publishMode === 'REAL_API' && account.platform === 'WEIBO') return '微博官方 API'
@@ -160,24 +164,34 @@ function edit(account: PlatformAccount) {
       account.accountName === '未配置'
         ? account.platform === 'XIAOHONGSHU'
           ? 'ContentPilot 小红书'
-          : account.platform === 'X'
-            ? 'ContentPilot X'
-            : ''
+          : account.platform === 'TOUTIAO'
+            ? 'ContentPilot 今日头条'
+            : account.platform === 'WECHAT_OFFICIAL'
+              ? 'ContentPilot 公众号'
+              : account.platform === 'X'
+                ? 'ContentPilot X'
+                : ''
         : account.accountName,
     auth_type:
       account.platform === 'WEIBO' || account.platform === 'X'
         ? 'OAUTH2'
-        : account.platform === 'WECHAT_OFFICIAL'
-          ? 'APP_SECRET'
-          : 'NONE',
+        : account.platform === 'TOUTIAO'
+          ? 'QR_LOGIN'
+          : account.platform === 'WECHAT_OFFICIAL'
+            ? account.publishMode === 'BROWSER_DRAFT'
+              ? 'QR_LOGIN'
+              : 'APP_SECRET'
+            : 'NONE',
     publish_mode:
-      account.platform === 'XIAOHONGSHU'
-        ? account.availablePublishModes.includes(account.publishMode)
-          ? account.publishMode
-          : 'MANUAL_CONFIRM'
-        : account.platform === 'WECHAT_OFFICIAL'
-          ? account.publishMode || 'DRAFT_ONLY'
-          : 'REAL_API',
+      account.platform === 'TOUTIAO'
+        ? 'BROWSER_PUBLISH'
+        : account.platform === 'XIAOHONGSHU'
+          ? account.availablePublishModes.includes(account.publishMode)
+            ? account.publishMode
+            : 'MANUAL_CONFIRM'
+          : account.platform === 'WECHAT_OFFICIAL'
+            ? account.publishMode || 'DRAFT_ONLY'
+            : 'REAL_API',
     app_id: account.appId,
     client_id: account.clientId,
     app_secret: '',
@@ -186,9 +200,11 @@ function edit(account: PlatformAccount) {
     token_expires_at: account.tokenExpiresAt?.slice(0, 16) || '',
     redirect_uri:
       account.config.redirect_uri ||
-      `http://127.0.0.1:8000/api/platform-accounts/${
-        account.platform === 'X' ? 'X' : 'WEIBO'
-      }/oauth/callback`,
+      (['X', 'WEIBO'].includes(account.platform)
+        ? `http://127.0.0.1:8000/api/platform-accounts/${
+            account.platform === 'X' ? 'X' : 'WEIBO'
+          }/oauth/callback`
+        : ''),
     operation_ip: account.config.operation_ip || '',
     default_author: account.config.default_author || '',
     default_cover_media_id: account.config.default_cover_media_id || '',
@@ -203,6 +219,9 @@ function edit(account: PlatformAccount) {
 async function save(closeDrawer = true): Promise<boolean> {
   if (!current.value) return false
   try {
+    if (current.value.platform === 'WECHAT_OFFICIAL') {
+      form.auth_type = form.publish_mode === 'BROWSER_DRAFT' ? 'QR_LOGIN' : 'APP_SECRET'
+    }
     const payload: Record<string, unknown> = { ...form }
     if (!form.app_secret) delete payload.app_secret
     if (!form.access_token) delete payload.access_token
@@ -228,7 +247,13 @@ async function test(account: PlatformAccount) {
     const result = await workflowApi.testPlatformAccount(account.platform)
     if (result.result.success) {
       ElMessage.success(
-        account.platform === 'XIAOHONGSHU' ? '小红书本地登录状态验证通过' : '官方接口验证通过',
+        account.platform === 'XIAOHONGSHU'
+          ? '小红书本地登录状态验证通过'
+          : account.platform === 'TOUTIAO'
+            ? '今日头条本机登录状态验证通过'
+            : account.platform === 'WECHAT_OFFICIAL' && account.publishMode === 'BROWSER_DRAFT'
+              ? '微信公众号本机登录状态验证通过'
+              : '官方接口验证通过',
       )
     } else {
       ElMessage.error(
@@ -260,13 +285,14 @@ function startXhsLoginPolling() {
       return
     }
     try {
-      const result = await workflowApi.testPlatformAccount('XIAOHONGSHU')
-      if (result.status !== 'CONNECTED') return
+      const result = await workflowApi.testPlatformAccount(qrPlatform.value)
+      if (!result.result.success) return
       stopXhsLoginPolling()
-      await load()
-      current.value = accounts.value.find((item) => item.platform === 'XIAOHONGSHU')
       qrDialog.value = false
-      ElMessage.success(`小红书账号 ${result.loginUsername || ''} 登录成功`)
+      qrImage.value = ''
+      await load()
+      current.value = accounts.value.find((item) => item.platform === qrPlatform.value)
+      ElMessage.success(`${result.platformName}账号 ${result.loginUsername || ''} 登录成功`)
     } catch {
       // The MCP server can be busy while waiting for the QR scan. Keep polling
       // until the QR expires instead of showing a new error every few seconds.
@@ -276,12 +302,65 @@ function startXhsLoginPolling() {
 
 async function loadXhsQrcode(account?: PlatformAccount) {
   if (account) current.value = account
+  qrPlatform.value = 'XIAOHONGSHU'
   qrLoading.value = true
   qrImage.value = ''
   qrMessage.value = ''
   qrDialog.value = true
   try {
     const result = await workflowApi.xiaohongshuLoginQrcode()
+    qrImage.value = result.imageDataUrl
+    qrMessage.value = result.message
+    startXhsLoginPolling()
+  } catch (error) {
+    qrDialog.value = false
+    ElMessage.error(getApiErrorMessage(error))
+  } finally {
+    qrLoading.value = false
+  }
+}
+
+async function loadToutiaoQrcode(account?: PlatformAccount) {
+  if (account) current.value = account
+  qrPlatform.value = 'TOUTIAO'
+  qrLoading.value = true
+  qrImage.value = ''
+  qrMessage.value = ''
+  qrDialog.value = true
+  try {
+    const result = await workflowApi.toutiaoLoginQrcode()
+    if (result.connected) {
+      qrDialog.value = false
+      await load()
+      ElMessage.success('今日头条账号已经登录')
+      return
+    }
+    qrImage.value = result.imageDataUrl
+    qrMessage.value = result.message
+    startXhsLoginPolling()
+  } catch (error) {
+    qrDialog.value = false
+    ElMessage.error(getApiErrorMessage(error))
+  } finally {
+    qrLoading.value = false
+  }
+}
+
+async function loadWechatQrcode(account?: PlatformAccount) {
+  if (account) current.value = account
+  qrPlatform.value = 'WECHAT_OFFICIAL'
+  qrLoading.value = true
+  qrImage.value = ''
+  qrMessage.value = ''
+  qrDialog.value = true
+  try {
+    const result = await workflowApi.wechatLoginQrcode()
+    if (result.connected) {
+      qrDialog.value = false
+      await load()
+      ElMessage.success('微信公众号已登录')
+      return
+    }
     qrImage.value = result.imageDataUrl
     qrMessage.value = result.message
     startXhsLoginPolling()
@@ -316,12 +395,74 @@ async function logoutXhs() {
   }
 }
 
+async function loadToutiaoQrcodeFromEditor() {
+  if (!form.account_name.trim()) form.account_name = 'ContentPilot 今日头条'
+  form.auth_type = 'QR_LOGIN'
+  form.publish_mode = 'BROWSER_PUBLISH'
+  if (!(await save(false))) return
+  current.value = accounts.value.find((item) => item.platform === 'TOUTIAO')
+  await loadToutiaoQrcode(current.value)
+}
+
+async function logoutToutiao() {
+  try {
+    await ElMessageBox.confirm(
+      '将清除本机今日头条登录会话，之后需要重新扫码。确定继续吗？',
+      '退出今日头条登录',
+      { type: 'warning' },
+    )
+    await workflowApi.toutiaoLogout()
+    ElMessage.success('已退出今日头条登录')
+    await load()
+  } catch (error) {
+    if (error !== 'cancel') ElMessage.error(getApiErrorMessage(error))
+  }
+}
+
+async function loadWechatQrcodeFromEditor() {
+  if (!form.account_name.trim()) form.account_name = 'ContentPilot 公众号'
+  form.auth_type = 'QR_LOGIN'
+  form.publish_mode = 'BROWSER_DRAFT'
+  if (!(await save(false))) return
+  current.value = accounts.value.find((item) => item.platform === 'WECHAT_OFFICIAL')
+  await loadWechatQrcode(current.value)
+}
+
+async function logoutWechat() {
+  try {
+    await ElMessageBox.confirm(
+      '将清除本机微信公众号登录会话，之后需要重新扫码。确定继续吗？',
+      '退出微信公众号登录',
+      { type: 'warning' },
+    )
+    await workflowApi.wechatLogout()
+    ElMessage.success('已退出微信公众号登录')
+    await load()
+  } catch (error) {
+    if (error !== 'cancel') ElMessage.error(getApiErrorMessage(error))
+  }
+}
+
+function qrPlatformName(): string {
+  if (qrPlatform.value === 'TOUTIAO') return '今日头条'
+  if (qrPlatform.value === 'WECHAT_OFFICIAL') return '微信公众号'
+  return '小红书'
+}
+
+function qrScannerName(): string {
+  if (qrPlatform.value === 'TOUTIAO') return '抖音或今日头条'
+  if (qrPlatform.value === 'WECHAT_OFFICIAL') return '微信'
+  return '小红书'
+}
+
 async function disconnect(account: PlatformAccount) {
   try {
     await ElMessageBox.confirm(
       account.platform === 'XIAOHONGSHU'
         ? '将退出小红书本地登录、清除 MCP Cookie，并删除 ContentPilot 中的账号配置。确定继续吗？'
-        : '将删除该平台配置及保存的所有 Token 和密钥，确定继续吗？',
+        : account.platform === 'TOUTIAO'
+          ? '将清除本机今日头条会话，并删除 ContentPilot 中的账号配置。确定继续吗？'
+          : '将删除该平台配置及保存的所有 Token 和密钥，确定继续吗？',
       '解除连接',
       {
         type: 'warning',
@@ -381,6 +522,9 @@ onMounted(async () => {
   } else if (route.query.oauth === 'x_success') {
     ElMessage.success('X 官方 OAuth 授权成功，已取得真实 Access Token')
     await router.replace({ name: 'platform-accounts' })
+  } else if (isAdmin.value && typeof route.query.platform === 'string') {
+    const requested = accounts.value.find((item) => item.platform === route.query.platform)
+    if (requested) edit(requested)
   }
 })
 onBeforeUnmount(() => {
@@ -439,6 +583,27 @@ onBeforeUnmount(() => {
               : '当前使用人工发布交付包；本地 MCP 自动发布默认关闭，不会伪装成已连接。'
           }}
         </div>
+        <div v-else-if="account.platform === 'TOUTIAO'" class="account-notice account-notice--real">
+          {{
+            account.status === 'CONNECTED'
+              ? account.publicPublishEnabled
+                ? `本机 Chrome 已登录${account.loginUsername ? `，当前账号：${account.loginUsername}` : ''}；真实发布已开启。`
+                : '本机 Chrome 已登录；真实发布安全开关关闭，不会发送文章。'
+              : '尚未登录今日头条创作中心，请保存配置后扫码登录。'
+          }}
+        </div>
+        <div
+          v-else-if="
+            account.platform === 'WECHAT_OFFICIAL' && account.publishMode === 'BROWSER_DRAFT'
+          "
+          class="account-notice account-notice--real"
+        >
+          {{
+            account.status === 'CONNECTED'
+              ? `本机微信公众号已登录${account.loginUsername ? `，当前账号：${account.loginUsername}` : ''}；文章只保存到草稿箱，不会公开发布。`
+              : '尚未登录微信公众平台，保存配置后扫码即可使用。'
+          }}
+        </div>
         <div
           v-else-if="
             account.platform === 'X' &&
@@ -462,21 +627,49 @@ onBeforeUnmount(() => {
             <dt>最近检测</dt>
             <dd>{{ account.lastTestAt ? formatDateTime(account.lastTestAt) : '尚未检测' }}</dd>
           </div>
-          <div v-if="account.platform === 'XIAOHONGSHU'">
+          <div
+            v-if="
+              ['XIAOHONGSHU', 'TOUTIAO'].includes(account.platform) ||
+              (account.platform === 'WECHAT_OFFICIAL' && account.publishMode === 'BROWSER_DRAFT')
+            "
+          >
             <dt>登录账号</dt>
             <dd>{{ account.loginUsername || '尚未获取' }}</dd>
           </div>
-          <div v-if="account.platform === 'XIAOHONGSHU'">
+          <div
+            v-if="
+              ['XIAOHONGSHU', 'TOUTIAO'].includes(account.platform) ||
+              (account.platform === 'WECHAT_OFFICIAL' && account.publishMode === 'BROWSER_DRAFT')
+            "
+          >
             <dt>上次登录</dt>
             <dd>{{ formatDateTime(account.lastLoginAt) }}</dd>
           </div>
-          <div v-if="account.platform === 'XIAOHONGSHU'">
+          <div
+            v-if="
+              ['XIAOHONGSHU', 'TOUTIAO'].includes(account.platform) ||
+              (account.platform === 'WECHAT_OFFICIAL' && account.publishMode === 'BROWSER_DRAFT')
+            "
+          >
             <dt>已登录时长</dt>
             <dd>{{ loginDuration(account) }}</dd>
           </div>
-          <div v-if="account.platform === 'XIAOHONGSHU'">
+          <div
+            v-if="
+              ['XIAOHONGSHU', 'TOUTIAO'].includes(account.platform) ||
+              (account.platform === 'WECHAT_OFFICIAL' && account.publishMode === 'BROWSER_DRAFT')
+            "
+          >
             <dt>本机会话</dt>
-            <dd>{{ account.status === 'CONNECTED' ? '已保存在 MCP' : '未登录' }}</dd>
+            <dd>
+              {{
+                account.status === 'CONNECTED'
+                  ? ['TOUTIAO', 'WECHAT_OFFICIAL'].includes(account.platform)
+                    ? '已保存在本机 Chrome'
+                    : '已保存在 MCP'
+                  : '未登录'
+              }}
+            </dd>
           </div>
           <div v-else>
             <dt>Token</dt>
@@ -499,6 +692,48 @@ onBeforeUnmount(() => {
         </p>
 
         <footer>
+          <el-button
+            v-if="
+              isAdmin &&
+              account.id &&
+              account.platform === 'WECHAT_OFFICIAL' &&
+              account.publishMode === 'BROWSER_DRAFT' &&
+              account.status !== 'CONNECTED'
+            "
+            :loading="qrLoading"
+            @click="loadWechatQrcode(account)"
+          >
+            <QrCode :size="14" />扫码登录
+          </el-button>
+          <el-button
+            v-if="
+              isAdmin &&
+              account.platform === 'WECHAT_OFFICIAL' &&
+              account.publishMode === 'BROWSER_DRAFT' &&
+              account.status === 'CONNECTED'
+            "
+            @click="logoutWechat"
+          >
+            <Unlink :size="14" />退出登录
+          </el-button>
+          <el-button
+            v-if="
+              isAdmin &&
+              account.id &&
+              account.platform === 'TOUTIAO' &&
+              account.status !== 'CONNECTED'
+            "
+            :loading="qrLoading"
+            @click="loadToutiaoQrcode(account)"
+          >
+            <QrCode :size="14" />扫码登录
+          </el-button>
+          <el-button
+            v-if="isAdmin && account.platform === 'TOUTIAO' && account.status === 'CONNECTED'"
+            @click="logoutToutiao"
+          >
+            <Unlink :size="14" />退出登录
+          </el-button>
           <el-button
             v-if="
               isAdmin &&
@@ -541,7 +776,12 @@ onBeforeUnmount(() => {
                 ? '请先完成 OAuth'
                 : account.platform === 'XIAOHONGSHU'
                   ? '检测本地登录'
-                  : '验证真实连接'
+                  : account.platform === 'TOUTIAO'
+                    ? '检测本机登录'
+                    : account.platform === 'WECHAT_OFFICIAL' &&
+                        account.publishMode === 'BROWSER_DRAFT'
+                      ? '检测本机登录'
+                      : '验证真实连接'
             }}</el-button
           >
           <el-button v-if="isAdmin" type="primary" @click="edit(account)"
@@ -667,36 +907,75 @@ onBeforeUnmount(() => {
         </template>
 
         <template v-else-if="current.platform === 'WECHAT_OFFICIAL'">
-          <el-form-item label="AppID" required><el-input v-model="form.app_id" /></el-form-item>
-          <el-form-item label="AppSecret"
-            ><el-input
-              v-model="form.app_secret"
-              type="password"
-              show-password
-              placeholder="留空表示保持原值"
-          /></el-form-item>
+          <el-form-item label="连接方式">
+            <el-radio-group v-model="form.publish_mode">
+              <el-radio-button value="BROWSER_DRAFT">本机扫码（推荐）</el-radio-button>
+              <el-radio-button value="DRAFT_ONLY">官方 API</el-radio-button>
+              <el-radio-button value="SUBMIT_PUBLISH">官方 API 提交发布</el-radio-button>
+            </el-radio-group>
+          </el-form-item>
+
+          <template v-if="form.publish_mode === 'BROWSER_DRAFT'">
+            <el-alert
+              title="微信扫码后登录状态仅保存在这台电脑。文章只保存到公众号草稿箱，不会公开发布。"
+              type="info"
+              :closable="false"
+            />
+            <el-button class="mt-4" :loading="qrLoading" @click="loadWechatQrcodeFromEditor">
+              <QrCode :size="15" />保存并获取登录二维码
+            </el-button>
+          </template>
+
+          <template v-else>
+            <el-form-item label="AppID" required><el-input v-model="form.app_id" /></el-form-item>
+            <el-form-item label="AppSecret"
+              ><el-input
+                v-model="form.app_secret"
+                type="password"
+                show-password
+                placeholder="留空表示保持原值"
+            /></el-form-item>
+            <el-form-item label="默认封面素材 ID"
+              ><el-input v-model="form.default_cover_media_id" placeholder="没有选择本地封面时使用"
+            /></el-form-item>
+            <el-form-item label="默认封面 URL"
+              ><el-input v-model="form.default_cover_url"
+            /></el-form-item>
+            <el-checkbox
+              v-if="form.publish_mode === 'SUBMIT_PUBLISH'"
+              v-model="form.allow_submit_publish"
+              >我已确认该公众号具备发布接口权限，允许提交发布</el-checkbox
+            >
+            <el-alert
+              class="mt-4"
+              title="请在公众平台配置服务器出口 IP 白名单。建议先使用只创建草稿模式。"
+              type="warning"
+              :closable="false"
+            />
+          </template>
           <el-form-item label="默认作者"><el-input v-model="form.default_author" /></el-form-item>
-          <el-form-item label="默认封面素材 ID"
-            ><el-input v-model="form.default_cover_media_id" placeholder="没有选择本地封面时使用"
-          /></el-form-item>
-          <el-form-item label="默认封面 URL"
-            ><el-input v-model="form.default_cover_url"
-          /></el-form-item>
-          <el-form-item label="发布方式"
-            ><el-select v-model="form.publish_mode" class="w-full"
-              ><el-option label="真实创建公众号草稿" value="DRAFT_ONLY" /><el-option
-                label="真实提交发布"
-                value="SUBMIT_PUBLISH" /></el-select
-          ></el-form-item>
-          <el-checkbox v-model="form.allow_submit_publish"
-            >我已确认该公众号具备发布接口权限，允许提交发布</el-checkbox
-          >
+        </template>
+
+        <template v-else-if="current.platform === 'TOUTIAO'">
+          <el-form-item label="发布方式">
+            <el-tag type="success">本机 Chrome 扫码登录与真实文章发布</el-tag>
+          </el-form-item>
+          <el-checkbox v-model="form.allow_public_publish">
+            我已了解真实发布会将文章发送到今日头条，允许该共享账号发布真实内容
+          </el-checkbox>
           <el-alert
             class="mt-4"
-            title="请在公众平台配置服务器出口 IP 白名单。默认推荐只创建草稿，由运营人员检查后发布。"
-            type="warning"
+            :title="
+              form.allow_public_publish
+                ? '真实发布已开启；建议先扫码并检测账号，再发布一篇测试文章。'
+                : '安全模式：可以扫码和检测登录，但不会向今日头条发送文章。'
+            "
+            :type="form.allow_public_publish ? 'warning' : 'info'"
             :closable="false"
           />
+          <el-button class="mt-4" :loading="qrLoading" @click="loadToutiaoQrcodeFromEditor">
+            <QrCode :size="15" />保存并获取登录二维码
+          </el-button>
         </template>
 
         <template v-else>
@@ -783,16 +1062,18 @@ onBeforeUnmount(() => {
 
     <el-dialog
       v-model="qrDialog"
-      title="小红书扫码登录"
+      :title="`${qrPlatformName()}扫码登录`"
       width="420px"
       @closed="stopXhsLoginPolling"
     >
       <div v-loading="qrLoading" class="qr-login-panel">
-        <img v-if="qrImage" :src="qrImage" alt="小红书登录二维码" />
+        <img v-if="qrImage" :src="qrImage" :alt="`${qrPlatformName()}登录二维码`" />
         <el-empty v-else-if="!qrLoading" description="没有收到二维码" />
         <p v-if="qrMessage">{{ qrMessage }}</p>
-        <small v-if="qrPolling">请使用小红书 App 扫码，系统正在自动检测登录结果。</small>
-        <small v-else>请使用小红书 App 扫码；二维码过期后可以重新获取。</small>
+        <small v-if="qrPolling"
+          >请使用{{ qrScannerName() }} App 扫码，系统正在自动检测登录结果。</small
+        >
+        <small v-else>二维码过期后可以重新获取。</small>
       </div>
     </el-dialog>
   </div>

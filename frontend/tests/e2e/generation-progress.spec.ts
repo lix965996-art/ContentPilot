@@ -37,7 +37,7 @@ test('studio desktop columns and platform tabs stay aligned', async ({ page }) =
   expect(new Set(layout.panelBottoms).size).toBe(1)
   expect(new Set(layout.tabTops).size).toBe(1)
   expect(new Set(layout.tabBottoms).size).toBe(1)
-  expect(layout.tabOverflow).toEqual([false, false, false, false])
+  expect(layout.tabOverflow).toEqual([false, false, false, false, false])
 })
 
 test('studio automatically fits an existing illustrated Weibo draft to the publish limit', async ({
@@ -241,7 +241,7 @@ test('WeChat version opens the formatting assistant and previews a selected them
 }) => {
   await login(page)
   await page.goto('/studio')
-  await page.locator('.preview-tabs button').filter({ hasText: '微信公众号' }).click()
+  await page.locator('.preview-tabs button').filter({ hasText: '公众号' }).click()
 
   await expect(page.getByTestId('open-wechat-formatter')).toBeVisible()
   await page.getByTestId('open-wechat-formatter').click()

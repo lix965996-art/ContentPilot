@@ -29,29 +29,33 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
     }
   }
   if (-not $pythonExe) { throw 'Python 3.12 was not found. Install it or expose it through py/python.' }
-  Write-Host '[1/5] Creating Python 3.12 virtual environment...'
+  Write-Host '[1/6] Creating Python 3.12 virtual environment...'
   & $pythonExe @pythonArgs -m venv (Join-Path $backend '.venv')
   if ($LASTEXITCODE -ne 0) { throw 'Python virtual environment creation failed.' }
 }
 
-Write-Host '[2/5] Syncing backend dependencies...'
+Write-Host '[2/6] Syncing backend dependencies...'
 & $venvPython -m pip install --disable-pip-version-check -r (Join-Path $backend 'requirements.txt')
 if ($LASTEXITCODE -ne 0) { throw 'Backend dependency installation failed.' }
 
 if (-not $SkipFrontend) {
   if (-not (Get-Command node.exe -ErrorAction SilentlyContinue)) { throw 'Node.js 20+ was not found.' }
-  Write-Host '[3/5] Syncing frontend dependencies...'
+  Write-Host '[3/6] Syncing frontend dependencies...'
   Push-Location $frontend
   try { & npm.cmd install --no-audit --no-fund; if ($LASTEXITCODE -ne 0) { throw 'Frontend dependency installation failed.' } }
   finally { Pop-Location }
-} else { Write-Host '[3/5] Frontend dependency sync skipped.' }
+} else { Write-Host '[3/6] Frontend dependency sync skipped.' }
 
-Write-Host '[4/5] Applying database migrations...'
+Write-Host '[4/6] Installing the local Xiaohongshu login bridge...'
+& (Join-Path $PSScriptRoot 'install-xhs-mcp.ps1')
+if ($LASTEXITCODE -ne 0) { throw 'Xiaohongshu MCP installation failed.' }
+
+Write-Host '[5/6] Applying database migrations...'
 Push-Location $backend
 try { & $venvPython -m alembic upgrade head; if ($LASTEXITCODE -ne 0) { throw 'Database migration failed.' } }
 finally { Pop-Location }
 
-Write-Host '[5/5] Seeding idempotent demo data...'
+Write-Host '[6/6] Seeding idempotent demo data...'
 Push-Location $backend
 try { & $venvPython -m app.db.seed; if ($LASTEXITCODE -ne 0) { throw 'Demo data seed failed.' } }
 finally { Pop-Location }

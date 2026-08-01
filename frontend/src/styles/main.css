@@ -1199,6 +1199,10 @@ body,
 .platform-icon.is-x {
   background: #111827;
 }
+.platform-icon.is-toutiao {
+  color: #f04438;
+  background: #fff0ee;
+}
 .platform-badge {
   display: inline-flex;
   align-items: center;
@@ -1499,6 +1503,13 @@ body,
 }
 .save-state.error {
   color: #b42318;
+}
+.wechat-draft-progress {
+  max-width: 220px;
+  color: #475569;
+  font-size: 12px;
+  line-height: 1.35;
+  text-align: right;
 }
 .generation-progress {
   margin-bottom: 14px;

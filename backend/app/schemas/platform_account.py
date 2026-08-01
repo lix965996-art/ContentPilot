@@ -3,7 +3,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, Field, HttpUrl, IPvAnyAddress, model_validator
 
-Platform = Literal["WEIBO", "WECHAT_OFFICIAL", "XIAOHONGSHU", "X"]
+Platform = Literal["WEIBO", "WECHAT_OFFICIAL", "XIAOHONGSHU", "TOUTIAO", "X"]
 AccountStatus = Literal[
     "NOT_CONFIGURED",
     "CONNECTING",
@@ -16,13 +16,20 @@ AccountStatus = Literal[
     "LOGIN_REQUIRED",
 ]
 PublishMode = Literal[
-    "REAL_API", "DRAFT_ONLY", "SUBMIT_PUBLISH", "MANUAL_CONFIRM", "CDP_PUBLISH", "MCP_PUBLISH"
+    "REAL_API",
+    "DRAFT_ONLY",
+    "SUBMIT_PUBLISH",
+    "MANUAL_CONFIRM",
+    "CDP_PUBLISH",
+    "MCP_PUBLISH",
+    "BROWSER_PUBLISH",
+    "BROWSER_DRAFT",
 ]
 
 
 class PlatformAccountUpsert(BaseModel):
     account_name: str = Field(min_length=1, max_length=100)
-    auth_type: Literal["NONE", "OAUTH2", "APP_SECRET"] = "NONE"
+    auth_type: Literal["NONE", "OAUTH2", "APP_SECRET", "QR_LOGIN"] = "NONE"
     publish_mode: PublishMode
     app_id: str | None = Field(default=None, max_length=255)
     client_id: str | None = Field(default=None, max_length=255)

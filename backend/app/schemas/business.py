@@ -3,7 +3,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-Platform = Literal["WEIBO", "XIAOHONGSHU", "WECHAT_OFFICIAL", "X"]
+Platform = Literal["WEIBO", "XIAOHONGSHU", "WECHAT_OFFICIAL", "TOUTIAO", "X"]
 
 
 class ArticleCreate(BaseModel):
@@ -151,7 +151,13 @@ class RecommendationRequest(BaseModel):
 
 
 PublishModeLiteral = Literal[
-    "REAL_API", "DRAFT_ONLY", "MANUAL_CONFIRM", "CDP_PUBLISH", "MCP_PUBLISH"
+    "REAL_API",
+    "DRAFT_ONLY",
+    "MANUAL_CONFIRM",
+    "CDP_PUBLISH",
+    "MCP_PUBLISH",
+    "BROWSER_PUBLISH",
+    "BROWSER_DRAFT",
 ]
 
 

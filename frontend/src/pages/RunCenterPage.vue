@@ -44,7 +44,7 @@ const status = ref('')
 const query = ref('')
 const summary = ref({ total: 0, running: 0, failed: 0, success: 0 })
 
-const knownPlatforms: Platform[] = ['WEIBO', 'XIAOHONGSHU', 'WECHAT_OFFICIAL', 'X']
+const knownPlatforms: Platform[] = ['WEIBO', 'XIAOHONGSHU', 'WECHAT_OFFICIAL', 'TOUTIAO', 'X']
 const selectedSteps = computed(() => selected.value?.steps || [])
 const isAdmin = computed(() => auth.hasRole(['ADMIN']))
 const selectedTechnicalError = computed(() => {

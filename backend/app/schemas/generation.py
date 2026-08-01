@@ -44,6 +44,22 @@ class WechatGenerationOutput(BaseModel):
         return value
 
 
+class ToutiaoGenerationOutput(BaseModel):
+    title: str = Field(min_length=2, max_length=30)
+    summary: str = Field(min_length=20, max_length=120)
+    content: str = Field(min_length=50, max_length=30_000)
+    hashtags: list[Hashtag] = Field(default_factory=list, max_length=8)
+    cover_prompt: str = Field(default="", max_length=200)
+    warnings: list[str] = Field(default_factory=list, max_length=10)
+
+    @field_validator("content")
+    @classmethod
+    def require_paragraphs(cls, value: str) -> str:
+        if "\n" not in value:
+            raise ValueError("今日头条正文必须包含多个段落")
+        return value
+
+
 class QualityReviewOutput(BaseModel):
     factual_consistency: float = Field(ge=0, le=100)
     information_completeness: float = Field(ge=0, le=100)
@@ -103,6 +119,11 @@ class WechatDeepDraftOutput(BaseModel):
     candidates: list[WechatGenerationOutput] = Field(min_length=2, max_length=2)
 
 
+class ToutiaoDeepDraftOutput(BaseModel):
+    strategy: CreativeStrategyOutput
+    candidates: list[ToutiaoGenerationOutput] = Field(min_length=2, max_length=2)
+
+
 class WeiboDeepFinalOutput(DeepReviewOutput):
     final: WeiboGenerationOutput
 
@@ -119,6 +140,10 @@ class WechatDeepFinalOutput(DeepReviewOutput):
     final: WechatGenerationOutput
 
 
+class ToutiaoDeepFinalOutput(DeepReviewOutput):
+    final: ToutiaoGenerationOutput
+
+
 class KeywordOutput(BaseModel):
     zh: str = Field(min_length=1, max_length=20)
     en: str = Field(min_length=1, max_length=50)
@@ -130,15 +155,20 @@ class KeywordExtractionOutput(BaseModel):
 
 
 GenerationOutput = (
-    WeiboGenerationOutput | XGenerationOutput | XiaohongshuGenerationOutput | WechatGenerationOutput
+    WeiboGenerationOutput
+    | XGenerationOutput
+    | XiaohongshuGenerationOutput
+    | WechatGenerationOutput
+    | ToutiaoGenerationOutput
 )
-PlatformName = Literal["WEIBO", "X", "XIAOHONGSHU", "WECHAT_OFFICIAL"]
+PlatformName = Literal["WEIBO", "X", "XIAOHONGSHU", "WECHAT_OFFICIAL", "TOUTIAO"]
 
 OUTPUT_MODELS: dict[str, type[BaseModel]] = {
     "WEIBO": WeiboGenerationOutput,
     "X": XGenerationOutput,
     "XIAOHONGSHU": XiaohongshuGenerationOutput,
     "WECHAT_OFFICIAL": WechatGenerationOutput,
+    "TOUTIAO": ToutiaoGenerationOutput,
 }
 
 DEEP_DRAFT_MODELS: dict[str, type[BaseModel]] = {
@@ -146,6 +176,7 @@ DEEP_DRAFT_MODELS: dict[str, type[BaseModel]] = {
     "X": XDeepDraftOutput,
     "XIAOHONGSHU": XiaohongshuDeepDraftOutput,
     "WECHAT_OFFICIAL": WechatDeepDraftOutput,
+    "TOUTIAO": ToutiaoDeepDraftOutput,
 }
 
 DEEP_FINAL_MODELS: dict[str, type[BaseModel]] = {
@@ -153,4 +184,5 @@ DEEP_FINAL_MODELS: dict[str, type[BaseModel]] = {
     "X": XDeepFinalOutput,
     "XIAOHONGSHU": XiaohongshuDeepFinalOutput,
     "WECHAT_OFFICIAL": WechatDeepFinalOutput,
+    "TOUTIAO": ToutiaoDeepFinalOutput,
 }
