@@ -1,4 +1,5 @@
 import io
+import ipaddress
 import json
 import uuid
 import zipfile
@@ -13,6 +14,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_roles
+from app.core.config import settings
 from app.core.credentials import decrypt_json
 from app.core.exceptions import AppException
 from app.core.responses import success_response
@@ -20,6 +22,7 @@ from app.db.session import get_db
 from app.models.business import (
     ContentArticle,
     ContentVariant,
+    MediaAsset,
     PlatformAccount,
     PublishLog,
     PublishSchedule,
@@ -30,7 +33,13 @@ from app.schemas.business import ScheduleCreate, ScheduleUpdate
 from app.schemas.platform_account import ManualConfirmRequest
 from app.services.audit_service import record_audit
 from app.services.platform_account_service import effective_status
-from app.services.publish_service import execute_publish, validate_schedule_account
+from app.services.publish_service import (
+    TEXT_REAL_API_PLATFORMS,
+    execute_publish,
+    toutiao_public_publish_enabled,
+    validate_schedule_account,
+    x_public_publish_enabled,
+)
 from app.services.serializers import model_dict
 
 router = APIRouter(tags=["排期与发布"])
@@ -42,9 +51,24 @@ def _local_naive(value: datetime) -> datetime:
     return value.astimezone(ZoneInfo("Asia/Shanghai")).replace(tzinfo=None)
 
 
+def _public_client_ip(request: Request) -> str:
+    """Return the direct client's public IP without trusting spoofable forwarding headers."""
+    host = request.client.host if request.client else ""
+    try:
+        parsed = ipaddress.ip_address(host)
+    except ValueError:
+        return ""
+    return str(parsed) if parsed.is_global else ""
+
+
 def _ensure_schedule_owner(row: PublishSchedule, user: User) -> None:
+    # ADMIN acts as a platform operator and may manage any user's schedule to
+    # support cross-tenant operations like compensating failures or re-timing
+    # releases. Other roles must own the schedule they want to mutate.
     if row.created_by != user.id:
-        raise AppException(40303, "无权操作其他用户的平台排期", 403)
+        user_role_codes = {role.code for role in user.roles}
+        if "ADMIN" not in user_role_codes:
+            raise AppException(40303, "无权操作其他用户的平台排期", 403)
 
 
 def _data(db: Session, row: PublishSchedule, include_logs: bool = False) -> dict:
@@ -92,6 +116,67 @@ def list_schedules(
     return success_response(request, [_data(db, item) for item in items])
 
 
+@router.get("/schedules/backlog")
+def schedule_backlog(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
+) -> dict:
+    active_variant_ids = select(PublishSchedule.variant_id).where(
+        PublishSchedule.status.notin_(["CANCELLED"])
+    )
+    variants = db.scalars(
+        select(ContentVariant)
+        .where(
+            ContentVariant.review_status == "APPROVED",
+            ContentVariant.id.notin_(active_variant_ids),
+        )
+        .order_by(ContentVariant.updated_at.desc(), ContentVariant.id.desc())
+    ).all()
+    items = []
+    for variant in variants:
+        article = db.get(ContentArticle, variant.article_id)
+        cover_ready = (
+            db.scalar(
+                select(MediaAsset.id).where(
+                    MediaAsset.article_id == variant.article_id,
+                    MediaAsset.usage_type == "COVER",
+                    MediaAsset.selected.is_(True),
+                )
+            )
+            is not None
+        )
+        account = db.scalar(
+            select(PlatformAccount).where(
+                PlatformAccount.platform == variant.platform,
+            )
+        )
+        account_ready = variant.platform == "XIAOHONGSHU" or (
+            account is not None and effective_status(account) == "CONNECTED"
+        )
+        blockers = []
+        if not cover_ready:
+            blockers.append("缺少封面")
+        if not account_ready:
+            blockers.append("账号未连接")
+        items.append(
+            {
+                "articleId": variant.article_id,
+                "variantId": variant.id,
+                "articleTitle": article.title if article else "",
+                "variantTitle": variant.title,
+                "platform": variant.platform,
+                "reviewStatus": variant.review_status,
+                "coverReady": cover_ready,
+                "accountReady": account_ready,
+                "ready": not blockers,
+                "blockers": blockers,
+                "updatedAt": variant.updated_at,
+            }
+        )
+    return success_response(request, items)
+
+
 @router.post("/schedules")
 def create_schedule(
     payload: ScheduleCreate,
@@ -105,33 +190,64 @@ def create_schedule(
         raise AppException(40031, "文章与平台版本不匹配")
     if variant.platform != payload.platform:
         raise AppException(40033, "内容版本与目标平台不匹配")
-    if not payload.account_id:
-        raise AppException(40072, "创建排期时必须选择平台账号")
-    account = db.scalar(
-        select(PlatformAccount).where(
-            PlatformAccount.id == payload.account_id, PlatformAccount.user_id == user.id
+    # Manual Xiaohongshu delivery may omit an account. Real local MCP
+    # Publishing must use the system-shared account for the selected platform.
+    account = None
+    if payload.account_id:
+        account = db.scalar(
+            select(PlatformAccount).where(
+                PlatformAccount.id == payload.account_id,
+                PlatformAccount.platform == payload.platform,
+            )
         )
-    )
-    if not account:
-        raise AppException(40303, "平台账号不存在或不属于当前用户", 403)
-    if account.platform != payload.platform:
-        raise AppException(40073, "平台账号与目标平台不匹配")
+        if not account:
+            raise AppException(40073, "共享平台账号不存在或与目标平台不匹配")
+        if account.platform != payload.platform:
+            raise AppException(40073, "平台账号与目标平台不匹配")
+    elif payload.platform != "XIAOHONGSHU" or payload.publish_mode == "MCP_PUBLISH":
+        raise AppException(40072, "创建排期时必须选择平台账号")
+    if payload.platform == "X" and not x_public_publish_enabled(account):
+        raise AppException(40080, "X 公开发布安全开关未开启，请由管理员确认后启用")
+    if payload.platform == "TOUTIAO":
+        if payload.publish_mode != "BROWSER_PUBLISH":
+            raise AppException(40081, "今日头条仅支持本机浏览器发布")
+        if not account or account.publish_mode != "BROWSER_PUBLISH":
+            raise AppException(40075, "今日头条账号未启用本机浏览器发布")
+        if effective_status(account) != "CONNECTED":
+            raise AppException(40075, "今日头条账号尚未扫码登录或登录已失效")
+        if not toutiao_public_publish_enabled(account):
+            raise AppException(40083, "今日头条真实发布开关未开启，请由管理员确认后启用")
+    if payload.platform == "WECHAT_OFFICIAL" and payload.publish_mode == "BROWSER_DRAFT":
+        if not settings.wechat_browser_publishing_enabled:
+            raise AppException(40084, "微信公众号本机扫码草稿功能已关闭")
+        if not account or account.publish_mode != "BROWSER_DRAFT":
+            raise AppException(40075, "微信公众号账号未启用本机扫码草稿模式")
+        if effective_status(account) != "CONNECTED":
+            raise AppException(40075, "微信公众号后台尚未扫码登录或登录已失效")
     if payload.publish_mode in {"REAL_API", "DRAFT_ONLY"}:
         allowed_account_modes = (
             {"REAL_API"}
-            if payload.platform == "WEIBO" and payload.publish_mode == "REAL_API"
+            if payload.platform in TEXT_REAL_API_PLATFORMS and payload.publish_mode == "REAL_API"
             else {"SUBMIT_PUBLISH"}
             if payload.publish_mode == "REAL_API"
             else {"DRAFT_ONLY", "SUBMIT_PUBLISH"}
         )
         if account.publish_mode not in allowed_account_modes:
             raise AppException(40075, "账号配置未启用所选真实发布方式")
-        if effective_status(account) != "CONNECTED":
+        status = effective_status(account)
+        x_can_refresh = bool(
+            payload.platform == "X"
+            and status == "TOKEN_EXPIRED"
+            and account.refresh_token_encrypted
+        )
+        if status != "CONNECTED" and not x_can_refresh:
             raise AppException(40075, "真实发布前必须先通过平台账号连接测试")
         required = (
             "DRAFT_CREATE"
             if payload.publish_mode == "DRAFT_ONLY"
-            else ("TEXT_PUBLISH" if payload.platform == "WEIBO" else "SUBMIT_PUBLISH")
+            else (
+                "TEXT_PUBLISH" if payload.platform in TEXT_REAL_API_PLATFORMS else "SUBMIT_PUBLISH"
+            )
         )
         if required not in set(account.capabilities_json or []):
             raise AppException(40076, f"平台账号缺少发布能力：{required}")
@@ -141,8 +257,20 @@ def create_schedule(
             and not decrypt_json(account.credentials_encrypted).get("allow_submit_publish")
         ):
             raise AppException(40076, "公众号配置未明确允许提交发布")
-    if payload.platform == "XIAOHONGSHU" and payload.publish_mode != "MANUAL_CONFIRM":
-        raise AppException(40077, "小红书当前仅支持真实人工发布确认")
+    xhs_modes = {"MANUAL_CONFIRM", "MCP_PUBLISH"}
+    if payload.platform == "XIAOHONGSHU" and payload.publish_mode not in xhs_modes:
+        raise AppException(40077, "小红书仅支持人工确认或本地 xiaohongshu-mcp 发布")
+    if (
+        payload.platform == "XIAOHONGSHU"
+        and payload.publish_mode == "MCP_PUBLISH"
+        and not settings.experimental_browser_publishing_enabled
+    ):
+        raise AppException(40078, "本地 MCP 发布默认关闭，请改用人工确认")
+    if payload.platform == "XIAOHONGSHU" and payload.publish_mode == "MCP_PUBLISH":
+        if not account or account.publish_mode != "MCP_PUBLISH":
+            raise AppException(40075, "小红书账号未启用本地 MCP 发布")
+        if effective_status(account) != "CONNECTED":
+            raise AppException(40075, "小红书本地 MCP 尚未登录或连接检测未通过")
     if payload.platform != "XIAOHONGSHU" and payload.publish_mode == "MANUAL_CONFIRM":
         raise AppException(40077, "人工交付目前仅用于小红书")
     scheduled_at = _local_naive(payload.scheduled_at)
@@ -161,9 +289,15 @@ def create_schedule(
         raise AppException(40902, "该平台同一时间已有排期，请调整时间", 409)
     values = payload.model_dump()
     values["scheduled_at"] = scheduled_at
+    publish_context: dict[str, str] = {}
+    if payload.platform == "WEIBO":
+        operation_ip = _public_client_ip(request)
+        if operation_ip:
+            publish_context["operationIp"] = operation_ip
     row = PublishSchedule(
         **values,
         status="PENDING",
+        publish_package_json=publish_context,
         idempotency_key=str(uuid.uuid4()),
         created_by=user.id,
     )
@@ -214,12 +348,11 @@ def update_schedule(
         account = db.scalar(
             select(PlatformAccount).where(
                 PlatformAccount.id == payload.account_id,
-                PlatformAccount.user_id == user.id,
                 PlatformAccount.platform == row.platform,
             )
         )
         if not account:
-            raise AppException(40303, "平台账号不存在、不匹配或不属于当前用户", 403)
+            raise AppException(40073, "共享平台账号不存在或与排期平台不匹配")
         row.account_id = account.id
     account = db.get(PlatformAccount, row.account_id) if row.account_id else None
     validate_schedule_account(row, account)

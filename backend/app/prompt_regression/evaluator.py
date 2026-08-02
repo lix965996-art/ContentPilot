@@ -8,9 +8,10 @@ from typing import Any
 from app.models.business import ContentArticle
 from app.prompts.profiles import build_generation_prompt
 from app.services.generation_service import _baseline_variant, edit_ratio
+from app.services.platform_content import build_x_post, x_weighted_length
 
 CASES_PATH = Path(__file__).with_name("cases.json")
-PLATFORMS = ("WEIBO", "XIAOHONGSHU", "WECHAT_OFFICIAL")
+PLATFORMS = ("WEIBO", "X", "XIAOHONGSHU", "WECHAT_OFFICIAL", "TOUTIAO")
 
 
 @dataclass(frozen=True)
@@ -69,11 +70,21 @@ def _is_compliant(platform: str, output: dict[str, Any]) -> bool:
         return False
     if platform == "WEIBO":
         return len(title) <= 60 and len(output.get("hashtags", [])) <= 5
+    if platform == "X":
+        post = build_x_post(title, content, output.get("hashtags", []))
+        return x_weighted_length(post) <= 280 and len(output.get("hashtags", [])) <= 4
     if platform == "XIAOHONGSHU":
-        return len(title) <= 30 and len(output.get("hashtags", [])) <= 10 and "\n" in content
+        return len(title) <= 20 and len(output.get("hashtags", [])) <= 10 and "\n" in content
+    if platform == "TOUTIAO":
+        return (
+            2 <= len(title) <= 30
+            and "\n" in content
+            and bool(output.get("summary"))
+            and "cover_prompt" in output
+        )
     return (
         len(title) <= 64
-        and "## " in content
+        and "\n" in content
         and bool(output.get("summary"))
         and "cover_prompt" in output
     )

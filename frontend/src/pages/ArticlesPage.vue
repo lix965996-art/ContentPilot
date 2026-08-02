@@ -214,7 +214,9 @@ onMounted(async () => {
         @change="load"
         ><el-option label="微博" value="WEIBO" /><el-option
           label="小红书"
-          value="XIAOHONGSHU" /><el-option label="微信公众号" value="WECHAT_OFFICIAL"
+          value="XIAOHONGSHU" /><el-option label="微信公众号" value="WECHAT_OFFICIAL" /><el-option
+          label="今日头条"
+          value="TOUTIAO" /><el-option label="X" value="X"
       /></el-select>
       <span class="ml-auto text-xs text-muted">{{ total }} 条内容</span>
     </FilterBar>

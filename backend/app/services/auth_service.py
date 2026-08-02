@@ -1,6 +1,6 @@
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -12,11 +12,12 @@ from app.core.security import (
     hash_password,
     verify_password,
 )
-from app.models.user import User
+from app.models.user import Role, User
 
 
 def authenticate_user(db: Session, username: str, password: str) -> User:
-    user = db.scalar(select(User).where(User.username == username))
+    normalized_username = username.strip().lower()
+    user = db.scalar(select(User).where(func.lower(User.username) == normalized_username))
     if user is None or not verify_password(password, user.password_hash):
         raise AppException(40103, "用户名或密码错误", 401)
     if user.status != "ACTIVE":
@@ -25,6 +26,36 @@ def authenticate_user(db: Session, username: str, password: str) -> User:
     user.last_login_at = datetime.now()
     db.commit()
     db.refresh(user)
+    return user
+
+
+def register_user(
+    db: Session,
+    *,
+    username: str,
+    password: str,
+    display_name: str,
+    email: str,
+) -> User:
+    normalized_username = username.strip().lower()
+    if db.scalar(select(User.id).where(func.lower(User.username) == normalized_username)):
+        raise AppException(40921, "用户名已被使用", 409)
+    if db.scalar(select(User.id).where(func.lower(User.email) == email.lower())):
+        raise AppException(40922, "邮箱已被使用", 409)
+    role = db.scalar(select(Role).where(Role.code == "OPERATOR"))
+    if role is None:
+        raise AppException(50302, "系统尚未初始化运营者角色，请联系管理员", 503)
+    user = User(
+        username=normalized_username,
+        password_hash=hash_password(password),
+        display_name=display_name.strip(),
+        email=email.lower(),
+        status="ACTIVE",
+        last_login_at=datetime.now(),
+        roles=[role],
+    )
+    db.add(user)
+    db.flush()
     return user
 
 

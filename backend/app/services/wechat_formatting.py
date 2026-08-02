@@ -189,6 +189,7 @@ def format_wechat_html(markdown: str, profile: dict | None = None) -> tuple[str,
 
         image = re.fullmatch(r"!\[([^\]]*)\]\(([^\s)]+)\)", stripped)
         heading = re.match(r"^(#{1,3})\s+(.+)$", stripped)
+        plain_heading = re.match(r"^(?:[一二三四五六七八九十]+、|\d+[、.])\s*(.+)$", stripped)
         ordered = re.match(r"^(\d+)[.)]\s+(.+)$", stripped)
         bullet = re.match(r"^[-*+]\s+(.+)$", stripped)
         if image:
@@ -209,6 +210,8 @@ def format_wechat_html(markdown: str, profile: dict | None = None) -> tuple[str,
             blocks.append(
                 f'<h{level + 1} style="{heading_style(level)}">{heading_content}</h{level + 1}>'
             )
+        elif plain_heading:
+            blocks.append(f'<h3 style="{heading_style(2)}">{inline(stripped)}</h3>')
         elif ordered or bullet:
             marker = f"{ordered.group(1)}." if ordered else "•"
             content = ordered.group(2) if ordered else bullet.group(1)

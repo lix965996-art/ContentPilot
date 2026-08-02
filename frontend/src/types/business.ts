@@ -1,4 +1,4 @@
-export type Platform = 'WEIBO' | 'XIAOHONGSHU' | 'WECHAT_OFFICIAL'
+export type Platform = 'WEIBO' | 'XIAOHONGSHU' | 'WECHAT_OFFICIAL' | 'TOUTIAO' | 'X'
 
 export interface Article {
   id: number
@@ -62,6 +62,17 @@ export interface WechatThemeProfile {
 
 export type GenerationPlatformStatus = 'PENDING' | 'RUNNING' | 'RETRYING' | 'SUCCESS' | 'FAILED'
 
+export interface DeepCreationCandidate {
+  title: string
+  content: string
+  hashtags: string[]
+  warnings?: string[]
+  summary?: string
+  cover_text?: string
+  cover_prompt?: string
+  author?: string
+}
+
 export interface GenerationPlatformProgress {
   status: GenerationPlatformStatus
   progress: number
@@ -84,7 +95,10 @@ export interface GenerationPlatformProgress {
   }
   review?: Record<string, unknown>
   candidateTitles?: string[]
+  candidates?: DeepCreationCandidate[]
   selectedCandidate?: number
+  userSelectedCandidate?: number
+  userSelectedVariantId?: number
 }
 
 export interface GenerationTask {
@@ -143,7 +157,8 @@ export interface TrendAnalysis {
 
 export interface MediaAsset {
   id: number
-  articleId: number
+  articleId?: number
+  articleTitle?: string
   variantId?: number
   imageUrl: string
   thumbnailUrl: string
@@ -151,6 +166,82 @@ export interface MediaAsset {
   usageType: 'COVER' | 'BODY'
   source: string
   selected: boolean
+  title?: string
+  collection?: string
+  tags: string[]
+  favorite: boolean
+  licenseType?: string
+  licenseNote?: string
+  photographerName?: string
+  photographerUrl?: string
+  createdAt: string
+}
+
+export interface ResearchItem {
+  id: number
+  title: string
+  summary?: string
+  url?: string
+  imageUrl?: string
+  source: string
+  sourceName?: string
+  sourceId?: string
+  topicCluster?: string
+  tags: string[]
+  notes?: string
+  status: 'INBOX' | 'RESEARCHING' | 'READY' | 'USED'
+  archived: boolean
+  createdAt: string
+  updatedAt: string
+}
+
+export interface ScheduleBacklogItem {
+  articleId: number
+  variantId: number
+  articleTitle: string
+  variantTitle: string
+  platform: Platform
+  reviewStatus: string
+  coverReady: boolean
+  accountReady: boolean
+  ready: boolean
+  blockers: string[]
+  updatedAt: string
+}
+
+export interface OperationStep {
+  key: string
+  name: string
+  status: string
+  stage?: string
+  message?: string
+  progress: number
+  durationMs: number
+  tokenUsage?: number
+  error?: string
+  attempt?: number
+  createdAt?: string
+}
+
+export interface OperationRun {
+  id: string
+  sourceId: string | number
+  type: 'GENERATION' | 'PUBLISH'
+  title: string
+  subtitle: string
+  status: string
+  progress: number
+  provider?: string
+  modelName?: string
+  tokenUsage?: number
+  durationMs: number
+  errorMessage?: string
+  createdAt: string
+  updatedAt: string
+  scheduledAt?: string
+  retryCount?: number
+  maxRetryCount?: number
+  steps: OperationStep[]
 }
 
 export interface Schedule {
@@ -175,7 +266,16 @@ export interface Schedule {
   logs?: Array<Record<string, unknown>>
 }
 
-export type PublishMode = 'REAL_API' | 'DRAFT_ONLY' | 'MANUAL_CONFIRM'
+export type PublishMode =
+  | 'REAL_API'
+  | 'DRAFT_ONLY'
+  | 'SUBMIT_PUBLISH'
+  | 'MANUAL_CONFIRM'
+  | 'CDP_PUBLISH'
+  | 'MCP_PUBLISH'
+  | 'BROWSER_PUBLISH'
+  | 'BROWSER_DRAFT'
+  | 'WECHATSYNC_CLI'
 
 export type PlatformAccountStatus =
   | 'NOT_CONFIGURED'
@@ -185,18 +285,24 @@ export type PlatformAccountStatus =
   | 'INVALID'
   | 'DISABLED'
   | 'MANUAL_ONLY'
+  | 'READY'
+  | 'LOGIN_REQUIRED'
 
 export interface PlatformAccount {
   id: number | null
   platform: Platform
   platformName: string
   accountName: string
-  authType: 'NONE' | 'OAUTH2' | 'APP_SECRET'
-  publishMode: PublishMode | 'SUBMIT_PUBLISH'
+  authType: 'NONE' | 'OAUTH2' | 'APP_SECRET' | 'QR_LOGIN'
+  publishMode: PublishMode
   status: PlatformAccountStatus
   capabilities: string[]
+  publishHint: string
   lastTestAt?: string
   lastError?: string
+  loginUsername?: string
+  lastLoginAt?: string
+  sessionDurationSeconds?: number
   appId: string
   clientId: string
   secretConfigured: boolean
@@ -204,19 +310,31 @@ export interface PlatformAccount {
   refreshTokenConfigured: boolean
   tokenHint: string
   tokenExpiresAt?: string
+  localPublishingEnabled: boolean
+  publicPublishEnabled: boolean
+  availablePublishModes: PublishMode[]
   config: {
     redirect_uri?: string
+    operation_ip?: string
     default_author?: string
     default_cover_media_id?: string
     default_cover_url?: string
     allow_submit_publish?: boolean
+    allow_public_publish?: boolean
   }
   connectionGuide: {
-    mode: 'OFFICIAL_OAUTH' | 'APP_SECRET' | 'MANUAL_ONLY'
+    mode:
+      | 'OFFICIAL_OAUTH'
+      | 'OFFICIAL_OAUTH2_PKCE'
+      | 'APP_SECRET'
+      | 'MANUAL_ONLY'
+      | 'MANUAL_DELIVERY'
+      | 'LOCAL_BROWSER_QR'
     consoleUrl: string
     callbackPath?: string
     steps: string[]
   }
+  shared?: boolean
 }
 
 export interface PublishPackage {
@@ -239,6 +357,8 @@ export interface LlmConfig {
   inputPricePerMillion: number
   outputPricePerMillion: number
   currency: 'CNY' | 'USD'
+  monthlyBudget: number
+  budgetWarningPercent: number
 }
 
 export interface LlmConnectionResult {
@@ -251,24 +371,61 @@ export interface LlmConnectionResult {
 export interface LlmUsage {
   days: number
   generations: number
+  pricedGenerations: number
+  unpricedGenerations: number
   promptTokens: number
   completionTokens: number
   totalTokens: number
   estimatedCost: number
   averageTokens: number
   currency: 'CNY' | 'USD'
-  byModel: Array<{ model: string; generations: number; tokens: number; cost: number }>
-  daily: Array<{ date: string; tokens: number; cost: number }>
+  priceConfigured: boolean
+  inputPricePerMillion: number
+  outputPricePerMillion: number
+  monthlyBudget: number
+  monthlyCost: number
+  budgetWarningPercent: number
+  budgetUsedPercent: number
+  budgetAlert: boolean
+  byModel: Array<{
+    model: string
+    generations: number
+    tokens: number
+    cost: number
+    unpricedGenerations: number
+  }>
+  daily: Array<{
+    date: string
+    tokens: number
+    cost: number
+    unpricedGenerations: number
+  }>
+  recent: Array<{
+    id: number
+    articleTitle: string
+    platform: Platform
+    model: string
+    promptTokens: number
+    completionTokens: number
+    totalTokens: number
+    cost: number | null
+    pricingStatus: 'CURRENT_PRICE' | 'SAVED_ESTIMATE' | 'UNPRICED' | 'NO_USAGE'
+    createdAt: string
+  }>
 }
 
 export const platformNames: Record<Platform, string> = {
   WEIBO: '微博',
   XIAOHONGSHU: '小红书',
   WECHAT_OFFICIAL: '微信公众号',
+  TOUTIAO: '今日头条',
+  X: 'X',
 }
 
 export const platformColors: Record<Platform, string> = {
   WEIBO: '#f59e0b',
   XIAOHONGSHU: '#ef4444',
   WECHAT_OFFICIAL: '#16a34a',
+  TOUTIAO: '#f04438',
+  X: '#111827',
 }

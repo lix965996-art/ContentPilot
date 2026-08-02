@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { onMounted, ref } from 'vue'
+import { computed, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import {
   Clipboard,
@@ -18,12 +18,30 @@ import { getApiErrorMessage } from '@/api/client'
 import type { PublishPackage, Schedule } from '@/types/business'
 import { platformNames } from '@/types/business'
 import type { Platform } from '@/types/business'
+import { presentOperationError } from '@/utils/operation-error'
+import { useAuthStore } from '@/stores/auth'
+
+const auth = useAuthStore()
+const isAdmin = computed(() => auth.hasRole(['ADMIN']))
 const rows = ref<Schedule[]>([])
 const loading = ref(false)
 const detail = ref<Schedule>()
 const drawer = ref(false)
 const status = ref('')
 const publishPackage = ref<PublishPackage>()
+const publishModeNames: Record<string, string> = {
+  REAL_API: '官方 API 发布',
+  DRAFT_ONLY: '同步到草稿箱',
+  SUBMIT_PUBLISH: '提交平台发布',
+  MANUAL_CONFIRM: '人工发布确认',
+  MCP_PUBLISH: '本机自动发布',
+  BROWSER_DRAFT: '本机浏览器保存草稿',
+}
+function publishModeLabel(platform: string, mode: string): string {
+  if (platform === 'WEIBO' && mode === 'REAL_API') return '微博官方 API'
+  if (platform === 'X' && mode === 'REAL_API') return 'X 官方 API（真实发布）'
+  return publishModeNames[mode] || mode
+}
 const statusTabs = [
   ['全部', ''],
   ['待发布', 'PENDING'],
@@ -50,8 +68,30 @@ async function open(row: Schedule) {
 }
 async function action(row: Schedule, name: string) {
   try {
-    if (name === 'publish-now')
-      await ElMessageBox.confirm('将立即执行当前发布适配器，是否继续？', '立即发布')
+    if (name === 'publish-now') {
+      await ElMessageBox.confirm(
+        `将使用“${row.accountName || '未命名账号'}”立即执行${publishModeLabel(row.platform, row.publishMode)}。${
+          row.platform === 'XIAOHONGSHU' && row.publishMode === 'MCP_PUBLISH'
+            ? '当前发布范围为“仅自己可见”。'
+            : row.platform === 'X'
+              ? '这会通过 X 官方 API 发送真实帖子，内容可能立即公开可见。'
+              : ''
+        }是否继续？`,
+        '确认立即发布',
+      )
+      if (row.platform === 'X') {
+        await ElMessageBox.prompt(
+          `请再次确认发布账号“${row.accountName || '未命名账号'}”。输入“发布到X”后才能继续。`,
+          '真实发布二次确认',
+          {
+            inputPlaceholder: '发布到X',
+            inputValidator: (value) => value === '发布到X' || '请输入“发布到X”',
+            confirmButtonText: '确认真实发布',
+            type: 'warning',
+          },
+        )
+      }
+    }
     let data: Record<string, unknown> = {}
     if (name === 'manual-confirm') {
       const answer = await ElMessageBox.prompt(
@@ -99,6 +139,42 @@ function selectStatus(value: string) {
   status.value = value
   void load()
 }
+function logDisplayMessage(log: Record<string, unknown>) {
+  const raw = String(log.responseSummary || log.errorMessage || '')
+  if (!raw) return '该步骤没有补充说明。'
+  const looksTechnical =
+    Boolean(log.errorMessage) ||
+    /\b(?:rid|request.?id|external_id|default_cover_media_id)\b|api unauthorized|\[\d{4,}\]|[{}]/i.test(
+      raw,
+    )
+  if (!looksTechnical) return raw
+  const issue = presentOperationError(raw, {
+    type: 'PUBLISH',
+    platform: detail.value?.platform,
+  })
+  return issue ? `${issue.title}：${issue.description}` : '该步骤未完成，请检查发布设置后重试。'
+}
+function logStepLabel(value: unknown) {
+  const labels: Record<string, string> = {
+    PREPARE: '准备发布内容',
+    UPLOAD_MEDIA: '上传素材',
+    CREATE_DRAFT: '创建平台草稿',
+    SUBMIT_PUBLISH: '提交平台发布',
+    PUBLISH: '执行发布',
+    MANUAL_CONFIRM: '人工确认',
+  }
+  return labels[String(value)] || '执行发布流程'
+}
+function logStatusLabel(value: unknown) {
+  const labels: Record<string, string> = {
+    PENDING: '等待执行',
+    RUNNING: '执行中',
+    SUCCESS: '已完成',
+    FAILED: '未完成',
+    RETRYING: '重新尝试',
+  }
+  return labels[String(value)] || '状态待确认'
+}
 </script>
 <template>
   <div>
@@ -136,9 +212,11 @@ function selectStatus(value: string) {
               minute: '2-digit',
             })
           }}</template></el-table-column
-        ><el-table-column label="方式" prop="publishMode" width="100" /><el-table-column
-          label="状态"
-          width="155"
+        ><el-table-column label="方式" width="145"
+          ><template #default="{ row }">{{
+            publishModeLabel(row.platform, row.publishMode)
+          }}</template></el-table-column
+        ><el-table-column label="状态" width="155"
           ><template #default="{ row }"
             ><StatusBadge :status="row.status" /></template></el-table-column
         ><el-table-column label="重试" width="80"
@@ -189,7 +267,11 @@ function selectStatus(value: string) {
             </div>
             <div>
               <dt>方式</dt>
-              <dd>{{ detail.publishMode }}</dd>
+              <dd>{{ publishModeLabel(detail.platform, detail.publishMode) }}</dd>
+            </div>
+            <div>
+              <dt>发布账号</dt>
+              <dd>{{ detail.accountName || '—' }}</dd>
             </div>
             <div>
               <dt>计划时间</dt>
@@ -201,9 +283,15 @@ function selectStatus(value: string) {
             </div>
             <div>
               <dt>结果类型</dt>
-              <dd>{{ detail.resultMode || '—' }}</dd>
+              <dd>
+                {{
+                  detail.resultMode
+                    ? publishModeLabel(detail.platform, detail.resultMode)
+                    : '尚无发布结果'
+                }}
+              </dd>
             </div>
-            <div>
+            <div v-if="isAdmin">
               <dt>平台任务 ID</dt>
               <dd class="break-all">{{ detail.externalId || '—' }}</dd>
             </div>
@@ -235,9 +323,11 @@ function selectStatus(value: string) {
               <div v-for="(log, index) in detail.logs" :key="index">
                 <i />
                 <div>
-                  <p class="font-medium">{{ log.step }} · {{ log.status }}</p>
+                  <p class="font-medium">
+                    {{ logStepLabel(log.step) }} · {{ logStatusLabel(log.status) }}
+                  </p>
                   <p class="mt-1 text-xs text-muted">
-                    {{ log.responseSummary || log.errorMessage }}
+                    {{ logDisplayMessage(log) }}
                   </p>
                 </div>
               </div>

@@ -36,6 +36,79 @@ test('primary navigation actions respond for an operator', async ({ page }) => {
   await expect(page).toHaveURL(/\/media\?article=/)
 })
 
+test('studio edits are automatically saved and survive reload', async ({ page }) => {
+  await login(page, 'operator', 'Operator@123456')
+  await page.goto('/studio')
+
+  const editor = page.locator('.editor-content')
+  await expect(editor).toBeVisible()
+  const original = await editor.inputValue()
+  const marker = `自动保存验收-${Date.now()}`
+  const savedRequest = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'PUT' &&
+      /\/api\/variants\/\d+$/.test(response.url()) &&
+      response.ok(),
+  )
+  await editor.fill(`${original}\n\n${marker}`)
+  await savedRequest
+  await expect(page.getByText('已自动保存', { exact: true })).toBeVisible()
+
+  await page.reload()
+  await expect(editor).toHaveValue(new RegExp(marker))
+})
+
+test('a selected preview image can be removed without deleting the asset', async ({ page }) => {
+  await login(page, 'operator', 'Operator@123456')
+  const fixture = await page.evaluate(async () => {
+    const token =
+      localStorage.getItem('contentpilot_access_token') ||
+      sessionStorage.getItem('contentpilot_access_token')
+    const headers = {
+      Authorization: `Bearer ${token}`,
+      'Content-Type': 'application/json',
+    }
+    const articleResponse = await fetch('/api/articles?page_size=1', { headers })
+    const articleBody = await articleResponse.json()
+    const articleId = articleBody.data.items[0].id as number
+    const altText = `可移除配图-${Date.now()}`
+    const selectedResponse = await fetch('/api/media/select', {
+      method: 'POST',
+      headers,
+      body: JSON.stringify({
+        article_id: articleId,
+        source: 'E2E',
+        source_id: altText,
+        image_url:
+          'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="200" height="120"%3E%3Crect width="100%25" height="100%25" fill="%236b8afd"/%3E%3C/svg%3E',
+        thumbnail_url:
+          'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="200" height="120"%3E%3Crect width="100%25" height="100%25" fill="%236b8afd"/%3E%3C/svg%3E',
+        alt_text: altText,
+        usage_type: 'COVER',
+      }),
+    })
+    const selectedBody = await selectedResponse.json()
+    return { articleId, altText, assetId: selectedBody.data.id as number }
+  })
+
+  await page.goto(`/studio?article=${fixture.articleId}`)
+  const image = page.getByAltText(fixture.altText)
+  await expect(image).toBeVisible()
+  const detached = page.waitForResponse(
+    (response) =>
+      response.request().method() === 'POST' &&
+      response.url().endsWith(`/api/media/${fixture.assetId}/detach`) &&
+      response.ok(),
+  )
+  await image
+    .locator('..')
+    .getByRole('button', { name: `移除图片：${fixture.altText}` })
+    .click()
+  await detached
+  await expect(image).toHaveCount(0)
+  await expect(page.getByText('图片已移除，可以重新选择')).toBeVisible()
+})
+
 test('viewer sees read-only actions instead of operations that return 403', async ({ page }) => {
   await login(page, 'viewer', 'Viewer@123456')
 

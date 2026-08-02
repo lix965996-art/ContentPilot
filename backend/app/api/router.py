@@ -10,8 +10,10 @@ from app.api.endpoints import (
     generation,
     health,
     media,
+    operations,
     platform_accounts,
     recommendations,
+    research,
     schedules,
     trends,
 )
@@ -24,9 +26,11 @@ api_router.include_router(articles.router)
 api_router.include_router(generation.router)
 api_router.include_router(trends.router)
 api_router.include_router(media.router)
+api_router.include_router(research.router)
 api_router.include_router(platform_accounts.router)
 api_router.include_router(recommendations.router)
 api_router.include_router(schedules.router)
 api_router.include_router(analytics.router)
 api_router.include_router(experiments.router)
+api_router.include_router(operations.router)
 api_router.include_router(admin.router)

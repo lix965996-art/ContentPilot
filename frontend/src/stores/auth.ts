@@ -3,7 +3,7 @@ import { defineStore } from 'pinia'
 
 import * as authApi from '@/api/auth'
 import { clearTokens, persistTokens, readAccessToken } from '@/api/client'
-import type { LoginPayload, RoleCode, User } from '@/types/user'
+import type { LoginPayload, RegisterPayload, RoleCode, User } from '@/types/user'
 
 export const useAuthStore = defineStore('auth', () => {
   const user = ref<User | null>(null)
@@ -22,6 +22,18 @@ export const useAuthStore = defineStore('auth', () => {
     loading.value = true
     try {
       const data = await authApi.login(payload)
+      persistTokens(data.access_token, data.refresh_token, remember)
+      user.value = data.user
+    } finally {
+      loading.value = false
+      initialized.value = true
+    }
+  }
+
+  async function signUp(payload: RegisterPayload, remember = true): Promise<void> {
+    loading.value = true
+    try {
+      const data = await authApi.register(payload)
       persistTokens(data.access_token, data.refresh_token, remember)
       user.value = data.user
     } finally {
@@ -71,6 +83,7 @@ export const useAuthStore = defineStore('auth', () => {
     primaryRoleName,
     hasRole,
     signIn,
+    signUp,
     bootstrap,
     signOut,
     clearSession,

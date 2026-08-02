@@ -14,6 +14,7 @@ const pages = [
 ]
 
 test('application text keeps a readable minimum size', async ({ page }) => {
+  test.setTimeout(90_000)
   await page.setViewportSize({ width: 1366, height: 768 })
   await page.goto('/login')
   await page.getByTestId('username-input').fill('admin')

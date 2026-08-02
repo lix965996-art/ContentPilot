@@ -2,11 +2,13 @@ from dataclasses import dataclass
 
 from app.models.business import ContentArticle
 
-PROMPT_VERSION = "3.0.0"
+PROMPT_VERSION = "3.5.0"
 
 SYSTEM_PROMPT = (
     "你是资深中文内容编辑。只依据用户提供的原文改写，"
     "不补造数字、人物、经历、因果或结论。\n"
+    "title、content、summary、cover_text 等用户可见文本中严禁出现井号字符；"
+    "井号只允许存在于 hashtags 数组。\n"
     "必须输出单个 JSON 对象，不得输出代码块或解释。"
     "信息不足时将风险写入 warnings，不得猜测。"
 )
@@ -32,7 +34,9 @@ PLATFORM_PROFILES = {
         name="微博",
         objective="用高信息密度的短内容快速传递核心观点，并鼓励理性讨论。",
         format_rules=(
-            "标题最多 60 字；正文建议 120～600 字，首句直接给出核心信息",
+            "title 是发布正文的首句钩子而非独立大标题；为兼容带图发布，"
+            "title、content 和 hashtags 合并后的可见文本必须不超过 140 字",
+            "即使用户选择详细长度，也要在 140 字内优先保留核心事实和必要限定条件",
             "使用短段落，不编造热门话题、数据或亲身经历",
             "标签放入 hashtags 数组，最多 5 个；关闭标签时必须返回空数组",
             "Emoji 应克制，关闭 Emoji 时正文与标题不得出现 Emoji",
@@ -40,11 +44,26 @@ PLATFORM_PROFILES = {
         ),
         output_schema=('{"title":"...","content":"...","hashtags":["#话题#"],"warnings":["..."]}'),
     ),
+    "X": PlatformPromptProfile(
+        name="X",
+        objective="用简洁、自然、适合公开讨论的短帖传递核心事实和观点。",
+        format_rules=(
+            "title 是帖子的首句钩子，不是独立文章标题；title、content 和 hashtags "
+            "合并后必须符合 X 的 280 加权字符限制",
+            "中文、日文、韩文和大多数 Emoji 通常按 2 个加权字符计算；"
+            "URL 按平台转换后的固定长度计算，因此必须保守控制篇幅",
+            "优先使用短段落和清楚的观点，不编造数据、来源、经历或热门趋势",
+            "hashtags 放入 hashtags 数组，最多 4 个；关闭标签时必须返回空数组",
+            "正文使用纯文本，不输出 Markdown 标题、加粗标记或列表符号",
+            "关闭 Emoji 时 title 和 content 不得出现 Emoji",
+        ),
+        output_schema=('{"title":"...","content":"...","hashtags":["#Topic"],"warnings":["..."]}'),
+    ),
     "XIAOHONGSHU": PlatformPromptProfile(
         name="小红书",
         objective="以自然、有层次、便于收藏的笔记表达原文信息，不伪造体验。",
         format_rules=(
-            "标题最多 30 字，正文使用短段落或清单，避免营销夸张和绝对化承诺",
+            "标题最多 20 字，正文最多 1000 字，使用短段落或清单，避免营销夸张和绝对化承诺",
             "不得把原文第三方信息改写成作者亲身体验",
             "标签放入 hashtags 数组，最多 10 个；关闭标签时必须返回空数组",
             "cover_text 是可选封面短句，最多 30 字",
@@ -61,15 +80,33 @@ PLATFORM_PROFILES = {
         objective="形成可直接进入公众号编辑器的完整长文，结构清晰且忠于原文。",
         format_rules=(
             "标题最多 64 字，摘要最多 120 字",
-            "content 必须为 Markdown，包含导语、二级标题、正文段落和结语",
+            "content 必须为可排版的结构化文本，包含导语、小标题、正文段落和结语；"
+            "系统会转换为公众号富文本 HTML",
             "不要输出不安全 HTML；不要编造引用、数据和案例",
             "hashtags 仅作为后台关键词；关闭标签时必须返回空数组",
             "cover_prompt 用于配图检索，不得包含品牌侵权或虚构人物",
-            "可以使用 Markdown 二级标题，但不要使用 **加粗** 或以 * 开头的列表",
+            "小标题使用“一、标题”“二、标题”等中文序号，严禁使用井号或任何 Markdown 标题标记",
         ),
         output_schema=(
-            '{"title":"...","summary":"...","content":"## 小标题\\n\\n正文",'
+            '{"title":"...","summary":"...","content":"一、小标题\\n\\n正文",'
             '"author":"","hashtags":[],"cover_prompt":"...","warnings":["..."]}'
+        ),
+    ),
+    "TOUTIAO": PlatformPromptProfile(
+        name="今日头条",
+        objective="形成适合头条号信息流阅读的完整文章，以明确标题、事实密度和清晰结构吸引阅读。",
+        format_rules=(
+            "标题为 2～30 个字符，准确具体，不使用标题党、虚假悬念或未经原文支持的结论",
+            "正文使用短段落和清晰小标题，适合移动端阅读；重要事实、限定条件和来源语境不得遗漏",
+            "正文使用纯文本，不输出井号标题、星号加粗、代码块或 HTML；系统会转换为安全富文本",
+            "summary 为 40～120 字摘要，不得引入正文之外的新事实",
+            "hashtags 仅作为后台关键词，最多 8 个；关闭标签时必须返回空数组",
+            "cover_prompt 用于封面配图检索或生成，不得包含侵权品牌、虚构人物或误导性画面",
+            "关闭 Emoji 时标题、摘要和正文不得出现 Emoji；即使允许，也只可克制使用",
+        ),
+        output_schema=(
+            '{"title":"...","summary":"...","content":"一、标题\\n\\n正文",'
+            '"hashtags":["#关键词"],"cover_prompt":"...","warnings":["..."]}'
         ),
     ),
 }
@@ -107,6 +144,8 @@ def build_generation_prompt(
 - target_audience（目标受众）：{audience}
 - emoji（是否使用 Emoji）：{emoji_instruction}
 - hashtags（是否生成标签）：{hashtag_instruction}
+- visible_text（可见文本）：title、content、summary、cover_text 中严禁出现井号字符；
+  井号仅允许存在于 hashtags 数组
 
 原文标题：{article.title}
 原文摘要：{article.summary or "未提供"}
@@ -139,6 +178,7 @@ def build_deep_draft_prompt(
     return f"""{build_generation_prompt(article, platform, options)}
 
 本次为深度创作模式，创作目标：{options.get("creative_goal", "知识分享")}。
+用户额外创作要求：{options.get("creative_requirements") or "未提供"}。
 已经核验的原文创作简报：
 {brief}
 
@@ -151,4 +191,5 @@ structure 给出清晰结构；cta 符合平台习惯。然后生成恰好 2 个
 DEEP_REVIEW_PROMPT = """你是内容主编和事实审核员。对照原文创作简报，审查两个候选稿。
 选择更好的候选，指出问题并实际修正为 final；不能只点评。分别给出事实一致性、信息完整度、
 平台适配度、可读性、格式合规性、非模板化程度 0～100 分。若候选包含简报未支持的事实，
-必须删除或降级为不确定表述。必须只返回符合指定结构的 JSON。"""
+必须删除或降级为不确定表述。final 的标题、正文、摘要和封面短句中严禁出现井号字符；
+井号只允许存在于 hashtags 数组。必须只返回符合指定结构的 JSON。"""

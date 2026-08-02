@@ -1,14 +1,14 @@
 <script setup lang="ts">
-import { computed, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute } from 'vue-router'
 import FullCalendar from '@fullcalendar/vue3'
 import dayGridPlugin from '@fullcalendar/daygrid'
 import timeGridPlugin from '@fullcalendar/timegrid'
 import listPlugin from '@fullcalendar/list'
-import interactionPlugin from '@fullcalendar/interaction'
+import interactionPlugin, { Draggable } from '@fullcalendar/interaction'
 import zhCnLocale from '@fullcalendar/core/locales/zh-cn'
 import { ElMessage } from 'element-plus'
-import { Plus } from 'lucide-vue-next'
+import { CircleCheck, GripVertical, Plus, TriangleAlert } from 'lucide-vue-next'
 import PageHeader from '@/components/PageHeader.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import DetailDrawer from '@/components/DetailDrawer.vue'
@@ -20,16 +20,21 @@ import type {
   PlatformAccount,
   PublishMode,
   Schedule,
+  ScheduleBacklogItem,
   Variant,
 } from '@/types/business'
 import { platformColors, platformNames } from '@/types/business'
 import { useAuthStore } from '@/stores/auth'
 
 const schedules = ref<Schedule[]>([])
+const backlog = ref<ScheduleBacklogItem[]>([])
 const route = useRoute()
 const auth = useAuthStore()
 const canOperate = computed(() => auth.hasRole(['ADMIN', 'OPERATOR']))
 const platformFilter = ref<Platform | ''>('')
+const backlogQuery = ref('')
+const backlogElement = ref<HTMLElement>()
+let backlogDraggable: Draggable | undefined
 const drawer = ref(false)
 const editing = ref<Schedule>()
 const dialog = ref(false)
@@ -50,13 +55,60 @@ const availableAccounts = computed(() =>
 const selectedAccount = computed(() =>
   availableAccounts.value.find((item) => item.id === form.value.account_id),
 )
+function canUseXiaohongshuMcp(account?: PlatformAccount): boolean {
+  return Boolean(
+    account?.localPublishingEnabled &&
+    account.availablePublishModes.includes('MCP_PUBLISH') &&
+    account.publishMode === 'MCP_PUBLISH' &&
+    account.status === 'CONNECTED',
+  )
+}
+function canUseXApi(account?: PlatformAccount): boolean {
+  return Boolean(
+    account?.status === 'CONNECTED' &&
+    account.availablePublishModes.includes('REAL_API') &&
+    account.publicPublishEnabled,
+  )
+}
+function defaultPublishMode(platform: Platform, account?: PlatformAccount): PublishMode {
+  if (platform === 'TOUTIAO') return 'BROWSER_PUBLISH'
+  if (platform === 'XIAOHONGSHU') {
+    return canUseXiaohongshuMcp(account) ? 'MCP_PUBLISH' : 'MANUAL_CONFIRM'
+  }
+  if (platform === 'X') return 'REAL_API'
+  if (platform === 'WECHAT_OFFICIAL') {
+    return account?.publishMode === 'BROWSER_DRAFT' ? 'BROWSER_DRAFT' : 'DRAFT_ONLY'
+  }
+  return 'REAL_API'
+}
 const publishModes = computed<Array<{ value: PublishMode; label: string; disabled?: boolean }>>(
   () => {
     const account = selectedAccount.value
     if (form.value.platform === 'XIAOHONGSHU')
-      return [{ value: 'MANUAL_CONFIRM', label: '人工发布后确认' }]
+      return [
+        { value: 'MANUAL_CONFIRM', label: '人工发布后确认（默认）' },
+        ...(account?.localPublishingEnabled
+          ? [
+              {
+                value: 'MCP_PUBLISH' as PublishMode,
+                label: '本机自动发布（仅自己可见）',
+                disabled: !canUseXiaohongshuMcp(account),
+              },
+            ]
+          : []),
+      ]
     if (form.value.platform === 'WECHAT_OFFICIAL')
       return [
+        ...(account?.availablePublishModes.includes('BROWSER_DRAFT')
+          ? [
+              {
+                value: 'BROWSER_DRAFT' as PublishMode,
+                label: '本机扫码保存到草稿箱',
+                disabled:
+                  account?.status !== 'CONNECTED' || account.publishMode !== 'BROWSER_DRAFT',
+              },
+            ]
+          : []),
         { value: 'DRAFT_ONLY', label: '自动进入草稿箱', disabled: account?.status !== 'CONNECTED' },
         {
           value: 'REAL_API',
@@ -64,14 +116,72 @@ const publishModes = computed<Array<{ value: PublishMode; label: string; disable
           disabled: account?.status !== 'CONNECTED' || account.publishMode !== 'SUBMIT_PUBLISH',
         },
       ]
+    if (form.value.platform === 'TOUTIAO')
+      return [
+        {
+          value: 'BROWSER_PUBLISH',
+          label: '本机浏览器发布（真实文章）',
+          disabled:
+            account?.status !== 'CONNECTED' ||
+            account.publishMode !== 'BROWSER_PUBLISH' ||
+            !account.publicPublishEnabled,
+        },
+      ]
+    if (form.value.platform === 'X')
+      return [
+        {
+          value: 'REAL_API',
+          label: 'X 官方 API（真实发布）',
+          disabled: !canUseXApi(account),
+        },
+      ]
     return [{ value: 'REAL_API', label: '微博官方 API', disabled: account?.status !== 'CONNECTED' }]
   },
 )
+const publishModeNames: Record<PublishMode, string> = {
+  REAL_API: '官方 API 发布',
+  DRAFT_ONLY: '同步到草稿箱',
+  SUBMIT_PUBLISH: '提交平台发布',
+  MANUAL_CONFIRM: '人工发布确认',
+  CDP_PUBLISH: '浏览器自动发布',
+  MCP_PUBLISH: '本机自动发布',
+  BROWSER_PUBLISH: '本机浏览器发布',
+  BROWSER_DRAFT: '本机浏览器保存草稿',
+  WECHATSYNC_CLI: 'Wechatsync CLI',
+}
+const accountStatusNames: Record<string, string> = {
+  NOT_CONFIGURED: '未配置',
+  CONNECTING: '待授权验证',
+  CONNECTED: '已连接',
+  TOKEN_EXPIRED: '授权已过期',
+  INVALID: '连接无效',
+  DISABLED: '已停用',
+  MANUAL_ONLY: '仅人工交付',
+  READY: '已就绪',
+  LOGIN_REQUIRED: '需要登录',
+}
+function publishModeLabel(platform: Platform, mode: PublishMode): string {
+  if (platform === 'WEIBO' && mode === 'REAL_API') return '微博官方 API'
+  if (platform === 'X' && mode === 'REAL_API') return 'X 官方 API（真实发布）'
+  return publishModeNames[mode] || mode
+}
 const platformGlyphs: Record<Platform, string> = {
   WEIBO: '微',
   XIAOHONGSHU: '红',
   WECHAT_OFFICIAL: '公',
+  X: 'X',
+  TOUTIAO: '头',
 }
+const filteredBacklog = computed(() =>
+  backlog.value.filter(
+    (item) =>
+      (!platformFilter.value || item.platform === platformFilter.value) &&
+      (!backlogQuery.value ||
+        `${item.articleTitle}${item.variantTitle}`
+          .toLowerCase()
+          .includes(backlogQuery.value.toLowerCase())),
+  ),
+)
 const events = computed(() =>
   schedules.value
     .filter((x) => !platformFilter.value || x.platform === platformFilter.value)
@@ -96,6 +206,13 @@ const options = computed(() => ({
   },
   height: 'auto',
   editable: canOperate.value,
+  droppable: canOperate.value,
+  eventReceive: (info: any) => {
+    info.event.remove()
+    const variantId = Number(info.draggedEl?.dataset.variantId)
+    const item = backlog.value.find((row) => row.variantId === variantId)
+    if (item) void openBacklog(item, info.event.start)
+  },
   eventDrop: async (info: any) => {
     try {
       await workflowApi.updateSchedule(Number(info.event.id), {
@@ -114,7 +231,25 @@ const options = computed(() => ({
   },
 }))
 async function load() {
-  schedules.value = await workflowApi.schedules()
+  const [scheduleRows, backlogRows] = await Promise.all([
+    workflowApi.schedules(),
+    workflowApi.scheduleBacklog(),
+  ])
+  schedules.value = scheduleRows
+  backlog.value = backlogRows
+  await nextTick()
+  setupBacklogDrag()
+}
+function setupBacklogDrag() {
+  backlogDraggable?.destroy()
+  if (!backlogElement.value || !canOperate.value) return
+  backlogDraggable = new Draggable(backlogElement.value, {
+    itemSelector: '.backlog-card',
+    eventData: (element) => ({
+      title: element.dataset.title || '待排期内容',
+      duration: '00:30',
+    }),
+  })
 }
 function formatLocalDateTime(value: Date): string {
   const offset = value.getTimezoneOffset() * 60_000
@@ -162,12 +297,7 @@ function chooseVariant(id: number) {
 function choosePlatform() {
   const account = accounts.value.find((item) => item.platform === form.value.platform && item.id)
   form.value.account_id = account?.id || undefined
-  form.value.publish_mode =
-    form.value.platform === 'XIAOHONGSHU'
-      ? 'MANUAL_CONFIRM'
-      : form.value.platform === 'WECHAT_OFFICIAL'
-        ? 'DRAFT_ONLY'
-        : 'REAL_API'
+  form.value.publish_mode = defaultPublishMode(form.value.platform, account)
 }
 function openCreate() {
   form.value = {
@@ -177,10 +307,33 @@ function openCreate() {
   }
   dialog.value = true
 }
+async function openBacklog(item: ScheduleBacklogItem, date?: Date) {
+  form.value = {
+    article_id: item.articleId,
+    variant_id: item.variantId,
+    platform: item.platform,
+    scheduled_at: formatLocalDateTime(
+      date && date.getTime() > Date.now()
+        ? new Date(date.getTime() + (date.getHours() === 0 ? 10 * 3600000 : 0))
+        : new Date(Date.now() + 3600000),
+    ).slice(0, 16),
+    publish_mode: defaultPublishMode(item.platform),
+  }
+  variants.value = await workflowApi.variants(item.articleId)
+  choosePlatform()
+  dialog.value = true
+}
 async function create() {
   try {
-    if (!form.value.account_id) {
+    if (
+      (form.value.platform !== 'XIAOHONGSHU' || form.value.publish_mode === 'MCP_PUBLISH') &&
+      !form.value.account_id
+    ) {
       ElMessage.warning('请先在“平台账号”页面配置并选择账号')
+      return
+    }
+    if (form.value.platform === 'X' && !canUseXApi(selectedAccount.value)) {
+      ElMessage.warning('X 账号尚未完成授权，或管理员尚未开启真实发布')
       return
     }
     await workflowApi.createSchedule({
@@ -195,6 +348,7 @@ async function create() {
   }
 }
 onMounted(init)
+onBeforeUnmount(() => backlogDraggable?.destroy())
 </script>
 <template>
   <div>
@@ -204,18 +358,51 @@ onMounted(init)
       ></PageHeader
     >
     <section class="calendar-workspace">
-      <div class="calendar-filter">
-        <span>平台</span
-        ><button :class="{ active: !platformFilter }" @click="platformFilter = ''">全部</button
-        ><button
-          v-for="(name, key) in platformNames"
-          :key="key"
-          :class="{ active: platformFilter === key }"
-          @click="platformFilter = key"
-        >
-          <i :style="{ background: platformColors[key] }" />{{ name }}
-        </button>
-      </div>
+      <aside class="calendar-side">
+        <div class="calendar-filter">
+          <span>平台视图</span
+          ><button :class="{ active: !platformFilter }" @click="platformFilter = ''">全部</button
+          ><button
+            v-for="(name, key) in platformNames"
+            :key="key"
+            :class="{ active: platformFilter === key }"
+            @click="platformFilter = key"
+          >
+            <i :style="{ background: platformColors[key] }" />{{ name }}
+          </button>
+        </div>
+        <div class="backlog-head">
+          <div>
+            <b>待排期</b><span>{{ filteredBacklog.length }}</span>
+          </div>
+          <small>拖到日历，或点击排期</small>
+          <el-input v-model="backlogQuery" size="small" clearable placeholder="搜索内容" />
+        </div>
+        <div ref="backlogElement" class="backlog-list">
+          <article
+            v-for="item in filteredBacklog"
+            :key="item.variantId"
+            class="backlog-card"
+            :data-variant-id="item.variantId"
+            :data-title="item.articleTitle"
+          >
+            <GripVertical :size="14" />
+            <div>
+              <header>
+                <i :style="{ background: platformColors[item.platform] }" />
+                <span>{{ platformNames[item.platform] }}</span>
+                <span v-if="item.ready" class="ready"><CircleCheck :size="11" />就绪</span>
+                <span v-else class="blocked"><TriangleAlert :size="11" />需完善</span>
+              </header>
+              <b>{{ item.articleTitle }}</b>
+              <small v-if="item.blockers.length">{{ item.blockers.join(' · ') }}</small>
+              <small v-else>{{ item.variantTitle }}</small>
+            </div>
+            <button v-if="canOperate" @click.stop="openBacklog(item)">排期</button>
+          </article>
+          <p v-if="!filteredBacklog.length" class="backlog-empty">没有待排期的已审核内容</p>
+        </div>
+      </aside>
       <div class="calendar-shell">
         <FullCalendar :options="{ ...options, events }" />
       </div>
@@ -243,7 +430,7 @@ onMounted(init)
           </div>
           <div>
             <p class="field-label">发布方式</p>
-            <p class="mt-2">{{ editing.publishMode }}</p>
+            <p class="mt-2">{{ publishModeLabel(editing.platform, editing.publishMode) }}</p>
           </div>
           <div v-if="editing.logs?.length">
             <p class="field-label">执行日志</p>
@@ -275,12 +462,14 @@ onMounted(init)
             type="datetime"
             value-format="YYYY-MM-DDTHH:mm"
             class="!w-full" /></el-form-item
-        ><el-form-item label="平台账号" required
+        ><el-form-item
+          label="平台账号"
+          :required="form.platform !== 'XIAOHONGSHU' || form.publish_mode === 'MCP_PUBLISH'"
           ><el-select v-model="form.account_id" class="w-full" placeholder="请选择平台账号"
             ><el-option
               v-for="account in availableAccounts"
               :key="account.id || account.platform"
-              :label="`${account.accountName} · ${account.status}`"
+              :label="`${account.accountName} · ${accountStatusNames[account.status] || account.status}`"
               :value="account.id!" /></el-select></el-form-item
         ><el-form-item label="发布方式" required
           ><el-select v-model="form.publish_mode" class="w-full"
@@ -292,8 +481,36 @@ onMounted(init)
               :disabled="mode.disabled" /></el-select></el-form-item
         ><el-alert
           v-if="form.platform === 'XIAOHONGSHU'"
-          title="小红书当前采用人工确认发布，不属于服务器无人值守自动发布。"
+          :title="
+            form.publish_mode === 'MCP_PUBLISH'
+              ? '将通过本机 xiaohongshu-mcp 发布为“仅自己可见”；请保持本机服务运行且登录有效。'
+              : '当前采用人工确认发布，不属于服务器无人值守自动发布。'
+          "
           type="warning"
+          :closable="false"
+        />
+        <el-alert
+          v-else-if="form.platform === 'X'"
+          :title="
+            canUseXApi(selectedAccount)
+              ? '该排期会在执行时通过 X 官方 API 发送真实帖子。创建排期不等于立即发布，但到点会自动执行。'
+              : '当前不会发布：请先由管理员完成 X OAuth，并明确开启真实发布开关。'
+          "
+          :type="canUseXApi(selectedAccount) ? 'warning' : 'info'"
+          :closable="false"
+        />
+        <el-alert
+          v-else-if="form.platform === 'TOUTIAO'"
+          :title="
+            selectedAccount?.status === 'CONNECTED' && selectedAccount.publicPublishEnabled
+              ? '到点后会使用本机 Chrome 会话向今日头条发送真实文章；遇到登录失效或安全验证会停止并提示处理。'
+              : '当前不会发布：请先由管理员完成今日头条扫码登录，并开启真实发布安全开关。'
+          "
+          :type="
+            selectedAccount?.status === 'CONNECTED' && selectedAccount.publicPublishEnabled
+              ? 'warning'
+              : 'info'
+          "
           :closable="false"
         />
       </el-form>

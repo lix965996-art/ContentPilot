@@ -14,7 +14,7 @@ def test_admin_can_list_users(client: TestClient, login_as) -> None:
 
     assert response.status_code == 200
     usernames = {user["username"] for user in response.json()["data"]}
-    assert usernames == {"admin", "operator", "viewer"}
+    assert {"admin", "operator", "viewer"}.issubset(usernames)
 
 
 def test_operator_cannot_access_admin_endpoint(client: TestClient, login_as) -> None:

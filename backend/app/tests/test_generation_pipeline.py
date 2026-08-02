@@ -11,7 +11,9 @@ from app.services import generation_service
 from app.services.generation_service import (
     GenerationResult,
     LlmRuntime,
+    _ensure_weibo_image_safe,
     _validated_completion,
+    compact_weibo_image_payload,
     count_emoji,
     edit_ratio,
     extract_keywords_with_llm,
@@ -19,6 +21,7 @@ from app.services.generation_service import (
     normalize_visible_markdown,
     review_variant_quality,
 )
+from app.services.platform_content import build_weibo_status
 from app.services.wechat_formatting import format_wechat_html
 
 
@@ -73,15 +76,94 @@ def test_user_options_are_written_into_prompt() -> None:
         "hashtags（是否生成标签）：禁止生成",
     ):
         assert expected in prompt
-    assert len(PLATFORM_PROFILES) == 3
-    assert PROMPT_VERSION == "3.0.0"
+    assert len(PLATFORM_PROFILES) == 5
+    assert "280 加权字符限制" in PLATFORM_PROFILES["X"].render()
+    assert "可见文本" in prompt
+    assert "严禁出现井号字符" in prompt
+    assert "不超过 140 字" in PLATFORM_PROFILES["WEIBO"].render()
+    assert PROMPT_VERSION == "3.5.0"
 
 
-def test_visible_markdown_markers_are_cleaned() -> None:
-    value = "🌍 **两地高温：成因各异**\n* **吐鲁番**：沙漠边缘\n* 重庆：盆地"
+def test_visible_markdown_markers_and_hash_characters_are_cleaned() -> None:
+    value = "## 🌍 **两地高温：成因各异**\n* **吐鲁番**：沙漠边缘\n* C# 观察"
     assert normalize_visible_markdown(value) == (
-        "🌍 两地高温：成因各异\n• 吐鲁番：沙漠边缘\n• 重庆：盆地"
+        "🌍 两地高温：成因各异\n• 吐鲁番：沙漠边缘\n• C 观察"
     )
+    assert "#" not in normalize_visible_markdown(value)
+
+
+def test_variant_save_forbids_hash_in_visible_text(client: TestClient, login_as) -> None:
+    token = login_as("operator", "Operator@123456")["access_token"]
+    auth = headers(token)
+    article_id = create_article(client, auth, "hash-cleanup")
+    generated = client.post(
+        "/api/generation/content",
+        headers=auth,
+        json={"article_id": article_id, "platforms": ["WECHAT_OFFICIAL"]},
+    )
+    task_id = generated.json()["data"]["taskId"]
+    task = client.get(f"/api/generation/tasks/{task_id}", headers=auth).json()["data"]
+    variant = task["variants"][0]
+
+    saved = client.put(
+        f"/api/variants/{variant['id']}",
+        headers=auth,
+        json={
+            "title": "# 严禁井号标题",
+            "content_text": "## 一、核心观点\n\n正文讨论 C# 但可见文本仍不得保留井号。",
+            "hashtags": ["#后台标签"],
+        },
+    )
+    assert saved.status_code == 200
+    data = saved.json()["data"]
+    assert "#" not in data["title"]
+    assert "#" not in data["contentText"]
+    assert data["hashtagsJson"] == ["后台标签"]
+
+
+def test_illustrated_weibo_edit_is_automatically_fitted_before_save(
+    client: TestClient, login_as
+) -> None:
+    token = login_as("operator", "Operator@123456")["access_token"]
+    auth = headers(token)
+    article_id = create_article(client, auth, "weibo-auto-fit")
+    generated = client.post(
+        "/api/generation/content",
+        headers=auth,
+        json={"article_id": article_id, "platforms": ["WEIBO"]},
+    )
+    task_id = generated.json()["data"]["taskId"]
+    task = client.get(f"/api/generation/tasks/{task_id}", headers=auth).json()["data"]
+    variant = task["variants"][0]
+    selected = client.post(
+        "/api/media/select",
+        headers=auth,
+        json={
+            "article_id": article_id,
+            "source": "WIKIMEDIA_COMMONS",
+            "source_id": "weibo-auto-fit-cover",
+            "image_url": "https://example.com/weibo-cover.jpg",
+            "thumbnail_url": "https://example.com/weibo-cover.jpg",
+            "alt_text": "微博自动适配测试封面",
+            "usage_type": "COVER",
+        },
+    )
+    assert selected.status_code == 200
+
+    saved = client.put(
+        f"/api/variants/{variant['id']}",
+        headers=auth,
+        json={
+            "title": "带图微博自动适配",
+            "content_text": "这是一段需要保留核心事实但明显超过单图接口长度限制的内容。" * 20,
+            "hashtags": ["自动发布", "内容运营", "毕业设计"],
+        },
+    )
+    assert saved.status_code == 200
+    data = saved.json()["data"]
+    status = build_weibo_status(data["title"], data["contentText"], data["hashtagsJson"])
+    assert len(status) <= 140
+    assert len(data["hashtagsJson"]) <= 2
 
 
 @pytest.mark.asyncio
@@ -152,6 +234,64 @@ async def test_generation_reports_concrete_processing_stages(monkeypatch) -> Non
     ]
     assert events[2][0] == "RETRYING"
     assert events[2][1]["message"] == "第 2 次请求模型修正输出"
+
+
+def test_weibo_local_fallback_always_fits_image_endpoint() -> None:
+    fitted = compact_weibo_image_payload(
+        {
+            "title": "这是一段需要自动处理的微博标题",
+            "content": "需要保留的重要事实。" * 30,
+            "hashtags": ["#消费者权益#", "#手机安全#", "#售后服务#"],
+            "warnings": [],
+        }
+    )
+    status = build_weibo_status(fitted["title"], fitted["content"], fitted["hashtags"])
+    assert len(status) <= 140
+    assert fitted["content"].endswith("…")
+    assert "已自动压缩" in fitted["warnings"][0]
+
+
+@pytest.mark.asyncio
+async def test_weibo_over_limit_result_is_automatically_compressed_by_llm(monkeypatch) -> None:
+    events: list[tuple[str, dict]] = []
+
+    async def fake_chat(*_args, **_kwargs):
+        return (
+            '{"title":"手机售后不能只给结论",'
+            '"content":"消费者应保留购买和维修凭证，并依据检测结果理性维权。",'
+            '"hashtags":["#消费者权益#"],"warnings":[]}',
+            18,
+            20,
+        )
+
+    async def capture(status: str, detail: dict) -> None:
+        events.append((status, detail))
+
+    monkeypatch.setattr(generation_service, "_chat_completion", fake_chat)
+    article = ContentArticle(
+        title="手机售后争议",
+        source_text="消费者购买手机后发生故障，应保留凭证并等待检测结果。",
+        target_audience="普通消费者",
+        keywords_json=[],
+        created_by=1,
+    )
+    fitted, prompt_tokens, completion_tokens, attempts = await _ensure_weibo_image_safe(
+        LlmRuntime("openai-compatible", "key", "https://example.test", "model"),
+        article,
+        {
+            "title": "手机售后争议应该如何解决",
+            "content": "这是一段明显超过微博图文发布限制的内容。" * 20,
+            "hashtags": ["#消费者权益#", "#手机安全#", "#售后服务#"],
+            "warnings": [],
+        },
+        status_callback=capture,
+    )
+
+    assert len(build_weibo_status(fitted["title"], fitted["content"], fitted["hashtags"])) <= 140
+    assert prompt_tokens == 18
+    assert completion_tokens == 20
+    assert attempts == 1
+    assert events[0][1]["stage"] == "FITTING_PLATFORM_LIMIT"
 
 
 def test_three_platforms_generate_in_parallel(client: TestClient, login_as, monkeypatch) -> None:

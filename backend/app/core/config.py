@@ -30,6 +30,8 @@ class Settings(BaseSettings):
 
     cors_origins: str = "http://localhost:5173,http://127.0.0.1:5173"
     app_demo_mode: bool = False
+    allow_registration: bool = True
+    admin_initial_password: str = ""
     llm_provider: str = "openai-compatible"
     llm_base_url: str = ""
     llm_api_key: str = ""
@@ -40,7 +42,23 @@ class Settings(BaseSettings):
     publish_mode: str = "manual"
     platform_credential_key: str = ""
     weibo_api_base_url: str = "https://api.weibo.com"
+    weibo_upload_api_base_url: str = "https://upload.api.weibo.com"
+    x_api_base_url: str = "https://api.x.com"
+    x_oauth_authorize_url: str = "https://x.com/i/oauth2/authorize"
+    x_oauth_token_url: str = "https://api.x.com/2/oauth2/token"
     wechat_api_base_url: str = "https://api.weixin.qq.com"
+    wechat_app_id: str = ""
+    wechat_app_secret: str = ""
+    wechat_browser_publishing_enabled: bool = True
+    wechat_browser_headless: bool = True
+    wechat_browser_profile_root: str = ""
+    xhs_mcp_base_url: str = "http://127.0.0.1:18060/mcp"
+    xhs_mcp_binary_path: str = ""
+    experimental_browser_publishing_enabled: bool = False
+    toutiao_browser_publishing_enabled: bool = True
+    toutiao_browser_headless: bool = True
+    toutiao_browser_profile_root: str = ""
+    wechatsync_cli_enabled: bool = False
 
     @property
     def cors_origin_list(self) -> list[str]:

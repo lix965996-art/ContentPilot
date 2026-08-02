@@ -3,6 +3,7 @@ import { computed, onMounted, reactive, ref } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   Activity,
+  AlertTriangle,
   CheckCircle2,
   CircleDollarSign,
   KeyRound,
@@ -18,18 +19,30 @@ import UserAvatar from '@/components/UserAvatar.vue'
 import { workflowApi } from '@/api/workflow'
 import { getApiErrorMessage } from '@/api/client'
 import type { LlmConfig, LlmUsage } from '@/types/business'
+import { platformNames } from '@/types/business'
 
 const EMPTY_USAGE: LlmUsage = {
   days: 30,
   generations: 0,
+  pricedGenerations: 0,
+  unpricedGenerations: 0,
   promptTokens: 0,
   completionTokens: 0,
   totalTokens: 0,
   estimatedCost: 0,
   averageTokens: 0,
   currency: 'CNY',
+  priceConfigured: false,
+  inputPricePerMillion: 0,
+  outputPricePerMillion: 0,
+  monthlyBudget: 0,
+  monthlyCost: 0,
+  budgetWarningPercent: 80,
+  budgetUsedPercent: 0,
+  budgetAlert: false,
   byModel: [],
   daily: [],
+  recent: [],
 }
 
 const providerOptions = [
@@ -48,6 +61,8 @@ const llm = reactive<LlmConfig>({
   inputPricePerMillion: 0,
   outputPricePerMillion: 0,
   currency: 'CNY',
+  monthlyBudget: 0,
+  budgetWarningPercent: 80,
 })
 const settings = ref<Array<Record<string, any>>>([])
 const users = ref<Array<Record<string, any>>>([])
@@ -249,6 +264,27 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
                   </el-select>
                 </el-form-item>
               </div>
+              <div class="budget-grid">
+                <el-form-item label="月度预算（0 表示不限制）">
+                  <el-input-number
+                    v-model="llm.monthlyBudget"
+                    :min="0"
+                    :precision="2"
+                    :controls="false"
+                    class="!w-full"
+                  />
+                </el-form-item>
+                <el-form-item label="预算预警">
+                  <el-input-number
+                    v-model="llm.budgetWarningPercent"
+                    :min="1"
+                    :max="100"
+                    :precision="0"
+                    :controls="false"
+                    class="!w-full"
+                  />
+                </el-form-item>
+              </div>
 
               <div class="model-actions">
                 <el-button
@@ -320,6 +356,17 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
               /></el-button>
             </div>
           </header>
+          <div v-if="usage.budgetAlert" class="usage-alert is-warning">
+            <AlertTriangle :size="16" />
+            <span
+              >本月已用 {{ currencySymbol }}{{ usage.monthlyCost.toFixed(4) }}，达到预算的
+              {{ usage.budgetUsedPercent.toFixed(1) }}%。</span
+            >
+          </div>
+          <div v-else-if="!usage.priceConfigured" class="usage-alert">
+            <AlertTriangle :size="16" />
+            <span>尚未配置 Token 单价，已有 Token 会保留，但费用暂不显示为 0 元。</span>
+          </div>
           <div class="usage-metrics">
             <div>
               <span>生成次数</span><strong>{{ formatNumber(usage.generations) }}</strong>
@@ -331,8 +378,14 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
               <span>输出 Token</span><strong>{{ formatNumber(usage.completionTokens) }}</strong>
             </div>
             <div class="is-cost">
-              <span>预估费用</span
-              ><strong>{{ currencySymbol }}{{ usage.estimatedCost.toFixed(4) }}</strong>
+              <span>按当前单价估算</span>
+              <strong v-if="usage.priceConfigured"
+                >{{ currencySymbol }}{{ usage.estimatedCost.toFixed(4) }}</strong
+              >
+              <strong v-else>未计价</strong>
+              <small v-if="usage.unpricedGenerations"
+                >{{ usage.unpricedGenerations }} 条缺少可计价数据</small
+              >
             </div>
           </div>
           <div class="usage-content-grid">
@@ -360,14 +413,42 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
                     <strong>{{ formatNumber(item.tokens) }}</strong
                     ><small>Token</small>
                   </div>
-                  <span>{{ currencySymbol }}{{ item.cost.toFixed(4) }}</span>
+                  <span v-if="usage.priceConfigured || item.cost > 0"
+                    >{{ currencySymbol }}{{ item.cost.toFixed(4) }}</span
+                  >
+                  <span v-else>未计价</span>
                 </article>
               </div>
               <div v-else class="compact-empty">暂无模型用量</div>
             </div>
           </div>
+          <div class="usage-detail">
+            <header>
+              <h3>最近生成明细</h3>
+              <span>费用使用当前配置的单价重新估算</span>
+            </header>
+            <div v-if="usage.recent.length" class="usage-detail-table">
+              <article v-for="item in usage.recent" :key="item.id">
+                <div>
+                  <b>{{ item.articleTitle }}</b>
+                  <small>{{ platformNames[item.platform] }} · {{ item.model }}</small>
+                </div>
+                <span
+                  >输入 {{ formatNumber(item.promptTokens) }} / 输出
+                  {{ formatNumber(item.completionTokens) }}</span
+                >
+                <strong v-if="item.cost !== null"
+                  >{{ currencySymbol }}{{ item.cost.toFixed(4) }}</strong
+                >
+                <strong v-else class="unpriced">未计价</strong>
+              </article>
+            </div>
+            <div v-else class="compact-empty">暂无生成明细</div>
+          </div>
           <p class="usage-disclaimer">
-            <CircleDollarSign :size="14" />费用按当前填写的单价估算，最终账单以模型服务商为准。
+            <CircleDollarSign
+              :size="14"
+            />保存单价后刷新即可重算历史费用；最终账单以模型服务商为准。
           </p>
         </section>
       </el-tab-pane>

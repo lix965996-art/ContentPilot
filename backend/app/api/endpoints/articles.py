@@ -1,3 +1,6 @@
+import uuid
+from datetime import datetime
+
 from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
 from sqlalchemy import func, or_, select
 from sqlalchemy.orm import Session
@@ -6,7 +9,7 @@ from app.api.deps import get_current_user, require_roles
 from app.core.exceptions import AppException
 from app.core.responses import success_response
 from app.db.session import get_db
-from app.models.business import ContentArticle, ContentVariant, PublishSchedule
+from app.models.business import ContentArticle, ContentVariant, MediaAsset, PublishSchedule
 from app.models.user import User
 from app.schemas.business import (
     ArticleCreate,
@@ -16,7 +19,16 @@ from app.schemas.business import (
     WechatFormatRequest,
 )
 from app.services.audit_service import record_audit
-from app.services.generation_service import count_emoji, edit_ratio, markdown_to_safe_html
+from app.services.generation_service import (
+    compact_weibo_image_payload,
+    count_emoji,
+    edit_ratio,
+    markdown_to_safe_html,
+    normalize_visible_markdown,
+)
+from app.services.platform_account_service import get_platform_account
+from app.services.platform_content import build_x_post, normalize_topics, x_weighted_length
+from app.services.publish_service import execute_publish
 from app.services.serializers import model_dict
 from app.services.wechat_formatting import (
     format_wechat_html,
@@ -238,18 +250,62 @@ def update_variant(
     variant = db.get(ContentVariant, variant_id)
     if not variant:
         raise AppException(40402, "内容版本不存在", 404)
-    variant.title = payload.title
-    variant.content_text = payload.content_text
-    if variant.platform == "WECHAT_OFFICIAL" and variant.format_profile_json:
+    clean_title = normalize_visible_markdown(payload.title)
+    clean_content = normalize_visible_markdown(payload.content_text)
+    tag_limits = {"WEIBO": 5, "X": 4, "XIAOHONGSHU": 10, "WECHAT_OFFICIAL": 8, "TOUTIAO": 8}
+    normalized_hashtags = normalize_topics(
+        payload.hashtags, limit=tag_limits.get(variant.platform, 10)
+    )
+    has_selected_media = bool(
+        variant.platform == "WEIBO"
+        and db.scalar(
+            select(func.count(MediaAsset.id)).where(
+                MediaAsset.article_id == variant.article_id,
+                MediaAsset.selected.is_(True),
+            )
+        )
+    )
+    if has_selected_media:
+        fitted = compact_weibo_image_payload(
+            {
+                "title": clean_title,
+                "content": clean_content,
+                "hashtags": normalized_hashtags,
+            }
+        )
+        clean_title = fitted["title"]
+        clean_content = fitted["content"]
+        normalized_hashtags = fitted["hashtags"]
+    title_limits = {"WEIBO": 60, "X": 80, "XIAOHONGSHU": 20, "WECHAT_OFFICIAL": 64, "TOUTIAO": 30}
+    title_limit = title_limits.get(variant.platform, 255)
+    if not clean_title:
+        raise AppException(40029, "标题不能为空")
+    if len(clean_title) > title_limit:
+        raise AppException(40029, f"{variant.platform} 标题最多 {title_limit} 个字符")
+    if not clean_content:
+        raise AppException(40030, "正文不能为空")
+    content_limits = {"XIAOHONGSHU": 1000}
+    content_limit = content_limits.get(variant.platform)
+    if content_limit and len(clean_content) > content_limit:
+        raise AppException(40030, f"{variant.platform} 正文最多 {content_limit} 个字符")
+    variant.title = clean_title
+    variant.content_text = clean_content
+    if variant.platform == "WECHAT_OFFICIAL":
         variant.content_html, variant.format_profile_json = format_wechat_html(
-            payload.content_text, variant.format_profile_json
+            clean_content, variant.format_profile_json or None
         )
     else:
-        variant.content_html = markdown_to_safe_html(payload.content_text)
-    variant.hashtags_json = payload.hashtags
-    variant.emoji_count = count_emoji(payload.title + payload.content_text)
-    variant.word_count = len(payload.content_text)
-    variant.manual_edit_ratio = edit_ratio(variant.original_generated_text, payload.content_text)
+        variant.content_html = markdown_to_safe_html(clean_content)
+    if variant.platform == "X":
+        weighted_length = x_weighted_length(
+            build_x_post(clean_title, clean_content, normalized_hashtags)
+        )
+        if weighted_length > 280:
+            raise AppException(40030, f"X 帖子最多 280 个加权字符，当前为 {weighted_length}")
+    variant.hashtags_json = normalized_hashtags
+    variant.emoji_count = count_emoji(clean_title + clean_content)
+    variant.word_count = len(clean_content)
+    variant.manual_edit_ratio = edit_ratio(variant.original_generated_text, clean_content)
     record_audit(db, request, user, "UPDATE", "CONTENT", "VARIANT", variant.id)
     db.commit()
     db.refresh(variant)
@@ -271,7 +327,7 @@ def preview_wechat_format(
     _: User = Depends(get_current_user),
 ) -> dict:
     data = payload.model_dump()
-    content_text = data.pop("content_text")
+    content_text = normalize_visible_markdown(data.pop("content_text"))
     content_html, profile = format_wechat_html(content_text, data)
     return success_response(request, {"contentHtml": content_html, "profile": profile})
 
@@ -296,6 +352,71 @@ def format_wechat_variant(
     db.commit()
     db.refresh(variant)
     return success_response(request, model_dict(variant, camel=True), "公众号排版已保存")
+
+
+@router.post("/variants/{variant_id}/wechat-draft")
+async def save_wechat_variant_to_draft(
+    variant_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+) -> dict:
+    """Save the current edited WeChat variant to the real account draft box now."""
+    variant = db.get(ContentVariant, variant_id)
+    if not variant:
+        raise AppException(40402, "内容版本不存在", 404)
+    if variant.platform != "WECHAT_OFFICIAL":
+        raise AppException(40078, "只有微信公众号版本可以保存到公众号草稿箱")
+    account = get_platform_account(db, "WECHAT_OFFICIAL")
+    if not account:
+        raise AppException(40411, "请先连接微信公众号账号", 404)
+
+    if account.publish_mode == "BROWSER_DRAFT":
+        publish_mode = "BROWSER_DRAFT"
+    elif account.publish_mode in {"DRAFT_ONLY", "SUBMIT_PUBLISH"}:
+        publish_mode = "DRAFT_ONLY"
+    else:
+        raise AppException(40075, "微信公众号账号没有启用可用的草稿保存方式")
+
+    variant.content_html, variant.format_profile_json = format_wechat_html(
+        variant.content_text,
+        variant.format_profile_json or {},
+    )
+    row = PublishSchedule(
+        article_id=variant.article_id,
+        variant_id=variant.id,
+        account_id=account.id,
+        platform="WECHAT_OFFICIAL",
+        scheduled_at=datetime.now(),
+        publish_mode=publish_mode,
+        status="PENDING",
+        publish_package_json={"trigger": "studio_save_draft"},
+        idempotency_key=str(uuid.uuid4()),
+        created_by=user.id,
+    )
+    db.add(row)
+    db.flush()
+    record_audit(db, request, user, "CREATE_DRAFT", "CONTENT", "VARIANT", variant.id)
+    db.commit()
+
+    result = await execute_publish(db, row.id)
+    if result.status != "DRAFT_CREATED":
+        raise AppException(
+            50218,
+            result.error_message or "微信公众号草稿保存失败，请查看发布中心详情",
+            502,
+        )
+    return success_response(
+        request,
+        {
+            "scheduleId": result.id,
+            "status": result.status,
+            "draftId": result.external_id or "",
+            "draftUrl": result.published_url or "",
+            "resultMode": result.result_mode or publish_mode,
+        },
+        "文章已保存到微信公众号草稿箱",
+    )
 
 
 @router.post("/variants/{variant_id}/approve")

@@ -80,8 +80,8 @@ class ContentVariant(TimestampMixin, Base):
 class MediaAsset(Base):
     __tablename__ = "media_asset"
     id: Mapped[int] = mapped_column(primary_key=True)
-    article_id: Mapped[int] = mapped_column(
-        ForeignKey("content_article.id", ondelete="CASCADE"), index=True
+    article_id: Mapped[int | None] = mapped_column(
+        ForeignKey("content_article.id", ondelete="SET NULL"), index=True, nullable=True
     )
     variant_id: Mapped[int | None] = mapped_column(
         ForeignKey("content_variant.id", ondelete="SET NULL"), nullable=True
@@ -96,14 +96,44 @@ class MediaAsset(Base):
     search_keyword: Mapped[str | None] = mapped_column(String(100), nullable=True)
     usage_type: Mapped[str] = mapped_column(String(30), default="BODY")
     selected: Mapped[bool] = mapped_column(Boolean, default=False)
+    title: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    collection: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    tags_json: Mapped[list] = mapped_column(JSON, default=list)
+    favorite: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    license_type: Mapped[str | None] = mapped_column(String(80), nullable=True)
+    license_note: Mapped[str | None] = mapped_column(String(500), nullable=True)
+    file_hash: Mapped[str | None] = mapped_column(String(64), nullable=True, index=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
+class ResearchItem(TimestampMixin, Base):
+    __tablename__ = "research_item"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    title: Mapped[str] = mapped_column(String(255), index=True)
+    summary: Mapped[str | None] = mapped_column(Text, nullable=True)
+    url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    image_url: Mapped[str | None] = mapped_column(String(1000), nullable=True)
+    source: Mapped[str] = mapped_column(String(50), default="MANUAL", index=True)
+    source_name: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    source_id: Mapped[str | None] = mapped_column(String(150), nullable=True)
+    topic_cluster: Mapped[str | None] = mapped_column(String(100), nullable=True, index=True)
+    tags_json: Mapped[list] = mapped_column(JSON, default=list)
+    notes: Mapped[str | None] = mapped_column(Text, nullable=True)
+    status: Mapped[str] = mapped_column(String(30), default="INBOX", index=True)
+    archived: Mapped[bool] = mapped_column(Boolean, default=False, index=True)
+    created_by: Mapped[int] = mapped_column(ForeignKey("sys_user.id"), index=True)
 
 
 class PlatformAccount(TimestampMixin, Base):
     __tablename__ = "platform_account"
-    __table_args__ = (UniqueConstraint("user_id", "platform", name="uq_platform_account_user"),)
+    __table_args__ = (UniqueConstraint("platform", name="uq_platform_account_platform"),)
     id: Mapped[int] = mapped_column(primary_key=True)
+    # ``user_id`` is retained as the original creator for migration compatibility.
+    # Platform accounts are shared system-wide and are no longer selected by this field.
     user_id: Mapped[int] = mapped_column(ForeignKey("sys_user.id"), index=True)
+    updated_by: Mapped[int | None] = mapped_column(
+        ForeignKey("sys_user.id"), nullable=True, index=True
+    )
     platform: Mapped[str] = mapped_column(String(30))
     account_name: Mapped[str] = mapped_column(String(100))
     auth_type: Mapped[str] = mapped_column(String(30), default="NONE")

@@ -4,7 +4,7 @@ import httpx
 from fastapi.testclient import TestClient
 
 from app.db.session import SessionLocal
-from app.models.business import PlatformAccount
+from app.models.business import ContentVariant, PlatformAccount
 from app.publishers.base import PublishResult
 from app.publishers.official import WeiboPublisher
 
@@ -16,6 +16,7 @@ def headers(token: str) -> dict[str, str]:
 def test_complete_content_to_publish_flow(client: TestClient, login_as, monkeypatch) -> None:
     token = login_as("operator", "Operator@123456")["access_token"]
     auth = headers(token)
+    admin_auth = headers(login_as("admin", "Admin@123456")["access_token"])
     created = client.post(
         "/api/articles",
         headers=auth,
@@ -67,7 +68,7 @@ def test_complete_content_to_publish_flow(client: TestClient, login_as, monkeypa
     account_id = next(item["id"] for item in accounts if item["platform"] == variant["platform"])
     configured = client.put(
         "/api/platform-accounts/WEIBO",
-        headers=auth,
+        headers=admin_auth,
         json={
             "account_name": "真实接口测试微博",
             "auth_type": "OAUTH2",
@@ -233,10 +234,13 @@ def test_model_service_configuration_and_usage(client: TestClient, login_as, mon
         "input_price_per_million": 2.5,
         "output_price_per_million": 10,
         "currency": "CNY",
+        "monthly_budget": 100,
+        "budget_warning_percent": 80,
     }
     saved = client.put("/api/settings/model-service", headers=auth, json=payload)
     assert saved.status_code == 200
     assert saved.json()["data"]["model"] == "Qwen/Qwen3-8B"
+    assert saved.json()["data"]["monthlyBudget"] == 100
 
     async def official_models(_self, url, **_kwargs):
         return httpx.Response(
@@ -252,10 +256,26 @@ def test_model_service_configuration_and_usage(client: TestClient, login_as, mon
     assert tested.json()["data"]["connected"] is True
     assert tested.json()["data"]["models"] == ["Qwen/Qwen3-8B"]
 
+    with SessionLocal() as db:
+        variant = db.query(ContentVariant).first()
+        assert variant is not None
+        variant.prompt_tokens = 1_000_000
+        variant.completion_tokens = 1_000_000
+        variant.token_usage = 2_000_000
+        variant.estimated_cost = 0
+        variant.created_at = datetime.now()
+        variant_id = variant.id
+        db.commit()
+
     usage = client.get("/api/settings/model-service/usage?days=30", headers=auth)
     assert usage.status_code == 200
-    assert usage.json()["data"]["totalTokens"] >= 0
-    assert usage.json()["data"]["currency"] == "CNY"
+    usage_data = usage.json()["data"]
+    assert usage_data["totalTokens"] >= 2_000_000
+    assert usage_data["currency"] == "CNY"
+    assert usage_data["priceConfigured"] is True
+    detail = next(item for item in usage_data["recent"] if item["id"] == variant_id)
+    assert detail["cost"] == 12.5
+    assert detail["pricingStatus"] == "CURRENT_PRICE"
 
 
 def test_operator_cannot_manage_model_service(client: TestClient, login_as) -> None:

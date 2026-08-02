@@ -21,10 +21,20 @@ export interface LoginPayload {
   password: string
 }
 
+export interface RegisterPayload extends LoginPayload {
+  display_name: string
+  email: string
+}
+
 export interface AuthData {
   access_token: string
   refresh_token: string
   token_type: 'bearer'
   expires_in: number
   user: User
+}
+
+export interface AuthOptions {
+  allowRegistration: boolean
+  demoMode: boolean
 }

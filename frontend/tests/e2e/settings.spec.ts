@@ -1,6 +1,22 @@
 import { expect, test } from '@playwright/test'
 
 test('administrator can test a model connection and inspect usage', async ({ page }) => {
+  await page.route('**/api/settings/model-service/test', async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({
+        code: 0,
+        message: 'success',
+        data: {
+          connected: true,
+          latencyMs: 12,
+          models: ['e2e-chat-model'],
+          message: '连接成功，发现 1 个模型',
+        },
+      }),
+    })
+  })
   await page.goto('/login')
   await page.getByTestId('username-input').fill('admin')
   await page.getByTestId('password-input').fill('Admin@123456')
@@ -22,5 +38,6 @@ test('administrator can test a model connection and inspect usage', async ({ pag
   await expect(page.getByRole('heading', { name: '模型用量' })).toBeVisible()
   await expect(page.getByText('输入 Token')).toBeVisible()
   await expect(page.getByText('输出 Token')).toBeVisible()
-  await expect(page.getByText('预估费用', { exact: true })).toBeVisible()
+  await expect(page.getByText('按当前单价估算', { exact: true })).toBeVisible()
+  await expect(page.getByRole('heading', { name: '最近生成明细' })).toBeVisible()
 })

@@ -21,6 +21,8 @@ SETTING_DEFINITIONS = {
     "llm.input_price_per_million": (False, "每百万输入 Token 价格"),
     "llm.output_price_per_million": (False, "每百万输出 Token 价格"),
     "llm.currency": (False, "计费币种"),
+    "llm.monthly_budget": (False, "模型月度预算"),
+    "llm.budget_warning_percent": (False, "预算预警比例"),
 }
 
 
@@ -40,6 +42,8 @@ def read_llm_config(db: Session) -> dict:
         "inputPricePerMillion": float(setting_value(db, "llm.input_price_per_million", "0")),
         "outputPricePerMillion": float(setting_value(db, "llm.output_price_per_million", "0")),
         "currency": setting_value(db, "llm.currency", "CNY"),
+        "monthlyBudget": float(setting_value(db, "llm.monthly_budget", "0")),
+        "budgetWarningPercent": int(setting_value(db, "llm.budget_warning_percent", "80")),
     }
 
 
@@ -52,6 +56,8 @@ def save_llm_config(db: Session, payload: LlmConfigUpdate) -> dict:
         "llm.input_price_per_million": str(payload.input_price_per_million),
         "llm.output_price_per_million": str(payload.output_price_per_million),
         "llm.currency": payload.currency,
+        "llm.monthly_budget": str(payload.monthly_budget),
+        "llm.budget_warning_percent": str(payload.budget_warning_percent),
     }
     for key, value in values.items():
         is_secret, description = SETTING_DEFINITIONS[key]
@@ -144,6 +150,22 @@ def _connection_error_message(response: httpx.Response) -> str:
 
 def llm_usage(db: Session, days: int) -> dict:
     since = datetime.now() - timedelta(days=days)
+    input_price = float(setting_value(db, "llm.input_price_per_million", "0") or 0)
+    output_price = float(setting_value(db, "llm.output_price_per_million", "0") or 0)
+    price_configured = input_price > 0 or output_price > 0
+
+    def priced_cost(row: ContentVariant) -> tuple[float | None, str]:
+        if row.token_usage <= 0:
+            return 0.0, "NO_USAGE"
+        if price_configured and row.prompt_tokens + row.completion_tokens > 0:
+            cost = (
+                row.prompt_tokens * input_price + row.completion_tokens * output_price
+            ) / 1_000_000
+            return round(cost, 8), "CURRENT_PRICE"
+        if row.estimated_cost > 0:
+            return round(row.estimated_cost, 8), "SAVED_ESTIMATE"
+        return None, "UNPRICED"
+
     rows = db.scalars(
         select(ContentVariant)
         .where(ContentVariant.created_at >= since)
@@ -151,30 +173,67 @@ def llm_usage(db: Session, days: int) -> dict:
     ).all()
     model_groups: dict[str, dict[str, float | int | str]] = {}
     daily_groups: dict[str, dict[str, float | int | str]] = defaultdict(
-        lambda: {"tokens": 0, "cost": 0.0}
+        lambda: {"tokens": 0, "cost": 0.0, "unpriced": 0}
     )
+    priced_generations = 0
+    unpriced_generations = 0
     for row in rows:
+        cost, pricing_status = priced_cost(row)
+        if pricing_status == "UNPRICED":
+            unpriced_generations += 1
+        elif pricing_status != "NO_USAGE":
+            priced_generations += 1
         model = row.model_name or "未标记模型"
         group = model_groups.setdefault(
             model,
-            {"model": model, "generations": 0, "tokens": 0, "cost": 0.0},
+            {
+                "model": model,
+                "generations": 0,
+                "tokens": 0,
+                "cost": 0.0,
+                "unpricedGenerations": 0,
+            },
         )
         group["generations"] = int(group["generations"]) + 1
         group["tokens"] = int(group["tokens"]) + row.token_usage
-        group["cost"] = float(group["cost"]) + row.estimated_cost
+        group["cost"] = float(group["cost"]) + (cost or 0)
+        if pricing_status == "UNPRICED":
+            group["unpricedGenerations"] = int(group["unpricedGenerations"]) + 1
         day = row.created_at.date().isoformat()
         daily_groups[day]["tokens"] = int(daily_groups[day]["tokens"]) + row.token_usage
-        daily_groups[day]["cost"] = float(daily_groups[day]["cost"]) + row.estimated_cost
+        daily_groups[day]["cost"] = float(daily_groups[day]["cost"]) + (cost or 0)
+        if pricing_status == "UNPRICED":
+            daily_groups[day]["unpriced"] = int(daily_groups[day]["unpriced"]) + 1
     total_tokens = sum(row.token_usage for row in rows)
+    total_cost = sum((priced_cost(row)[0] or 0) for row in rows)
+
+    month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+    month_rows = db.scalars(
+        select(ContentVariant).where(ContentVariant.created_at >= month_start)
+    ).all()
+    month_cost = round(sum((priced_cost(row)[0] or 0) for row in month_rows), 6)
+    monthly_budget = float(setting_value(db, "llm.monthly_budget", "0") or 0)
+    warning_percent = int(setting_value(db, "llm.budget_warning_percent", "80") or 80)
+    budget_used_percent = round(month_cost / monthly_budget * 100, 2) if monthly_budget > 0 else 0
     return {
         "days": days,
         "generations": len(rows),
+        "pricedGenerations": priced_generations,
+        "unpricedGenerations": unpriced_generations,
         "promptTokens": sum(row.prompt_tokens for row in rows),
         "completionTokens": sum(row.completion_tokens for row in rows),
         "totalTokens": total_tokens,
-        "estimatedCost": round(sum(row.estimated_cost for row in rows), 6),
+        "estimatedCost": round(total_cost, 6),
         "averageTokens": round(total_tokens / len(rows)) if rows else 0,
         "currency": setting_value(db, "llm.currency", "CNY"),
+        "priceConfigured": price_configured,
+        "inputPricePerMillion": input_price,
+        "outputPricePerMillion": output_price,
+        "monthlyBudget": monthly_budget,
+        "monthlyCost": month_cost,
+        "budgetWarningPercent": warning_percent,
+        "budgetUsedPercent": budget_used_percent,
+        "budgetAlert": monthly_budget > 0 and budget_used_percent >= warning_percent,
         "byModel": [
             {**item, "cost": round(float(item["cost"]), 6)}
             for item in sorted(
@@ -182,7 +241,27 @@ def llm_usage(db: Session, days: int) -> dict:
             )
         ],
         "daily": [
-            {"date": day, "tokens": values["tokens"], "cost": round(float(values["cost"]), 6)}
+            {
+                "date": day,
+                "tokens": values["tokens"],
+                "cost": round(float(values["cost"]), 6),
+                "unpricedGenerations": values["unpriced"],
+            }
             for day, values in sorted(daily_groups.items())
+        ],
+        "recent": [
+            {
+                "id": row.id,
+                "articleTitle": row.article.title,
+                "platform": row.platform,
+                "model": row.model_name or "未标记模型",
+                "promptTokens": row.prompt_tokens,
+                "completionTokens": row.completion_tokens,
+                "totalTokens": row.token_usage,
+                "cost": priced_cost(row)[0],
+                "pricingStatus": priced_cost(row)[1],
+                "createdAt": row.created_at.isoformat(),
+            }
+            for row in rows[:20]
         ],
     }

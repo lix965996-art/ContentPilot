@@ -12,6 +12,9 @@ import type {
   Schedule,
   Variant,
   MediaAsset,
+  OperationRun,
+  ResearchItem,
+  ScheduleBacklogItem,
   WechatFormatProfile,
   WechatThemeProfile,
   TrendAnalysis,
@@ -90,9 +93,26 @@ export const workflowApi = {
   task(id: string) {
     return unwrap<GenerationTask>(apiClient.get(`/generation/tasks/${id}`))
   },
+  latestDeepTask(articleId: number) {
+    return unwrap<GenerationTask | null>(
+      apiClient.get(`/generation/articles/${articleId}/latest-deep-task`),
+    )
+  },
   retryTaskPlatform(id: string, platform: Platform) {
     return unwrap<{ taskId: string; status: string }>(
       apiClient.post(`/generation/tasks/${id}/platforms/${platform}/retry`),
+    )
+  },
+  selectDeepCandidate(id: string, platform: Platform, candidateIndex: number) {
+    return unwrap<{ variant: Variant; task: GenerationTask }>(
+      apiClient.post(`/generation/tasks/${id}/platforms/${platform}/select-candidate`, {
+        candidate_index: candidateIndex,
+      }),
+    )
+  },
+  regenerateDeepPlatform(id: string, platform: Platform, feedback: string) {
+    return unwrap<{ taskId: string; status: string }>(
+      apiClient.post(`/generation/tasks/${id}/platforms/${platform}/regenerate`, { feedback }),
     )
   },
   reviewVariant(id: number) {
@@ -136,11 +156,48 @@ export const workflowApi = {
   articleMedia(id: number) {
     return unwrap<MediaAsset[]>(apiClient.get(`/articles/${id}/media`))
   },
+  mediaAssets(params: Record<string, unknown> = {}) {
+    return unwrap<{ items: MediaAsset[]; collections: string[]; total: number }>(
+      apiClient.get('/media/assets', { params }),
+    )
+  },
+  updateMedia(id: number, data: Record<string, unknown>) {
+    return unwrap<MediaAsset>(apiClient.put(`/media/${id}`, data))
+  },
+  attachMedia(id: number, articleId: number, usageType: 'COVER' | 'BODY') {
+    return unwrap<MediaAsset>(
+      apiClient.post(`/media/${id}/attach`, {
+        article_id: articleId,
+        usage_type: usageType,
+      }),
+    )
+  },
+  detachMedia(id: number) {
+    return unwrap<MediaAsset>(apiClient.post(`/media/${id}/detach`))
+  },
+  setMediaCover(id: number) {
+    return unwrap<MediaAsset>(apiClient.post(`/media/${id}/set-cover`))
+  },
+  researchItems(params: Record<string, unknown> = {}) {
+    return unwrap<ResearchItem[]>(apiClient.get('/research-items', { params }))
+  },
+  createResearchItem(data: Record<string, unknown>) {
+    return unwrap<ResearchItem>(apiClient.post('/research-items', data))
+  },
+  updateResearchItem(id: number, data: Record<string, unknown>) {
+    return unwrap<ResearchItem>(apiClient.put(`/research-items/${id}`, data))
+  },
+  archiveResearchItem(id: number) {
+    return unwrap<{ id: number }>(apiClient.delete(`/research-items/${id}`))
+  },
   recommend(data: { article_id: number; variant_id?: number; platform: Platform }) {
     return unwrap<Record<string, unknown>>(apiClient.post('/recommendations/publish-time', data))
   },
   schedules(params: Record<string, unknown> = {}) {
     return unwrap<Schedule[]>(apiClient.get('/schedules', { params }))
+  },
+  scheduleBacklog() {
+    return unwrap<ScheduleBacklogItem[]>(apiClient.get('/schedules/backlog'))
   },
   schedule(id: number) {
     return unwrap<Schedule>(apiClient.get(`/schedules/${id}`))
@@ -153,6 +210,12 @@ export const workflowApi = {
   },
   scheduleAction(id: number, action: string, data: Record<string, unknown> = {}) {
     return unwrap<Schedule>(apiClient.post(`/schedules/${id}/${action}`, data))
+  },
+  operationRuns(params: Record<string, unknown> = {}) {
+    return unwrap<{
+      items: OperationRun[]
+      summary: { total: number; running: number; failed: number; success: number }
+    }>(apiClient.get('/operation-runs', { params }))
   },
   dashboard() {
     return unwrap<Record<string, unknown>>(apiClient.get('/dashboard/business'))
@@ -215,6 +278,8 @@ export const workflowApi = {
         input_price_per_million: data.inputPricePerMillion,
         output_price_per_million: data.outputPricePerMillion,
         currency: data.currency,
+        monthly_budget: data.monthlyBudget,
+        budget_warning_percent: data.budgetWarningPercent,
       }),
     )
   },
@@ -228,6 +293,8 @@ export const workflowApi = {
         input_price_per_million: data.inputPricePerMillion,
         output_price_per_million: data.outputPricePerMillion,
         currency: data.currency,
+        monthly_budget: data.monthlyBudget,
+        budget_warning_percent: data.budgetWarningPercent,
       }),
     )
   },
@@ -252,6 +319,45 @@ export const workflowApi = {
       }
     >(apiClient.post(`/platform-accounts/${platform}/test`))
   },
+  xiaohongshuLoginQrcode() {
+    return unwrap<{ imageDataUrl: string; message: string }>(
+      apiClient.post('/platform-accounts/XIAOHONGSHU/login-qrcode'),
+    )
+  },
+  xiaohongshuLogout() {
+    return unwrap<PlatformAccount>(apiClient.post('/platform-accounts/XIAOHONGSHU/logout'))
+  },
+  toutiaoLoginQrcode() {
+    return unwrap<{ connected: boolean; imageDataUrl: string; message: string }>(
+      apiClient.post('/platform-accounts/TOUTIAO/login-qrcode'),
+    )
+  },
+  toutiaoLogout() {
+    return unwrap<PlatformAccount>(apiClient.post('/platform-accounts/TOUTIAO/logout'))
+  },
+  wechatLoginQrcode() {
+    return unwrap<{ connected: boolean; imageDataUrl: string; message: string }>(
+      apiClient.post('/platform-accounts/WECHAT_OFFICIAL/login-qrcode', undefined, {
+        timeout: 60_000,
+      }),
+    )
+  },
+  wechatLogout() {
+    return unwrap<PlatformAccount>(
+      apiClient.post('/platform-accounts/WECHAT_OFFICIAL/logout', undefined, {
+        timeout: 60_000,
+      }),
+    )
+  },
+  saveWechatDraft(variantId: number) {
+    return unwrap<{
+      scheduleId: number
+      status: string
+      draftId: string
+      draftUrl?: string
+      resultMode: string
+    }>(apiClient.post(`/variants/${variantId}/wechat-draft`, undefined, { timeout: 180_000 }))
+  },
   disconnectPlatformAccount(platform: Platform) {
     return unwrap<PlatformAccount>(apiClient.delete(`/platform-accounts/${platform}`))
   },
@@ -263,6 +369,11 @@ export const workflowApi = {
   startWeiboOAuth(redirectUri: string) {
     return unwrap<{ authorizationUrl: string }>(
       apiClient.post('/platform-accounts/WEIBO/oauth/start', { redirect_uri: redirectUri }),
+    )
+  },
+  startXOAuth(redirectUri: string) {
+    return unwrap<{ authorizationUrl: string }>(
+      apiClient.post('/platform-accounts/X/oauth/start', { redirect_uri: redirectUri }),
     )
   },
   publishPackage(id: number) {

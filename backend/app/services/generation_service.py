@@ -35,9 +35,22 @@ from app.schemas.generation import (
     KeywordExtractionOutput,
     QualityReviewOutput,
 )
+from app.services.platform_content import (
+    build_weibo_status,
+    build_x_post,
+    normalize_topics,
+    x_weighted_length,
+)
 from app.services.setting_service import setting_value
+from app.services.wechat_formatting import format_wechat_html
 
-PLATFORM_NAMES = {"WEIBO": "微博", "XIAOHONGSHU": "小红书", "WECHAT_OFFICIAL": "微信公众号"}
+PLATFORM_NAMES = {
+    "WEIBO": "微博",
+    "X": "X",
+    "XIAOHONGSHU": "小红书",
+    "WECHAT_OFFICIAL": "微信公众号",
+    "TOUTIAO": "今日头条",
+}
 MAX_STRUCTURED_ATTEMPTS = 3
 StatusCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
 
@@ -62,6 +75,7 @@ class GenerationResult:
     strategy: dict[str, Any] | None = None
     review_detail: dict[str, Any] | None = None
     candidate_titles: list[str] | None = None
+    candidates: list[dict[str, Any]] | None = None
     selected_candidate: int | None = None
 
 
@@ -129,19 +143,49 @@ def _baseline_variant(
             "hashtags": [f"#{item}#" for item in keywords[:3]] if include_tags else [],
             "warnings": [f"Prompt 回归基线：本地规则按“{style}”风格生成"],
         }
+    if platform == "X":
+        title = article.title[:35]
+        content = "；".join(selected)[:80] or title
+        tags = [f"#{item}" for item in keywords[:2]] if include_tags else []
+        while x_weighted_length(build_x_post(title, content, tags)) > 280 and len(content) > 1:
+            content = content[:-1]
+        return {
+            "title": title,
+            "content": content,
+            "hashtags": tags,
+            "warnings": [f"Prompt 回归基线：本地规则按“{style}”风格生成"],
+        }
     if platform == "XIAOHONGSHU":
         sections = "\n\n".join(f"{index + 1}. {point}" for index, point in enumerate(selected))
         return {
-            "title": article.title[:30],
+            "title": article.title[:20],
             "content": f"给{audience}的重点整理{emoji}\n\n{sections}\n\n以上内容均来自原文。",
             "hashtags": [f"#{item}" for item in keywords[:6]] if include_tags else [],
             "cover_text": article.title[:20],
             "warnings": [f"Prompt 回归基线：本地规则按“{style}”风格生成"],
         }
-    sections = "\n\n".join(f"## {point[:22]}\n\n{point}。" for point in selected)
+    if platform == "TOUTIAO":
+        section_numbers = ("一", "二", "三", "四", "五", "六")
+        sections = "\n\n".join(
+            f"{section_numbers[index]}、{point[:22]}\n\n{point}。"
+            for index, point in enumerate(selected)
+        )
+        return {
+            "title": article.title[:30],
+            "summary": (article.summary or selected[0])[:120],
+            "content": f"{article.title}\n\n{sections}\n\n以上内容基于原文整理。",
+            "hashtags": [f"#{item}" for item in keywords[:6]] if include_tags else [],
+            "cover_prompt": f"{article.topic or article.title}，新闻编辑配图，真实克制",
+            "warnings": [f"Prompt 回归基线：本地规则按“{style}”风格生成"],
+        }
+    section_numbers = ("一", "二", "三", "四", "五", "六")
+    sections = "\n\n".join(
+        f"{section_numbers[index]}、{point[:22]}\n\n{point}。"
+        for index, point in enumerate(selected)
+    )
     wechat_content = (
-        f"# {article.title}\n\n> 面向{audience}的内容整理。\n\n"
-        f"{sections}\n\n## 结语\n\n以上内容基于原文整理。"
+        f"{article.title}\n\n面向{audience}的内容整理。\n\n"
+        f"{sections}\n\n结语\n\n以上内容基于原文整理。"
     )
     return {
         "title": article.title[:64],
@@ -199,10 +243,19 @@ async def _chat_completion(
         response.raise_for_status()
         payload = response.json()
         usage = payload.get("usage", {})
+        prompt_tok = int(usage.get("prompt_tokens", 0))
+        completion_tok = int(usage.get("completion_tokens", 0))
+        # Some providers omit completion_tokens but return total_tokens.
+        # Derive the completion count from the difference so that downstream
+        # cost estimates (prompt * input_price + completion * output_price)
+        # are not inflated by double-counting prompt tokens.
+        if not completion_tok:
+            total_tok = int(usage.get("total_tokens", 0))
+            completion_tok = max(0, total_tok - prompt_tok)
         return (
             payload["choices"][0]["message"]["content"],
-            int(usage.get("prompt_tokens", 0)),
-            int(usage.get("completion_tokens", 0) or usage.get("total_tokens", 0)),
+            prompt_tok,
+            completion_tok,
         )
 
 
@@ -291,6 +344,122 @@ async def _validated_completion(
     raise AppException(50201, f"结构化输出连续 {max_attempts} 次校验失败：{last_error}", 502)
 
 
+def compact_weibo_image_payload(data: dict[str, Any], limit: int = 140) -> dict[str, Any]:
+    """Return a deterministic, publishable fallback for Weibo's image endpoint."""
+    fitted = sanitize_generation_payload(data)
+    title = str(fitted.get("title") or "").strip()[:32]
+    content = str(fitted.get("content") or "").strip()
+    hashtags = normalize_topics(fitted.get("hashtags"), limit=2)
+
+    def status(body: str, topics: list[str] | None = None) -> str:
+        return build_weibo_status(title, body, hashtags if topics is None else topics)
+
+    while hashtags and len(status(content)) > limit:
+        hashtags.pop()
+
+    if len(status(content)) > limit:
+        low, high = 1, len(content)
+        best = ""
+        while low <= high:
+            middle = (low + high) // 2
+            candidate = content[:middle].rstrip("，、；：,. ")
+            if middle < len(content):
+                candidate = f"{candidate}…"
+            if len(status(candidate)) <= limit:
+                best = candidate
+                low = middle + 1
+            else:
+                high = middle - 1
+        content = best or content[:1]
+
+    fitted["title"] = title
+    fitted["content"] = content
+    fitted["hashtags"] = hashtags
+    warnings = [str(item) for item in fitted.get("warnings") or []]
+    notice = "已自动压缩为适合微博图文接口的 140 字版本"
+    fitted["warnings"] = list(dict.fromkeys([*warnings, notice]))
+    return fitted
+
+
+async def _ensure_weibo_image_safe(
+    runtime: LlmRuntime,
+    article: ContentArticle,
+    data: dict[str, Any],
+    *,
+    status_callback: StatusCallback | None = None,
+) -> tuple[dict[str, Any], int, int, int]:
+    """Ask the LLM to shorten an over-limit Weibo result, then fall back locally."""
+    current = sanitize_generation_payload(data)
+    if (
+        len(
+            build_weibo_status(
+                current.get("title", ""), current.get("content", ""), current.get("hashtags")
+            )
+        )
+        <= 140
+    ):
+        return current, 0, 0, 0
+
+    prompt_tokens = 0
+    completion_tokens = 0
+    attempts = 0
+    for correction in range(1, 3):
+        attempts += 1
+        if status_callback:
+            await status_callback(
+                "RETRYING",
+                {
+                    "progress": 88,
+                    "stage": "FITTING_PLATFORM_LIMIT",
+                    "message": f"微博图文超出接口限制，正在自动压缩（第 {correction} 次）",
+                    "attempt": correction,
+                    "maxAttempts": 2,
+                },
+            )
+        compression_prompt = (
+            "请把下面的微博稿压缩为可直接带图发布的版本。"
+            "title、content 和 hashtags 按微博显示形式合并后必须不超过 140 个字符；"
+            "保留原文中最重要的事实，不新增数据，不输出 Markdown，只返回完整 JSON。\n"
+            f"原文标题：{article.title}\n原文正文：{article.source_text}\n"
+            f"待压缩稿：{json.dumps(current, ensure_ascii=False)}"
+        )
+        try:
+            corrected, used_prompt, used_completion, _ = await _validated_completion(
+                runtime,
+                SYSTEM_PROMPT,
+                compression_prompt,
+                OUTPUT_MODELS["WEIBO"],
+                max_attempts=1,
+            )
+            prompt_tokens += used_prompt
+            completion_tokens += used_completion
+            candidate = sanitize_generation_payload(corrected.model_dump())
+            if (
+                len(
+                    build_weibo_status(
+                        candidate.get("title", ""),
+                        candidate.get("content", ""),
+                        candidate.get("hashtags"),
+                    )
+                )
+                <= 140
+            ):
+                warnings = [str(item) for item in candidate.get("warnings") or []]
+                candidate["warnings"] = list(
+                    dict.fromkeys([*warnings, "已由 AI 自动压缩为可带图发布版本"])
+                )
+                return candidate, prompt_tokens, completion_tokens, attempts
+            current = candidate
+        except AppException:
+            continue
+    return (
+        compact_weibo_image_payload(current),
+        prompt_tokens,
+        completion_tokens,
+        attempts,
+    )
+
+
 async def generate_variant_data(
     db: Session,
     article: ContentArticle,
@@ -336,8 +505,19 @@ async def generate_variant_data(
         OUTPUT_MODELS[platform],
         status_callback=status_callback,
     )
+    data = validated.model_dump()
+    if platform == "WEIBO":
+        data, fit_prompt, fit_completion, fit_attempts = await _ensure_weibo_image_safe(
+            runtime,
+            article,
+            data,
+            status_callback=status_callback,
+        )
+        prompt_tokens += fit_prompt
+        completion_tokens += fit_completion
+        attempts += fit_attempts
     return GenerationResult(
-        validated.model_dump(),
+        data,
         runtime.model_name,
         runtime.provider,
         int((time.perf_counter() - started) * 1000),
@@ -354,6 +534,7 @@ async def generate_content_brief(
 ) -> tuple[dict[str, Any], int, int]:
     prompt = (
         f"创作目标：{options.get('creative_goal', '知识分享')}\n"
+        f"额外创作要求：{options.get('creative_requirements') or '未提供'}\n"
         f"目标受众：{options.get('target_audience') or article.target_audience or '普通中文读者'}\n"
         f"原文标题：{article.title}\n原文摘要：{article.summary or '未提供'}\n"
         f"原文正文：\n{article.source_text}"
@@ -424,6 +605,9 @@ async def generate_deep_variant_data(
         status_callback=mapped_callback,
     )
     draft_data = draft.model_dump()
+    draft_data["candidates"] = [
+        sanitize_generation_payload(candidate) for candidate in draft_data["candidates"]
+    ]
     if status_callback:
         await status_callback(
             "RUNNING",
@@ -433,6 +617,7 @@ async def generate_deep_variant_data(
                 "message": "两个候选稿已生成，AI 主编正在对照事实逐项评审并修订",
                 "strategy": draft_data["strategy"],
                 "candidateTitles": [item["title"] for item in draft_data["candidates"]],
+                "candidates": draft_data["candidates"],
             },
         )
 
@@ -471,6 +656,18 @@ async def generate_deep_variant_data(
         status_callback=review_callback,
     )
     final_data = final.model_dump()
+    final_data["final"] = sanitize_generation_payload(final_data["final"])
+    if platform == "WEIBO":
+        fitted, fit_prompt, fit_completion, fit_attempts = await _ensure_weibo_image_safe(
+            runtime,
+            article,
+            final_data["final"],
+            status_callback=status_callback,
+        )
+        final_data["final"] = fitted
+        p2 += fit_prompt
+        c2 += fit_completion
+        attempts2 += fit_attempts
     review = {key: value for key, value in final_data.items() if key != "final"}
     return GenerationResult(
         data=final_data["final"],
@@ -483,6 +680,7 @@ async def generate_deep_variant_data(
         strategy=draft_data["strategy"],
         review_detail=review,
         candidate_titles=[item["title"] for item in draft_data["candidates"]],
+        candidates=draft_data["candidates"],
         selected_candidate=review["selected_candidate"],
     )
 
@@ -506,11 +704,23 @@ def count_emoji(text: str) -> int:
 
 
 def normalize_visible_markdown(text: str) -> str:
-    """Remove model-emitted Markdown markers that are ugly in plain-text editors."""
-    cleaned = re.sub(r"\*\*([^*\n]+)\*\*", r"\1", text)
+    """Remove all visible Markdown markers and forbid hash characters."""
+    cleaned = text.replace("#", "")
+    cleaned = re.sub(r"(?m)^[ \t]+", "", cleaned)
+    cleaned = re.sub(r"\*\*([^*\n]+)\*\*", r"\1", cleaned)
     cleaned = re.sub(r"(?m)^\s*\*\s+", "• ", cleaned)
     cleaned = re.sub(r"(?<!\*)\*([^*\n]+)\*(?!\*)", r"\1", cleaned)
     return cleaned
+
+
+def sanitize_generation_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Sanitize every model field shown to users while preserving hashtags."""
+    sanitized = dict(data)
+    for key in ("title", "content", "summary", "cover_text", "cover_prompt", "author"):
+        value = sanitized.get(key)
+        if isinstance(value, str):
+            sanitized[key] = normalize_visible_markdown(value)
+    return sanitized
 
 
 def _inline_markdown(value: str) -> str:
@@ -532,6 +742,7 @@ def markdown_to_safe_html(markdown: str) -> str:
                 list_open = False
             continue
         heading = re.match(r"^(#{1,3})\s+(.+)$", line)
+        plain_heading = re.match(r"^(?:[一二三四五六七八九十]+、|\d+[、.])\s*(.+)$", line)
         bullet = re.match(r"^[-*]\s+(.+)$", line)
         if heading:
             if list_open:
@@ -539,6 +750,11 @@ def markdown_to_safe_html(markdown: str) -> str:
                 list_open = False
             level = len(heading.group(1))
             blocks.append(f"<h{level}>{_inline_markdown(heading.group(2))}</h{level}>")
+        elif plain_heading:
+            if list_open:
+                blocks.append("</ul>")
+                list_open = False
+            blocks.append(f"<h3>{_inline_markdown(line)}</h3>")
         elif bullet:
             if not list_open:
                 blocks.append("<ul>")
@@ -571,15 +787,33 @@ def rule_quality_review(
     profile = PLATFORM_PROFILES[platform]
     issues: list[str] = []
     format_score = 100.0
-    if platform == "WECHAT_OFFICIAL" and "## " not in content:
+    if platform == "WECHAT_OFFICIAL" and not re.search(
+        r"(?m)^(?:[一二三四五六七八九十]+、|\d+[、.])", content
+    ):
         format_score -= 25
-        issues.append("公众号正文缺少二级标题")
-    if platform == "XIAOHONGSHU" and len(data.get("title", "")) > 30:
+        issues.append("公众号正文缺少清晰的小标题")
+    if platform == "XIAOHONGSHU" and len(data.get("title", "")) > 20:
         format_score -= 30
         issues.append("小红书标题过长")
+    if platform == "XIAOHONGSHU" and len(content) > 1000:
+        format_score -= 30
+        issues.append("小红书正文超过 1000 个字符")
+    if platform == "TOUTIAO" and not 2 <= len(data.get("title", "")) <= 30:
+        format_score -= 30
+        issues.append("今日头条标题必须为 2～30 个字符")
+    if platform == "TOUTIAO" and len(content) < 50:
+        format_score -= 25
+        issues.append("今日头条正文过短")
     if platform == "WEIBO" and len(content) > 2000:
         format_score -= 30
         issues.append("微博正文过长")
+    if platform == "X":
+        weighted_length = x_weighted_length(
+            build_x_post(data.get("title", ""), content, data.get("hashtags", []))
+        )
+        if weighted_length > 280:
+            format_score -= 40
+            issues.append(f"X 帖子超过 280 个加权字符（当前 {weighted_length}）")
     readability = max(
         55.0, 100 - max(0, len(max(content.split("\n"), key=len, default="")) - 120) / 3
     )
@@ -668,10 +902,21 @@ def save_variant(
         )
         or 0
     ) + 1
-    data = dict(result.data)
-    content = normalize_visible_markdown(data["content"])
-    data["content"] = content
+    data = sanitize_generation_payload(result.data)
+    if platform == "WEIBO":
+        data = compact_weibo_image_payload(data)
+    content = data["content"]
     data["title"] = normalize_visible_markdown(data.get("title") or article.title)
+    data["hashtags"] = normalize_topics(
+        data.get("hashtags", []),
+        limit={"WEIBO": 5, "X": 4, "XIAOHONGSHU": 10, "WECHAT_OFFICIAL": 8, "TOUTIAO": 8}.get(
+            platform, 10
+        ),
+    )
+    if platform == "WECHAT_OFFICIAL":
+        content_html, format_profile = format_wechat_html(content)
+    else:
+        content_html, format_profile = markdown_to_safe_html(content), {}
     input_price = float(setting_value(db, "llm.input_price_per_million", "0") or 0)
     output_price = float(setting_value(db, "llm.output_price_per_million", "0") or 0)
     estimated_cost = (
@@ -719,7 +964,8 @@ def save_variant(
         version_no=version,
         title=data.get("title") or article.title,
         content_text=content,
-        content_html=markdown_to_safe_html(content),
+        content_html=content_html,
+        format_profile_json=format_profile,
         hashtags_json=data.get("hashtags", []),
         emoji_count=count_emoji(content + data.get("title", "")),
         word_count=len(content),

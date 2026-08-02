@@ -31,17 +31,28 @@ HEADERS = [
     "collects",
     "shares",
     "followers",
+    "metric_basis",
     "data_source",
 ]
+OPTIONAL_HEADERS = {"metric_basis", "followers", "data_source"}
+DEFAULT_METRIC_BASIS = "IMPRESSIONS"
+DEFAULT_DATA_SOURCE = "IMPORTED"
 
 
 def _save_metric(db: Session, payload: MetricCreate) -> EngagementMetric:
     if not db.get(PublishSchedule, payload.schedule_id):
         raise AppException(40407, f"排期任务 {payload.schedule_id} 不存在", 404)
     total = payload.likes + payload.comments + payload.collects + payload.shares
-    denominator = payload.impressions or payload.followers
+    # Resolve the denominator from the caller's explicit choice. Previously the
+    # code silently fell back to followers when impressions was zero, which
+    # inflated engagement rates whenever a platform did not expose impressions.
+    # The denominator is now selected explicitly; zero denominator means the
+    # caller did not provide a valid basis, and we record the rate as 0.
+    denominator = (
+        payload.impressions if payload.metric_basis == "IMPRESSIONS" else payload.followers
+    )
     return EngagementMetric(
-        **payload.model_dump(),
+        **payload.model_dump(exclude={"metric_basis"}),
         engagement_total=total,
         engagement_rate=round(total / denominator, 6) if denominator else 0,
     )
@@ -124,6 +135,9 @@ async def import_metrics(
     success, errors = 0, []
     for index, item in enumerate(records, start=2):
         try:
+            basis = str(item.get("metric_basis") or DEFAULT_METRIC_BASIS).upper()
+            if basis not in {"IMPRESSIONS", "FOLLOWERS"}:
+                basis = DEFAULT_METRIC_BASIS
             payload = MetricCreate(
                 schedule_id=int(item["schedule_id"]),
                 platform=str(item["platform"]),
@@ -135,7 +149,8 @@ async def import_metrics(
                 collects=int(item["collects"] or 0),
                 shares=int(item["shares"] or 0),
                 followers=int(item["followers"] or 0),
-                data_source=str(item["data_source"] or "IMPORTED"),
+                metric_basis=basis,
+                data_source=str(item["data_source"] or DEFAULT_DATA_SOURCE),
             )
             with db.begin_nested():
                 db.add(_save_metric(db, payload))
