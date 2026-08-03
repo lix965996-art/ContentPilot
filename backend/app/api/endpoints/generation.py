@@ -183,19 +183,26 @@ async def _run_generation_task(task_id: str) -> None:
                 async def callback(status: str, detail: dict[str, Any]) -> None:
                     await update_platform(platform, status, detail)
 
-                if options.get("generation_mode") == "DEEP" and brief is not None:
-                    return await generate_deep_variant_data(
-                        db,
-                        article,
-                        platform,
-                        options,
-                        brief,
-                        status_callback=callback,
-                        runtime=runtime,
+                # Each concurrent task gets its own session to avoid any risk of
+                # shared-state issues. In practice runtime is pre-loaded so this
+                # session is only a fallback for load_llm_runtime().
+                task_db = SessionLocal()
+                try:
+                    if options.get("generation_mode") == "DEEP" and brief is not None:
+                        return await generate_deep_variant_data(
+                            task_db,
+                            article,
+                            platform,
+                            options,
+                            brief,
+                            status_callback=callback,
+                            runtime=runtime,
+                        )
+                    return await generate_variant_data(
+                        task_db, article, platform, options, status_callback=callback, runtime=runtime
                     )
-                return await generate_variant_data(
-                    db, article, platform, options, status_callback=callback, runtime=runtime
-                )
+                finally:
+                    task_db.close()
 
             results = await asyncio.gather(
                 *(run_one(platform) for platform in task.platforms_json),

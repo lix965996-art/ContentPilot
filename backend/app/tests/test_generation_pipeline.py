@@ -81,7 +81,7 @@ def test_user_options_are_written_into_prompt() -> None:
     assert "可见文本" in prompt
     assert "严禁出现井号字符" in prompt
     assert "不超过 140 字" in PLATFORM_PROFILES["WEIBO"].render()
-    assert PROMPT_VERSION == "3.5.0"
+    assert PROMPT_VERSION == "4.0.0"
 
 
 def test_visible_markdown_markers_and_hash_characters_are_cleaned() -> None:

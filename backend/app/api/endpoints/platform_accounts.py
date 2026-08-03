@@ -231,6 +231,7 @@ async def xiaohongshu_login_qrcode(
         {
             "imageDataUrl": image_data_url,
             "message": result.get("message", ""),
+            "expiresInSeconds": 240,
         },
         "请使用小红书 App 扫码登录",
     )
@@ -271,6 +272,7 @@ async def xiaohongshu_logout(
 @router.post("/TOUTIAO/login-qrcode")
 async def toutiao_login_qrcode(
     request: Request,
+    refresh: bool = False,
     db: Session = Depends(get_db),
     user: User = Depends(require_roles("ADMIN")),
 ) -> dict:
@@ -279,7 +281,7 @@ async def toutiao_login_qrcode(
     account = get_platform_account(db, "TOUTIAO")
     if not account:
         raise AppException(40411, "请先保存今日头条账号配置", 404)
-    result = await get_login_qrcode(account.id)
+    result = await get_login_qrcode(account.id, force_refresh=refresh)
     if result.get("connected"):
         checked_at = datetime.now()
         account.status = "CONNECTED"
@@ -289,7 +291,12 @@ async def toutiao_login_qrcode(
         db.commit()
         return success_response(
             request,
-            {"connected": True, "imageDataUrl": "", "message": result.get("message", "")},
+            {
+                "connected": True,
+                "imageDataUrl": "",
+                "message": result.get("message", ""),
+                "expiresInSeconds": 0,
+            },
             "今日头条账号已登录",
         )
     image_data_url = str(result.get("image_data_url") or "")
@@ -297,7 +304,12 @@ async def toutiao_login_qrcode(
         raise AppException(50214, str(result.get("message") or "未获取到登录二维码"), 502)
     return success_response(
         request,
-        {"connected": False, "imageDataUrl": image_data_url, "message": result.get("message", "")},
+        {
+            "connected": False,
+            "imageDataUrl": image_data_url,
+            "message": result.get("message", ""),
+            "expiresInSeconds": 120,
+        },
         "请扫码登录今日头条",
     )
 
@@ -305,6 +317,7 @@ async def toutiao_login_qrcode(
 @router.post("/WECHAT_OFFICIAL/login-qrcode")
 async def wechat_login_qrcode(
     request: Request,
+    refresh: bool = False,
     db: Session = Depends(get_db),
     user: User = Depends(require_roles("ADMIN")),
 ) -> dict:
@@ -313,7 +326,7 @@ async def wechat_login_qrcode(
     account = get_platform_account(db, "WECHAT_OFFICIAL")
     if not account or account.publish_mode != "BROWSER_DRAFT":
         raise AppException(40411, "请先保存微信公众号本机扫码配置", 404)
-    result = await get_wechat_login_qrcode(account.id)
+    result = await get_wechat_login_qrcode(account.id, force_refresh=refresh)
     if result.get("connected"):
         checked_at = datetime.now()
         account.status = "CONNECTED"
@@ -323,7 +336,12 @@ async def wechat_login_qrcode(
         db.commit()
         return success_response(
             request,
-            {"connected": True, "imageDataUrl": "", "message": result.get("message", "")},
+            {
+                "connected": True,
+                "imageDataUrl": "",
+                "message": result.get("message", ""),
+                "expiresInSeconds": 0,
+            },
             "微信公众号账号已登录",
         )
     image_data_url = str(result.get("image_data_url") or "")
@@ -335,6 +353,7 @@ async def wechat_login_qrcode(
             "connected": False,
             "imageDataUrl": image_data_url,
             "message": result.get("message", ""),
+            "expiresInSeconds": 240,
         },
         "请扫码登录微信公众号",
     )

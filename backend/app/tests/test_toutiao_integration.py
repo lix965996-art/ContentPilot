@@ -4,8 +4,9 @@ from sqlalchemy import select
 from app.api.endpoints import platform_accounts as platform_accounts_endpoint
 from app.core.credentials import decrypt_json
 from app.db.session import SessionLocal
-from app.models.business import ContentArticle, PlatformAccount
+from app.models.business import ContentArticle, ContentVariant, PlatformAccount
 from app.prompts.profiles import PLATFORM_PROFILES, build_generation_prompt
+from app.publishers.base import PublishResult
 from app.publishers.toutiao_browser import ToutiaoBrowserPublisher
 from app.services import platform_account_service
 from app.services.platform_content import validate_platform_publish
@@ -76,7 +77,10 @@ def test_toutiao_account_qr_login_and_safe_metadata(client, login_as, monkeypatc
     assert saved.status_code == 200, saved.text
     assert saved.json()["data"]["status"] == "LOGIN_REQUIRED"
 
-    async def fake_qrcode(_account_id: int):
+    refresh_requests: list[bool] = []
+
+    async def fake_qrcode(_account_id: int, *, force_refresh: bool = False):
+        refresh_requests.append(force_refresh)
         return {
             "connected": False,
             "image_data_url": "data:image/png;base64,dGVzdA==",
@@ -84,9 +88,11 @@ def test_toutiao_account_qr_login_and_safe_metadata(client, login_as, monkeypatc
         }
 
     monkeypatch.setattr(platform_accounts_endpoint, "get_login_qrcode", fake_qrcode)
-    qrcode = client.post("/api/platform-accounts/TOUTIAO/login-qrcode", headers=auth)
+    qrcode = client.post("/api/platform-accounts/TOUTIAO/login-qrcode?refresh=true", headers=auth)
     assert qrcode.status_code == 200, qrcode.text
     assert qrcode.json()["data"]["imageDataUrl"].startswith("data:image/png;base64,")
+    assert qrcode.json()["data"]["expiresInSeconds"] == 120
+    assert refresh_requests == [True]
 
     async def fake_check_login(_account_id: int):
         return True, "毕业设计头条号"
@@ -106,3 +112,49 @@ def test_toutiao_account_qr_login_and_safe_metadata(client, login_as, monkeypatc
         assert config["toutiao_login_username"] == "毕业设计头条号"
         assert "cookie" not in " ".join(config).lower()
         assert toutiao_public_publish_enabled(account)
+
+        account.allow_public_publish = False
+        article = ContentArticle(
+            title="头条草稿测试原文",
+            source_text="这是一段用于验证头条草稿保存流程的原始素材。" * 5,
+            keywords_json=[],
+            created_by=account.user_id,
+        )
+        db.add(article)
+        db.flush()
+        variant = ContentVariant(
+            article_id=article.id,
+            platform="TOUTIAO",
+            version_no=1,
+            title="今日头条草稿保存测试",
+            content_text="这是一段用于验证今日头条真实草稿保存路径的正文内容。" * 5,
+            hashtags_json=[],
+        )
+        db.add(variant)
+        db.flush()
+        variant_id = variant.id
+        db.commit()
+
+    captured: dict = {}
+
+    async def fake_save_draft(self, request):
+        captured.update(request)
+        assert self.mode == "BROWSER_DRAFT"
+        return PublishResult(
+            True,
+            "TOUTIAO",
+            "BROWSER_DRAFT",
+            "DRAFT_CREATED",
+            external_id="toutiao-draft-id",
+            published_url="https://mp.toutiao.com/profile_v4/manage/draft?from=creation",
+            detail={"method": "local_browser_autosave"},
+        )
+
+    monkeypatch.setattr(ToutiaoBrowserPublisher, "publish", fake_save_draft)
+    draft = client.post(f"/api/variants/{variant_id}/toutiao-draft", headers=auth)
+    assert draft.status_code == 200, draft.text
+    draft_data = draft.json()["data"]
+    assert draft_data["status"] == "DRAFT_CREATED"
+    assert draft_data["draftId"] == "toutiao-draft-id"
+    assert draft_data["resultMode"] == "BROWSER_DRAFT"
+    assert captured["title"]

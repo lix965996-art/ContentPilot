@@ -4,7 +4,7 @@ backend/.env
 backend/__pycache__/
 backend/**/__pycache__/
 backend/.pytest_cache/
-backend/.ruff_cache/
+.ruff_cache/
 backend/*.db
 backend/app/tests/.e2e_socialflow.db
 
@@ -26,6 +26,10 @@ uploads/
 logs/
 Thumbs.db
 .DS_Store
+
+# Monitoring agents and local backups
+.nezha/
+backups/
 
 # Local platform sessions and browser-automation artifacts
 cookies.json

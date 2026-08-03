@@ -1,3 +1,4 @@
+import logging
 import uuid
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -5,15 +6,39 @@ from pathlib import Path
 from fastapi import FastAPI, Request
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.staticfiles import StaticFiles
+from sqlalchemy import select
 
 from app.api.router import api_router
 from app.core.config import settings
 from app.core.exceptions import register_exception_handlers
+from app.db.session import SessionLocal
+from app.models.business import GenerationTask
 from app.scheduler.runtime import start_scheduler, stop_scheduler
+
+logger = logging.getLogger(__name__)
+
+
+def _reconcile_stale_tasks() -> None:
+    """Mark generation tasks stuck in RUNNING as FAILED after a server restart."""
+    with SessionLocal() as db:
+        stale = (
+            db.execute(
+                select(GenerationTask).where(GenerationTask.status == "RUNNING")
+            )
+            .scalars()
+            .all()
+        )
+        for task in stale:
+            task.status = "FAILED"
+            task.error_message = "服务重启，生成任务中断"
+        if stale:
+            db.commit()
+            logger.warning("Reconciled %d stale RUNNING generation tasks → FAILED", len(stale))
 
 
 @asynccontextmanager
 async def lifespan(_: FastAPI):
+    _reconcile_stale_tasks()
     start_scheduler()
     yield
     stop_scheduler()

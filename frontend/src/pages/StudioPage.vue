@@ -45,6 +45,7 @@ import type {
 } from '@/types/business'
 import { platformNames } from '@/types/business'
 import { presentOperationError } from '@/utils/operation-error'
+import { xWeightedLength } from '@/utils/text'
 
 const previewPlatformNames: Record<Platform, string> = {
   ...platformNames,
@@ -77,6 +78,8 @@ const regeneratingDeepPlatform = ref(false)
 const reviewing = ref(false)
 const savingWechatDraft = ref(false)
 const wechatDraftStartedAt = ref<number>()
+const savingToutiaoDraft = ref(false)
+const toutiaoDraftStartedAt = ref<number>()
 const reviewResult = ref<Record<string, unknown>>()
 const saved = ref(true)
 const savedToast = ref(false)
@@ -183,6 +186,18 @@ const wechatDraftProgressLabel = computed(() => {
   if (seconds < 15) return '正在打开公众号编辑器'
   if (seconds < 40) return '正在写入内容并保存'
   return '微信响应较慢，仍在等待'
+})
+const toutiaoDraftElapsedSeconds = computed(() =>
+  savingToutiaoDraft.value && toutiaoDraftStartedAt.value
+    ? Math.max(0, Math.floor((clock.value - toutiaoDraftStartedAt.value) / 1000))
+    : 0,
+)
+const toutiaoDraftProgressLabel = computed(() => {
+  const seconds = toutiaoDraftElapsedSeconds.value
+  if (seconds < 3) return '正在准备草稿'
+  if (seconds < 15) return '正在打开头条编辑器'
+  if (seconds < 45) return '正在写入图文并等待云端保存'
+  return '头条响应较慢，仍在确认草稿状态'
 })
 
 function snapshotEditing(): VariantDraftPayload {
@@ -292,7 +307,7 @@ const xStatusLength = computed(() => {
     .filter(Boolean)
     .map((topic) => `#${topic}`)
     .join(' ')
-  return [editing.content_text.trim(), topics].filter(Boolean).join('\n\n').length
+  return xWeightedLength([editing.content_text.trim(), topics].filter(Boolean).join('\n\n'))
 })
 
 function topicName(value: string) {
@@ -998,6 +1013,50 @@ async function saveWechatDraft() {
   }
 }
 
+async function saveToutiaoDraft() {
+  if (!current.value || current.value.platform !== 'TOUTIAO') return
+  const account = accounts.value.find((item) => item.platform === 'TOUTIAO')
+  if (!account?.id || account.status !== 'CONNECTED') {
+    try {
+      await ElMessageBox.confirm('请先在“平台账号”完成今日头条扫码登录。', '今日头条尚未连接', {
+        confirmButtonText: '去连接',
+        cancelButtonText: '取消',
+        type: 'warning',
+      })
+      await router.push({ name: 'platform-accounts', query: { platform: 'TOUTIAO' } })
+    } catch {
+      // 用户选择留在当前编辑页。
+    }
+    return
+  }
+
+  try {
+    await ElMessageBox.confirm(
+      '将先保存当前修改，再短暂打开本机 Chrome，把标题、正文和已选择的图片写入今日头条草稿箱。请不要关闭该窗口；此操作不会公开发布。',
+      '保存到今日头条草稿箱',
+      { confirmButtonText: '保存草稿', cancelButtonText: '取消', type: 'info' },
+    )
+  } catch {
+    return
+  }
+
+  savingToutiaoDraft.value = true
+  toutiaoDraftStartedAt.value = Date.now()
+  try {
+    await save()
+    if (autosaveState.value === 'ERROR') return
+    const result = await workflowApi.saveToutiaoDraft(current.value.id)
+    ElMessage.success(
+      result.draftId ? `已保存到今日头条草稿箱（${result.draftId}）` : '已保存到今日头条草稿箱',
+    )
+  } catch (error) {
+    ElMessage.error(getApiErrorMessage(error, '保存到今日头条草稿箱失败'))
+  } finally {
+    savingToutiaoDraft.value = false
+    toutiaoDraftStartedAt.value = undefined
+  }
+}
+
 function restoreLocalDraft() {
   if (!recoveryDraft.value || recoveryDraft.value.variantId !== current.value?.id) return
   const draft = recoveryDraft.value
@@ -1393,6 +1452,21 @@ onMounted(() => {
       >
         <Send :size="15" class="mr-1" />{{
           savingWechatDraft ? `处理中 ${wechatDraftElapsedSeconds} 秒` : '存入公众号草稿箱'
+        }}
+      </el-button>
+      <span v-if="savingToutiaoDraft" class="wechat-draft-progress" aria-live="polite">
+        {{ toutiaoDraftProgressLabel }} · {{ toutiaoDraftElapsedSeconds }} 秒
+      </span>
+      <el-button
+        v-if="current?.platform === 'TOUTIAO'"
+        type="primary"
+        :loading="savingToutiaoDraft"
+        :disabled="autosaveState === 'SAVING'"
+        data-testid="save-toutiao-draft"
+        @click="saveToutiaoDraft"
+      >
+        <Send :size="15" class="mr-1" />{{
+          savingToutiaoDraft ? '处理中 ' + toutiaoDraftElapsedSeconds + ' 秒' : '存入头条草稿箱'
         }}
       </el-button>
     </PageHeader>

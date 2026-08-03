@@ -14,9 +14,9 @@ test('administrator can configure the real optional Toutiao entry safely', async
   await expect(card).toContainText('尚未登录今日头条创作中心')
 
   await card.getByRole('button', { name: '编辑配置' }).click()
-  await expect(page.getByText('本机 Chrome 扫码登录与真实文章发布')).toBeVisible()
+  await expect(page.getByText('本机 Chrome 保存草稿与真实文章发布')).toBeVisible()
   await expect(
-    page.getByText('安全模式：可以扫码和检测登录，但不会向今日头条发送文章。'),
+    page.getByText('安全模式：可以扫码并保存头条草稿，但不会公开发布文章。'),
   ).toBeVisible()
   await expect(page.getByRole('button', { name: '保存并获取登录二维码' })).toBeVisible()
 })

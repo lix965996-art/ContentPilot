@@ -8,6 +8,17 @@ ContentPilot 是一个面向内容运营团队的多平台 AI 内容工作台。
 
 > 项目不会用模拟数据伪装发布成功。平台登录、草稿创建和公开发布会分别记录状态；浏览器扫码会话只保存在运行 ContentPilot 的本机。
 
+## 30 秒上手
+
+```powershell
+cd E:\Bye-bye\1.0\socialflow-ai
+.\contentpilot.ps1 start
+```
+
+等浏览器自动打开 <http://127.0.0.1:5173>，用 `admin` / `Admin@123456` 登录。停止用 `.\contentpilot.ps1 stop`。首次使用先运行一次 `.\contentpilot.ps1 setup` 安装依赖。
+
+> 报"无法识别"必是两个原因之一：① 没先 `cd` 进本目录；② 文件名打错——后缀是 `.ps1`（数字 1），不是 `.psl`（字母 l）。输入 `.\cont` 后按 **Tab** 自动补全即可避免。
+
 ## 快速导航
 
 - [核心能力](#核心能力)
@@ -38,7 +49,7 @@ ContentPilot 是一个面向内容运营团队的多平台 AI 内容工作台。
 ## 核心能力
 
 - 同一篇原文并行生成微博、X、小红书、微信公众号、今日头条五个独立版本；
-- 提供“快速改写”和“深度创作”两种模式；深度创作会依次完成事实简报、平台策略、双候选稿、AI 主编评审与修订定稿；
+- 提供”快速改写”和”深度创作”两种模式；深度创作会依次完成事实简报、平台策略、双候选稿、AI 主编评审与修订定稿，长文平台（公众号、头条）还会额外执行段落连贯性终审；
 - “选题研究”读取百度热榜与 Hacker News 的真实公开榜单，保留原始链接和来源状态，并可用真实 LLM 生成选题角度；分析结果与自建笔记可保存到灵感库，稍后从灵感条目直接进入创作；
 - 风格、长度、目标读者、原意保留程度、Emoji 和话题标签等参数真实进入 Prompt；
 - 五个平台分别使用独立 Prompt Profile 和 Pydantic 结构化输出模型；
@@ -59,24 +70,24 @@ ContentPilot 是一个面向内容运营团队的多平台 AI 内容工作台。
 
 ## 平台能力矩阵
 
-| 平台 | 内容生成与预览 | 账号连接 | 当前交付方式 |
-| --- | --- | --- | --- |
-| 微博 | 短正文、话题标签、配图预览 | 官方 OAuth | 官方 API 发布 |
-| X | 字符限制与帖子预览 | OAuth 2.0 + PKCE | 官方 API 文字发布 |
-| 小红书 | 标题、正文、标签和图片组合 | 人工交付；可选本机 MCP 扫码 | 下载发布包或实验性 MCP |
+| 平台       | 内容生成与预览                     | 账号连接                               | 当前交付方式                               |
+| ---------- | ---------------------------------- | -------------------------------------- | ------------------------------------------ |
+| 微博       | 短正文、话题标签、配图预览         | 官方 OAuth                             | 官方 API 发布                              |
+| X          | 字符限制与帖子预览                 | OAuth 2.0 + PKCE                       | 官方 API 文字发布                          |
+| 小红书     | 标题、正文、标签和图片组合         | 人工交付；可选本机 MCP 扫码            | 下载发布包或实验性 MCP                     |
 | 微信公众号 | 长文排版、手机预览、标题与正文微调 | 本机 Chrome 扫码；可选 AppID/AppSecret | 保存真实草稿，已选图片会上传到微信素材域名 |
-| 今日头条 | 长文和移动端预览 | 可选本机 Chrome 扫码 | 实验性浏览器发布，默认受安全开关保护 |
+| 今日头条   | 长文和移动端预览                   | 可选本机 Chrome 扫码                   | 实验性浏览器发布，默认受安全开关保护       |
 
 本机浏览器连接依赖 Google Chrome，适合在 Windows 本地开发模式使用。Cookie 和扫码登录资料不会写入数据库，也不会进入 Git；Docker 部署若要使用这些连接，需要额外提供宿主机浏览器能力。
 
 ## 技术栈
 
-| 层级 | 技术 |
-| --- | --- |
-| 前端 | Vue 3、TypeScript、Vite、Pinia、Element Plus、Tailwind CSS、ECharts、FullCalendar |
-| 后端 | FastAPI、SQLAlchemy、Pydantic、Alembic、APScheduler |
-| 数据库 | MySQL 8，开发环境支持 SQLite 回退 |
-| 测试 | Pytest、Ruff、Vitest、ESLint、Prettier、Playwright |
+| 层级   | 技术                                                                              |
+| ------ | --------------------------------------------------------------------------------- |
+| 前端   | Vue 3、TypeScript、Vite、Pinia、Element Plus、Tailwind CSS、ECharts、FullCalendar |
+| 后端   | FastAPI、SQLAlchemy、Pydantic、Alembic、APScheduler                               |
+| 数据库 | MySQL 8，开发环境支持 SQLite 回退                                                 |
+| 测试   | Pytest、Ruff、Vitest、ESLint、Prettier、Playwright                                |
 
 ## 正式启动（推荐）
 
@@ -108,33 +119,36 @@ docker compose down --volumes      # 停止并删除数据，仅在确定要重�
 
 ## Windows 本地开发启动
 
-不使用 Docker 时，需要 Python 3.12、Node.js 20+ 和 MySQL 8。仓库只保留一个管理入口：
+两行命令（**必须先 cd 进本目录**，否则报"无法识别"）：
 
 ```powershell
-.\contentpilot.ps1 setup          # 首次安装或更新依赖
-.\contentpilot.ps1 start          # 后台启动本地开发服务
-.\contentpilot.ps1 status         # 查看状态
-.\contentpilot.ps1 logs           # 查看最近日志
-.\contentpilot.ps1 logs -Follow   # 持续跟踪日志
+cd E:\Bye-bye\1.0\socialflow-ai
+.\contentpilot.ps1 start
+```
+
+启动后访问 <http://127.0.0.1:5173>，用下方演示账号登录。
+
+其他命令（同样要先 cd 到本目录）：
+
+```powershell
 .\contentpilot.ps1 stop           # 停止服务
+.\contentpilot.ps1 status         # 查看是否在运行
+.\contentpilot.ps1 setup          # 仅首次安装或更新依赖后执行一次
+.\contentpilot.ps1 logs           # 查看最近日志
 .\contentpilot.ps1 test           # 运行全部检查
 ```
 
-如果当前 PowerShell 禁止运行本地脚本，只对当前终端临时放开：
+前置要求：Python 3.12、Node.js 20+、MySQL 8（无 MySQL 时自动回退 SQLite）。首次使用先跑一次 `setup`。若 PowerShell 提示禁止运行脚本，先执行 `Set-ExecutionPolicy -Scope Process Bypass`。
 
-```powershell
-Set-ExecutionPolicy -Scope Process Bypass
-```
-
-本地开发页面为 http://127.0.0.1:5173。该模式使用 Vite 开发服务器，适合调试，不作为正式部署方式。
+该模式使用 Vite 开发服务器，适合调试，不作为正式部署方式。
 
 ## 演示账号与角色
 
-| 角色 | 用户名 | 密码 | 用途 |
-| --- | --- | --- | --- |
-| 管理员 | `admin` | `Admin@123456` | 统一配置模型、授权平台账号、管理用户和系统参数，也可发布 |
+| 角色   | 用户名       | 密码                | 用途                                                                               |
+| ------ | ------------ | ------------------- | ---------------------------------------------------------------------------------- |
+| 管理员 | `admin`    | `Admin@123456`    | 统一配置模型、授权平台账号、管理用户和系统参数，也可发布                           |
 | 运营者 | `operator` | `Operator@123456` | 使用管理员已授权的平台账号进行创作、改写、选图、排期和发布，不能查看密钥或修改授权 |
-| 查看者 | `viewer` | `Viewer@123456` | 只读查看内容、日历和数据，不能进入平台账号及系统设置 |
+| 查看者 | `viewer`   | `Viewer@123456`   | 只读查看内容、日历和数据，不能进入平台账号及系统设置                               |
 
 三个账号不是使用 AI 改写所必需的三个人，而是用来演示权限隔离。平台账号按系统共享：管理员只需授权一次，运营者即可在排期和发布时选择该账号，但接口不会向运营者返回 Token、Client Secret 等敏感信息。个人使用时可以一直使用管理员账号；团队使用时，再按职责分配运营者和查看者。正式部署前必须修改演示密码和 `JWT_SECRET`。
 
@@ -169,12 +183,12 @@ AI 分析结果可保存到灵感库；也可以手动新增灵感条目记录�
 
 硅基流动配置示例：
 
-| 配置项 | 内容 |
-| --- | --- |
-| 服务商 | 硅基流动 |
-| API Base URL | `https://api.siliconflow.cn/v1` |
-| API Key | 在硅基流动控制台创建的有效密钥 |
-| 可用模型 | 测试连接成功后，从返回的文本/对话模型中选择 |
+| 配置项       | 内容                                        |
+| ------------ | ------------------------------------------- |
+| 服务商       | 硅基流动                                    |
+| API Base URL | `https://api.siliconflow.cn/v1`           |
+| API Key      | 在硅基流动控制台创建的有效密钥              |
+| 可用模型     | 测试连接成功后，从返回的文本/对话模型中选择 |
 
 点击“测试连接”，选择模型，再点击“保存配置”。若使用其他兼容服务，选择自定义服务商并填写它提供的 Base URL、Key 和模型名即可。
 
@@ -240,7 +254,12 @@ WECHATSYNC_CLI_ENABLED=true
 
 微信公众号在“平台账号”选择“本机扫码（推荐）”并完成扫码后，在“创作”切换到公众号版本，点击“存入公众号草稿箱”即可。保存过程会显示已等待秒数和当前阶段；任务只有在微信编辑器确认标题、正文及已选图片全部写入后才会标记成功。启用小红书开关后，在“平台账号”选择“本机小红书 MCP 试运行”，扫码登录并通过连接检测，排期页才会显示可用的 MCP 发布方式。Wechatsync 只作为草稿同步后备。
 
-## 本地开发
+## 本地开发（手动方式，一般用不到）
+
+> 日常启动请直接用上文的 `双击启动.bat` 或 `.\contentpilot.ps1 start`，它们已包含下面所有步骤。本节仅供需要单独调试前端或后端进程时参考。
+
+<details>
+<summary>展开手动步骤</summary>
 
 后端：
 
@@ -265,6 +284,8 @@ npm run dev
 ```powershell
 backend\.venv\Scripts\python.exe backend\app\db\seed_realistic_workspace.py
 ```
+
+</details>
 
 ## 测试
 
@@ -311,7 +332,7 @@ socialflow-ai/
 └─ README.md
 ```
 
-更多文档：[设计文档](docs/DESIGN.md)（需求、架构、数据库、API、Prompt、实验、测试计划）、[运维与操作手册](docs/OPERATIONS.md)（部署、平台连接、答辩演示）；历史快照见 [docs/archive/](docs/archive/)。
+更多文档：[设计文档](docs/DESIGN.md)（需求、架构、数据库、API、Prompt、实验、测试计划）、[运维与操作手册](docs/OPERATIONS.md)（部署、平台连接、答辩演示）。
 
 ## License
 

@@ -3,28 +3,30 @@
 The operator completes the normal QR login on mp.weixin.qq.com. Cookies stay in
 the local browser profile and are never copied into ContentPilot's database.
 This publisher only saves a draft; it never clicks the public publish action.
+
+Browser-session lifecycle (launch / QR login / logout) is handled by
+:class:`~app.publishers.browser_session.BrowserSessionManager`; this module
+only contains WeChat-specific page automation and the draft publisher.
 """
 
 from __future__ import annotations
 
 import asyncio
-import base64
 import ipaddress
 import mimetypes
-import os
 import re
 import tempfile
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 from urllib.parse import unquote, urljoin, urlsplit
 
 import httpx
-from playwright.async_api import BrowserContext, Page, Playwright, async_playwright
+from playwright.async_api import Page
 
 from app.core.config import BACKEND_DIR, settings
 from app.publishers.base import PublishResult
+from app.publishers.browser_session import BrowserSessionManager, LoginSession
 
 WECHAT_HOME = "https://mp.weixin.qq.com/"
 BODY_EDITOR_SELECTOR = ".rich_media_content .ProseMirror"
@@ -45,77 +47,7 @@ ACCOUNT_NAME_SELECTORS = (
 )
 
 
-@dataclass
-class LoginSession:
-    playwright: Playwright
-    context: BrowserContext
-    page: Page
-
-
-_login_sessions: dict[int, LoginSession] = {}
-_session_lock = asyncio.Lock()
-
-
-def _profile_root() -> Path:
-    configured = settings.wechat_browser_profile_root.strip()
-    root = Path(configured).expanduser() if configured else Path.home() / ".contentpilot" / "wechat"
-    root.mkdir(parents=True, exist_ok=True)
-    return root.resolve()
-
-
-def _profile_dir(account_id: int) -> Path:
-    root = _profile_root()
-    path = (root / f"account-{account_id}").resolve()
-    if path.parent != root:
-        raise RuntimeError("微信公众号浏览器会话目录无效")
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def _chrome_path() -> str | None:
-    configured = os.environ.get("CONTENTPILOT_CHROME_PATH", "").strip()
-    candidates = (
-        configured,
-        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-    )
-    return next((item for item in candidates if item and Path(item).is_file()), None)
-
-
-async def _launch(account_id: int, *, headless: bool | None = None) -> LoginSession:
-    playwright = await async_playwright().start()
-    launch_args: dict[str, Any] = {
-        "headless": settings.wechat_browser_headless if headless is None else headless,
-        "locale": "zh-CN",
-        "timezone_id": "Asia/Shanghai",
-        "viewport": {"width": 1440, "height": 900},
-        "args": [
-            "--disable-blink-features=AutomationControlled",
-            "--disable-features=TranslateUI",
-        ],
-    }
-    chrome = _chrome_path()
-    if chrome:
-        launch_args["executable_path"] = chrome
-    try:
-        context = await playwright.chromium.launch_persistent_context(
-            str(_profile_dir(account_id)), **launch_args
-        )
-    except Exception:
-        await playwright.stop()
-        raise
-    page = context.pages[0] if context.pages else await context.new_page()
-    return LoginSession(playwright, context, page)
-
-
-async def _close(session: LoginSession) -> None:
-    try:
-        await session.context.close()
-    finally:
-        await session.playwright.stop()
-
-
-async def _logged_in(page: Page) -> bool:
+async def _wechat_logged_in(page: Page) -> bool:
     url = page.url.lower()
     if "/cgi-bin/home" in url and "token=" in url:
         return True
@@ -124,114 +56,26 @@ async def _logged_in(page: Page) -> bool:
     return bool(await page.locator(".new-creation__menu").count())
 
 
-async def _account_name(page: Page) -> str:
-    for selector in ACCOUNT_NAME_SELECTORS:
-        locator = page.locator(selector).first
-        if await locator.count() and await locator.is_visible():
-            value = (await locator.inner_text()).strip()
-            if value:
-                return value[:100]
-    return ""
+_manager = BrowserSessionManager(
+    home_url=WECHAT_HOME,
+    qr_selectors=QR_SELECTORS,
+    account_name_selectors=ACCOUNT_NAME_SELECTORS,
+    profile_root_setting="wechat_browser_profile_root",
+    headless_setting="wechat_browser_headless",
+    platform_label="微信公众号",
+    logged_in_check=_wechat_logged_in,
+    login_timeout=60_000,
+)
 
+# Public API – re-exported so existing callers are unchanged.
+get_login_qrcode = _manager.get_login_qrcode
+check_login = _manager.check_login
+logout = _manager.logout
 
-async def _qr_data_url(page: Page) -> str:
-    for selector in QR_SELECTORS:
-        locator = page.locator(selector).first
-        if not await locator.count() or not await locator.is_visible():
-            continue
-        png = await locator.screenshot(type="png")
-        return f"data:image/png;base64,{base64.b64encode(png).decode('ascii')}"
-    return ""
-
-
-async def get_login_qrcode(account_id: int) -> dict[str, str | bool]:
-    """Start or reuse a QR-login browser session for one local account."""
-    async with _session_lock:
-        session = _login_sessions.get(account_id)
-        if session is None:
-            try:
-                session = await _launch(account_id)
-                await session.page.goto(WECHAT_HOME, wait_until="domcontentloaded", timeout=60_000)
-                await session.page.wait_for_timeout(2_000)
-                _login_sessions[account_id] = session
-            except Exception as exc:
-                return {
-                    "connected": False,
-                    "image_data_url": "",
-                    "message": f"无法启动微信公众号本机 Chrome：{str(exc)[:300]}",
-                }
-        try:
-            if await _logged_in(session.page):
-                return {
-                    "connected": True,
-                    "image_data_url": "",
-                    "username": await _account_name(session.page),
-                    "message": "微信公众号账号已登录",
-                }
-            image = await _qr_data_url(session.page)
-            if not image:
-                await session.page.reload(wait_until="domcontentloaded", timeout=60_000)
-                await session.page.wait_for_timeout(1_500)
-                image = await _qr_data_url(session.page)
-            return {
-                "connected": False,
-                "image_data_url": image,
-                "message": "请使用公众号管理员或运营者微信扫码，并在手机端确认登录"
-                if image
-                else "微信登录页已打开，但没有识别到二维码；页面可能已更新，请重试。",
-            }
-        except Exception as exc:
-            return {
-                "connected": False,
-                "image_data_url": "",
-                "message": f"读取微信公众号登录页失败：{str(exc)[:300]}",
-            }
-
-
-async def check_login(account_id: int) -> tuple[bool, str]:
-    async with _session_lock:
-        active = _login_sessions.get(account_id)
-        if active:
-            try:
-                if await _logged_in(active.page):
-                    name = await _account_name(active.page)
-                    _login_sessions.pop(account_id, None)
-                    await _close(active)
-                    return True, name or "公众号账号"
-                return False, "等待扫码确认"
-            except Exception:
-                _login_sessions.pop(account_id, None)
-                await _close(active)
-        try:
-            session = await _launch(account_id, headless=True)
-            await session.page.goto(WECHAT_HOME, wait_until="domcontentloaded", timeout=60_000)
-            await session.page.wait_for_timeout(1_500)
-            logged = await _logged_in(session.page)
-            name = await _account_name(session.page) if logged else ""
-            await _close(session)
-            return logged, name or ("公众号账号" if logged else "需要扫码登录")
-        except Exception as exc:
-            return False, f"无法检测微信公众号本机登录：{str(exc)[:300]}"
-
-
-async def logout(account_id: int) -> tuple[bool, str]:
-    async with _session_lock:
-        session = _login_sessions.pop(account_id, None)
-        created = session is None
-        try:
-            session = session or await _launch(account_id, headless=True)
-            await session.context.clear_cookies()
-            for page in session.context.pages:
-                try:
-                    await page.evaluate("() => { localStorage.clear(); sessionStorage.clear(); }")
-                except Exception:
-                    pass
-            return True, "微信公众号本机登录会话已清除"
-        except Exception as exc:
-            return False, f"清除微信公众号会话失败：{str(exc)[:300]}"
-        finally:
-            if session and (created or account_id not in _login_sessions):
-                await _close(session)
+# Internal helpers used by WechatBrowserDraftPublisher below.
+_launch = _manager._launch  # noqa: SLF001
+_close = _manager._close  # noqa: SLF001
+_logged_in = _manager._logged_in  # noqa: SLF001
 
 
 def _local_image(value: str) -> Path | None:

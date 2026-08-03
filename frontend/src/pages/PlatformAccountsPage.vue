@@ -33,11 +33,19 @@ const qrLoading = ref(false)
 const qrImage = ref('')
 const qrMessage = ref('')
 const qrPolling = ref(false)
+const qrExpired = ref(false)
+const qrSecondsRemaining = ref(0)
 const qrPlatform = ref<'XIAOHONGSHU' | 'TOUTIAO' | 'WECHAT_OFFICIAL'>('XIAOHONGSHU')
+const qrCountdownLabel = computed(() => {
+  const minutes = Math.floor(qrSecondsRemaining.value / 60)
+  const seconds = String(qrSecondsRemaining.value % 60).padStart(2, '0')
+  return `${minutes}:${seconds}`
+})
 const sessionClock = ref(Date.now())
 const logs = ref<Array<Record<string, unknown>>>([])
 const current = ref<PlatformAccount>()
 let qrPollTimer: number | undefined
+let qrCountdownTimer: number | undefined
 let sessionClockTimer: number | undefined
 
 function accountErrorMessage(account: PlatformAccount) {
@@ -274,6 +282,35 @@ function stopXhsLoginPolling() {
   qrPolling.value = false
 }
 
+function stopQrCountdown() {
+  if (qrCountdownTimer) window.clearInterval(qrCountdownTimer)
+  qrCountdownTimer = undefined
+  qrSecondsRemaining.value = 0
+}
+
+function closeQrLoginFlow() {
+  stopXhsLoginPolling()
+  stopQrCountdown()
+  qrExpired.value = false
+}
+
+function startQrCountdown(seconds: number) {
+  stopQrCountdown()
+  qrExpired.value = false
+  const deadline = Date.now() + Math.max(1, seconds) * 1000
+  const tick = () => {
+    qrSecondsRemaining.value = Math.max(0, Math.ceil((deadline - Date.now()) / 1000))
+    if (qrSecondsRemaining.value > 0) return
+    stopQrCountdown()
+    stopXhsLoginPolling()
+    qrExpired.value = true
+    qrMessage.value = '二维码已到期，正在自动获取新二维码…'
+    void refreshCurrentQrcode(true)
+  }
+  tick()
+  qrCountdownTimer = window.setInterval(tick, 1000)
+}
+
 function startXhsLoginPolling() {
   stopXhsLoginPolling()
   qrPolling.value = true
@@ -288,6 +325,7 @@ function startXhsLoginPolling() {
       const result = await workflowApi.testPlatformAccount(qrPlatform.value)
       if (!result.result.success) return
       stopXhsLoginPolling()
+      stopQrCountdown()
       qrDialog.value = false
       qrImage.value = ''
       await load()
@@ -300,36 +338,58 @@ function startXhsLoginPolling() {
   }, 3000)
 }
 
-async function loadXhsQrcode(account?: PlatformAccount) {
+async function refreshCurrentQrcode(automatic = false) {
+  if (qrLoading.value) return
+  stopXhsLoginPolling()
+  stopQrCountdown()
+  if (!automatic) qrMessage.value = '正在获取新的二维码…'
+  if (qrPlatform.value === 'TOUTIAO') {
+    await loadToutiaoQrcode(undefined, true)
+  } else if (qrPlatform.value === 'WECHAT_OFFICIAL') {
+    await loadWechatQrcode(undefined, true)
+  } else {
+    await loadXhsQrcode(undefined, true)
+  }
+}
+
+async function loadXhsQrcode(account?: PlatformAccount, forceRefresh = false) {
   if (account) current.value = account
   qrPlatform.value = 'XIAOHONGSHU'
   qrLoading.value = true
-  qrImage.value = ''
+  if (!forceRefresh) qrImage.value = ''
   qrMessage.value = ''
+  qrExpired.value = false
   qrDialog.value = true
   try {
     const result = await workflowApi.xiaohongshuLoginQrcode()
     qrImage.value = result.imageDataUrl
     qrMessage.value = result.message
     startXhsLoginPolling()
+    startQrCountdown(result.expiresInSeconds || 240)
   } catch (error) {
-    qrDialog.value = false
+    stopXhsLoginPolling()
+    stopQrCountdown()
+    qrExpired.value = forceRefresh
+    qrMessage.value = forceRefresh ? `刷新失败：${getApiErrorMessage(error)}` : ''
+    if (!forceRefresh) qrDialog.value = false
     ElMessage.error(getApiErrorMessage(error))
   } finally {
     qrLoading.value = false
   }
 }
 
-async function loadToutiaoQrcode(account?: PlatformAccount) {
+async function loadToutiaoQrcode(account?: PlatformAccount, forceRefresh = false) {
   if (account) current.value = account
   qrPlatform.value = 'TOUTIAO'
   qrLoading.value = true
-  qrImage.value = ''
+  if (!forceRefresh) qrImage.value = ''
   qrMessage.value = ''
+  qrExpired.value = false
   qrDialog.value = true
   try {
-    const result = await workflowApi.toutiaoLoginQrcode()
+    const result = await workflowApi.toutiaoLoginQrcode(forceRefresh)
     if (result.connected) {
+      closeQrLoginFlow()
       qrDialog.value = false
       await load()
       ElMessage.success('今日头条账号已经登录')
@@ -338,24 +398,31 @@ async function loadToutiaoQrcode(account?: PlatformAccount) {
     qrImage.value = result.imageDataUrl
     qrMessage.value = result.message
     startXhsLoginPolling()
+    startQrCountdown(result.expiresInSeconds || 120)
   } catch (error) {
-    qrDialog.value = false
+    stopXhsLoginPolling()
+    stopQrCountdown()
+    qrExpired.value = forceRefresh
+    qrMessage.value = forceRefresh ? `刷新失败：${getApiErrorMessage(error)}` : ''
+    if (!forceRefresh) qrDialog.value = false
     ElMessage.error(getApiErrorMessage(error))
   } finally {
     qrLoading.value = false
   }
 }
 
-async function loadWechatQrcode(account?: PlatformAccount) {
+async function loadWechatQrcode(account?: PlatformAccount, forceRefresh = false) {
   if (account) current.value = account
   qrPlatform.value = 'WECHAT_OFFICIAL'
   qrLoading.value = true
-  qrImage.value = ''
+  if (!forceRefresh) qrImage.value = ''
   qrMessage.value = ''
+  qrExpired.value = false
   qrDialog.value = true
   try {
-    const result = await workflowApi.wechatLoginQrcode()
+    const result = await workflowApi.wechatLoginQrcode(forceRefresh)
     if (result.connected) {
+      closeQrLoginFlow()
       qrDialog.value = false
       await load()
       ElMessage.success('微信公众号已登录')
@@ -364,8 +431,13 @@ async function loadWechatQrcode(account?: PlatformAccount) {
     qrImage.value = result.imageDataUrl
     qrMessage.value = result.message
     startXhsLoginPolling()
+    startQrCountdown(result.expiresInSeconds || 240)
   } catch (error) {
-    qrDialog.value = false
+    stopXhsLoginPolling()
+    stopQrCountdown()
+    qrExpired.value = forceRefresh
+    qrMessage.value = forceRefresh ? `刷新失败：${getApiErrorMessage(error)}` : ''
+    if (!forceRefresh) qrDialog.value = false
     ElMessage.error(getApiErrorMessage(error))
   } finally {
     qrLoading.value = false
@@ -528,7 +600,7 @@ onMounted(async () => {
   }
 })
 onBeforeUnmount(() => {
-  stopXhsLoginPolling()
+  closeQrLoginFlow()
   if (sessionClockTimer) window.clearInterval(sessionClockTimer)
 })
 </script>
@@ -588,7 +660,7 @@ onBeforeUnmount(() => {
             account.status === 'CONNECTED'
               ? account.publicPublishEnabled
                 ? `本机 Chrome 已登录${account.loginUsername ? `，当前账号：${account.loginUsername}` : ''}；真实发布已开启。`
-                : '本机 Chrome 已登录；真实发布安全开关关闭，不会发送文章。'
+                : '本机 Chrome 已登录；可以保存头条草稿，真实发布安全开关仍为关闭。'
               : '尚未登录今日头条创作中心，请保存配置后扫码登录。'
           }}
         </div>
@@ -958,7 +1030,7 @@ onBeforeUnmount(() => {
 
         <template v-else-if="current.platform === 'TOUTIAO'">
           <el-form-item label="发布方式">
-            <el-tag type="success">本机 Chrome 扫码登录与真实文章发布</el-tag>
+            <el-tag type="success">本机 Chrome 保存草稿与真实文章发布</el-tag>
           </el-form-item>
           <el-checkbox v-model="form.allow_public_publish">
             我已了解真实发布会将文章发送到今日头条，允许该共享账号发布真实内容
@@ -968,7 +1040,7 @@ onBeforeUnmount(() => {
             :title="
               form.allow_public_publish
                 ? '真实发布已开启；建议先扫码并检测账号，再发布一篇测试文章。'
-                : '安全模式：可以扫码和检测登录，但不会向今日头条发送文章。'
+                : '安全模式：可以扫码并保存头条草稿，但不会公开发布文章。'
             "
             :type="form.allow_public_publish ? 'warning' : 'info'"
             :closable="false"
@@ -1064,16 +1136,29 @@ onBeforeUnmount(() => {
       v-model="qrDialog"
       :title="`${qrPlatformName()}扫码登录`"
       width="420px"
-      @closed="stopXhsLoginPolling"
+      @closed="closeQrLoginFlow"
     >
       <div v-loading="qrLoading" class="qr-login-panel">
-        <img v-if="qrImage" :src="qrImage" :alt="`${qrPlatformName()}登录二维码`" />
+        <div v-if="qrImage" class="qr-code-frame" :class="{ 'is-expired': qrExpired }">
+          <img :src="qrImage" :alt="`${qrPlatformName()}登录二维码`" />
+          <div v-if="qrExpired && !qrLoading" class="qr-expired-cover">
+            <RefreshCw :size="26" />
+            <b>二维码已过期</b>
+          </div>
+        </div>
         <el-empty v-else-if="!qrLoading" description="没有收到二维码" />
         <p v-if="qrMessage">{{ qrMessage }}</p>
-        <small v-if="qrPolling"
-          >请使用{{ qrScannerName() }} App 扫码，系统正在自动检测登录结果。</small
-        >
-        <small v-else>二维码过期后可以重新获取。</small>
+        <div v-if="qrImage" class="qr-login-status">
+          <small v-if="qrLoading">正在获取新的二维码…</small>
+          <small v-else-if="qrPolling">
+            请在 <b>{{ qrCountdownLabel }}</b> 内使用{{ qrScannerName() }} App 扫码，到期自动换码
+          </small>
+          <small v-else>当前二维码已停止检测，请刷新后重试。</small>
+          <el-button link type="primary" :loading="qrLoading" @click="refreshCurrentQrcode(false)">
+            <RefreshCw :size="15" />
+            立即刷新二维码
+          </el-button>
+        </div>
       </div>
     </el-dialog>
   </div>
@@ -1114,10 +1199,41 @@ onBeforeUnmount(() => {
   gap: 12px;
   text-align: center;
 }
-.qr-login-panel img {
+.qr-code-frame {
+  position: relative;
+  width: 240px;
+  height: 240px;
+  overflow: hidden;
+  border-radius: 12px;
+}
+.qr-code-frame img {
   width: 240px;
   height: 240px;
   object-fit: contain;
+}
+.qr-code-frame.is-expired img {
+  opacity: 0.16;
+}
+.qr-expired-cover {
+  position: absolute;
+  inset: 0;
+  display: grid;
+  place-content: center;
+  gap: 8px;
+  color: #334155;
+}
+.qr-login-status {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 6px;
+}
+.qr-login-status small b {
+  color: #2563eb;
+  font-variant-numeric: tabular-nums;
+}
+.qr-login-status :deep(.el-button) {
+  gap: 5px;
 }
 .qr-login-panel p,
 .qr-login-panel small {

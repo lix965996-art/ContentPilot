@@ -11,7 +11,7 @@ from zoneinfo import ZoneInfo
 from fastapi import APIRouter, Depends, Request
 from fastapi.responses import StreamingResponse
 from sqlalchemy import select
-from sqlalchemy.orm import Session
+from sqlalchemy.orm import Session, selectinload
 
 from app.api.deps import get_current_user, require_roles
 from app.core.config import settings
@@ -75,15 +75,12 @@ def _data(db: Session, row: PublishSchedule, include_logs: bool = False) -> dict
     data = model_dict(row, camel=True)
     article = db.get(ContentArticle, row.article_id)
     variant = db.get(ContentVariant, row.variant_id)
+    account = db.get(PlatformAccount, row.account_id) if row.account_id else None
     data.update(
         {
             "articleTitle": article.title if article else "",
             "variantTitle": variant.title if variant else "",
-            "accountName": (
-                db.get(PlatformAccount, row.account_id).account_name
-                if row.account_id and db.get(PlatformAccount, row.account_id)
-                else ""
-            ),
+            "accountName": account.account_name if account else "",
         }
     )
     if include_logs:
@@ -109,11 +106,40 @@ def list_schedules(
     if platform:
         filters.append(PublishSchedule.platform == platform)
     if status:
-        filters.append(PublishSchedule.status == status)
+        if "," in status:
+            filters.append(PublishSchedule.status.in_(status.split(",")))
+        else:
+            filters.append(PublishSchedule.status == status)
     items = db.scalars(
-        select(PublishSchedule).where(*filters).order_by(PublishSchedule.scheduled_at)
+        select(PublishSchedule)
+        .options(selectinload(PublishSchedule.logs))
+        .where(*filters)
+        .order_by(PublishSchedule.scheduled_at)
     ).all()
-    return success_response(request, [_data(db, item) for item in items])
+
+    # Batch-prefetch related objects to avoid N+1 queries.
+    article_ids = {row.article_id for row in items}
+    variant_ids = {row.variant_id for row in items}
+    account_ids = {row.account_id for row in items if row.account_id}
+    articles = {a.id: a for a in db.scalars(select(ContentArticle).where(ContentArticle.id.in_(article_ids)))} if article_ids else {}
+    variants = {v.id: v for v in db.scalars(select(ContentVariant).where(ContentVariant.id.in_(variant_ids)))} if variant_ids else {}
+    accounts = {a.id: a for a in db.scalars(select(PlatformAccount).where(PlatformAccount.id.in_(account_ids)))} if account_ids else {}
+
+    def serialize(row: PublishSchedule) -> dict:
+        data = model_dict(row, camel=True)
+        article = articles.get(row.article_id)
+        variant = variants.get(row.variant_id)
+        account = accounts.get(row.account_id) if row.account_id else None
+        data.update(
+            {
+                "articleTitle": article.title if article else "",
+                "variantTitle": variant.title if variant else "",
+                "accountName": account.account_name if account else "",
+            }
+        )
+        return data
+
+    return success_response(request, [serialize(item) for item in items])
 
 
 @router.get("/schedules/backlog")
@@ -374,7 +400,7 @@ def delete_schedule(
     if not row:
         raise AppException(40407, "排期任务不存在", 404)
     _ensure_schedule_owner(row, user)
-    if row.status in {"RUNNING", "SUCCESS"}:
+    if row.status in {"PUBLISHING", "PUBLISHED", "DRAFT_CREATED", "PUBLISH_SUBMITTED", "MANUAL_PUBLISHED"}:
         raise AppException(40903, "已执行任务不能删除", 409)
     remove_schedule_job(row.id)
     record_audit(db, request, user, "DELETE", "SCHEDULING", "SCHEDULE", row.id)
@@ -394,7 +420,7 @@ def cancel_schedule(
     if not row:
         raise AppException(40407, "排期任务不存在", 404)
     _ensure_schedule_owner(row, user)
-    if row.status == "SUCCESS":
+    if row.status in {"PUBLISHING", "PUBLISHED", "DRAFT_CREATED", "PUBLISH_SUBMITTED", "MANUAL_PUBLISHED"}:
         raise AppException(40903, "已发布任务不能取消", 409)
     row.status = "CANCELLED"
     remove_schedule_job(row.id)

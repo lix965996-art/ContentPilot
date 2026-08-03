@@ -300,7 +300,12 @@ def test_wechat_browser_qrcode_and_direct_draft_flow(client, login_as, monkeypat
     assert configured.json()["data"]["status"] == "LOGIN_REQUIRED"
     assert "BROWSER_DRAFT" in configured.json()["data"]["availablePublishModes"]
 
-    async def fake_qrcode(_account_id: int) -> dict[str, str | bool]:
+    refresh_requests: list[bool] = []
+
+    async def fake_qrcode(
+        _account_id: int, *, force_refresh: bool = False
+    ) -> dict[str, str | bool]:
+        refresh_requests.append(force_refresh)
         return {
             "connected": False,
             "image_data_url": "data:image/png;base64,aW1hZ2U=",
@@ -313,11 +318,13 @@ def test_wechat_browser_qrcode_and_direct_draft_flow(client, login_as, monkeypat
         fake_qrcode,
     )
     qrcode = client.post(
-        "/api/platform-accounts/WECHAT_OFFICIAL/login-qrcode",
+        "/api/platform-accounts/WECHAT_OFFICIAL/login-qrcode?refresh=true",
         headers=auth,
     )
     assert qrcode.status_code == 200, qrcode.text
     assert qrcode.json()["data"]["imageDataUrl"] == "data:image/png;base64,aW1hZ2U="
+    assert qrcode.json()["data"]["expiresInSeconds"] == 240
+    assert refresh_requests == [True]
 
     account_id = configured.json()["data"]["id"]
     with SessionLocal() as db:

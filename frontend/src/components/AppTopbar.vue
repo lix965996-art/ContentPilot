@@ -5,6 +5,7 @@ import { Bell, ChevronDown, FileText, LogOut, Menu, Plus, Search } from 'lucide-
 import UserAvatar from '@/components/UserAvatar.vue'
 import { workflowApi } from '@/api/workflow'
 import { useAuthStore } from '@/stores/auth'
+import { NAV_ITEMS } from '@/config/navigation'
 import type { Article } from '@/types/business'
 const emit = defineEmits<{ menu: [] }>()
 const route = useRoute()
@@ -19,23 +20,11 @@ const searchArticles = ref<Article[]>([])
 const notificationLoading = ref(false)
 const notifications = ref<Array<{ label: string; count: number; route: string }>>([])
 const navigation = computed(() =>
-  [
-    ['工作台', 'dashboard', ['ADMIN', 'OPERATOR', 'VIEWER']],
-    ['内容库', 'articles', ['ADMIN', 'OPERATOR', 'VIEWER']],
-    ['创作', 'studio', ['ADMIN', 'OPERATOR']],
-    ['热点选题', 'trends', ['ADMIN', 'OPERATOR']],
-    ['媒体', 'media', ['ADMIN', 'OPERATOR']],
-    ['发布时间', 'recommendation', ['ADMIN', 'OPERATOR']],
-    ['日历', 'calendar', ['ADMIN', 'OPERATOR', 'VIEWER']],
-    ['发布', 'publish', ['ADMIN', 'OPERATOR']],
-    ['数据', 'analytics', ['ADMIN', 'OPERATOR', 'VIEWER']],
-    ['实验', 'experiments', ['ADMIN', 'OPERATOR']],
-    ['设置', 'settings', ['ADMIN']],
-  ].filter((item) => auth.hasRole(item[2] as any)),
+  NAV_ITEMS.filter((item) => item.searchable !== false && auth.hasRole(item.roles)),
 )
 const matchedNavigation = computed(() => {
   const query = searchQuery.value.trim().toLowerCase()
-  return navigation.value.filter((item) => !query || String(item[0]).toLowerCase().includes(query))
+  return navigation.value.filter((item) => !query || item.label.toLowerCase().includes(query))
 })
 const matchedArticles = computed(() => {
   const query = searchQuery.value.trim().toLowerCase()
@@ -168,10 +157,10 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleShortcut))
         <p>页面</p>
         <button
           v-for="item in matchedNavigation"
-          :key="String(item[1])"
-          @click="navigate(String(item[1]))"
+          :key="item.name"
+          @click="navigate(item.name)"
         >
-          <Search :size="15" /><span>{{ item[0] }}</span>
+          <Search :size="15" /><span>{{ item.label }}</span>
         </button>
       </section>
       <section v-if="matchedArticles.length">

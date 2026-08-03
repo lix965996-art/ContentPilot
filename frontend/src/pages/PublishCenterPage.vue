@@ -45,9 +45,9 @@ function publishModeLabel(platform: string, mode: string): string {
 const statusTabs = [
   ['全部', ''],
   ['待发布', 'PENDING'],
-  ['发布中', 'RUNNING'],
+  ['发布中', 'PUBLISHING'],
   ['等待确认', 'WAITING_MANUAL_CONFIRM'],
-  ['已发布', 'SUCCESS'],
+  ['已完成', 'PUBLISHED,DRAFT_CREATED,PUBLISH_SUBMITTED,MANUAL_PUBLISHED'],
   ['失败', 'FAILED'],
 ]
 async function load() {

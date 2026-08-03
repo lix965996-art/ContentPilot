@@ -11,6 +11,7 @@ from typing import Any
 import httpx
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import func, select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -18,12 +19,14 @@ from app.core.exceptions import AppException
 from app.models.business import ContentArticle, ContentVariant
 from app.prompts.profiles import (
     CONTENT_BRIEF_PROMPT,
+    COHERENCE_REVIEW_PROMPT,
     DEEP_REVIEW_PROMPT,
     KEYWORD_PROMPT,
     PLATFORM_PROFILES,
     PROMPT_VERSION,
     QUALITY_REVIEW_PROMPT,
     SYSTEM_PROMPT,
+    build_coherence_review_prompt,
     build_deep_draft_prompt,
     build_generation_prompt,
 )
@@ -51,6 +54,7 @@ PLATFORM_NAMES = {
     "WECHAT_OFFICIAL": "微信公众号",
     "TOUTIAO": "今日头条",
 }
+LONG_FORM_PLATFORMS = {"WECHAT_OFFICIAL", "TOUTIAO"}
 MAX_STRUCTURED_ATTEMPTS = 3
 StatusCallback = Callable[[str, dict[str, Any]], Awaitable[None]]
 
@@ -225,10 +229,12 @@ async def _chat_completion(
     runtime: LlmRuntime,
     system_prompt: str,
     messages: list[dict[str, str]],
+    *,
+    temperature: float = 0.5,
 ) -> tuple[str, int, int]:
     request_payload: dict[str, Any] = {
         "model": runtime.model_name,
-        "temperature": 0.5,
+        "temperature": temperature,
         "response_format": {"type": "json_object"},
         "messages": [{"role": "system", "content": system_prompt}, *messages],
     }
@@ -267,6 +273,7 @@ async def _validated_completion(
     *,
     status_callback: StatusCallback | None = None,
     max_attempts: int = MAX_STRUCTURED_ATTEMPTS,
+    temperature: float = 0.5,
 ) -> tuple[BaseModel, int, int, int]:
     messages = [{"role": "user", "content": user_prompt}]
     prompt_tokens = 0
@@ -292,7 +299,7 @@ async def _validated_completion(
             )
         try:
             raw, used_prompt, used_completion = await _chat_completion(
-                runtime, system_prompt, messages
+                runtime, system_prompt, messages, temperature=temperature
             )
             prompt_tokens += used_prompt
             completion_tokens += used_completion
@@ -339,7 +346,7 @@ async def _validated_completion(
                             "error": str(exc),
                         },
                     )
-                await asyncio.sleep(0)
+                await asyncio.sleep(min(2 ** (attempt - 1), 8))
                 continue
     raise AppException(50201, f"结构化输出连续 {max_attempts} 次校验失败：{last_error}", 502)
 
@@ -545,6 +552,7 @@ async def generate_content_brief(
         CONTENT_BRIEF_PROMPT,
         f"{prompt}\n输出结构：{brief_schema}",
         ContentBriefOutput,
+        temperature=0.3,
     )
     return result.model_dump(), prompt_tokens, completion_tokens
 
@@ -603,6 +611,7 @@ async def generate_deep_variant_data(
         ),
         DEEP_DRAFT_MODELS[platform],
         status_callback=mapped_callback,
+        temperature=0.6,
     )
     draft_data = draft.model_dump()
     draft_data["candidates"] = [
@@ -654,9 +663,39 @@ async def generate_deep_variant_data(
         review_prompt,
         DEEP_FINAL_MODELS[platform],
         status_callback=review_callback,
+        temperature=0.3,
     )
     final_data = final.model_dump()
     final_data["final"] = sanitize_generation_payload(final_data["final"])
+
+    # ── 长文平台连贯性终审 ──
+    p3 = c3 = attempts3 = 0
+    if platform in LONG_FORM_PLATFORMS:
+        if status_callback:
+            await status_callback(
+                "RUNNING",
+                {
+                    "progress": 90,
+                    "stage": "COHERENCE_POLISH",
+                    "message": "长文平台终审：正在检查段落过渡与论证推进",
+                },
+            )
+        coherence_prompt = build_coherence_review_prompt(
+            article, platform, final_data["final"], brief
+        )
+        try:
+            polished, p3, c3, attempts3 = await _validated_completion(
+                runtime,
+                COHERENCE_REVIEW_PROMPT,
+                coherence_prompt,
+                OUTPUT_MODELS[platform],
+                status_callback=status_callback,
+                temperature=0.25,
+            )
+            final_data["final"] = sanitize_generation_payload(polished.model_dump())
+        except AppException:
+            pass  # 连贯性润色失败不影响主线，保留 DEEP_REVIEW 的终稿
+
     if platform == "WEIBO":
         fitted, fit_prompt, fit_completion, fit_attempts = await _ensure_weibo_image_safe(
             runtime,
@@ -674,9 +713,9 @@ async def generate_deep_variant_data(
         model_name=runtime.model_name,
         provider=runtime.provider,
         duration_ms=int((time.perf_counter() - started) * 1000),
-        prompt_tokens=p1 + p2,
-        completion_tokens=c1 + c2,
-        attempts=attempts1 + attempts2,
+        prompt_tokens=p1 + p2 + p3,
+        completion_tokens=c1 + c2 + c3,
+        attempts=attempts1 + attempts2 + attempts3,
         strategy=draft_data["strategy"],
         review_detail=review,
         candidate_titles=[item["title"] for item in draft_data["candidates"]],
@@ -851,7 +890,7 @@ async def review_variant_quality(
     )
     try:
         semantic, _, _, _ = await _validated_completion(
-            runtime, QUALITY_REVIEW_PROMPT, prompt, QualityReviewOutput
+            runtime, QUALITY_REVIEW_PROMPT, prompt, QualityReviewOutput, temperature=0.2
         )
         semantic_data = semantic.model_dump()
         combined = {
@@ -980,6 +1019,26 @@ def save_variant(
         review_detail_json=review,
         original_generated_text=content,
     )
+    # Retry on UniqueConstraint violation (concurrent generation for same
+    # article+platform can read the same MAX version_no).
+    for _retry in range(3):
+        try:
+            db.add(variant)
+            db.flush()
+            return variant
+        except IntegrityError:
+            db.rollback()
+            version = (
+                db.scalar(
+                    select(func.max(ContentVariant.version_no)).where(
+                        ContentVariant.article_id == article.id,
+                        ContentVariant.platform == platform,
+                    )
+                )
+                or 0
+            ) + 1
+            variant.version_no = version
+    # Final attempt — let any exception propagate.
     db.add(variant)
     db.flush()
     return variant

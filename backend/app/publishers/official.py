@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import html
 import ipaddress
-import re
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -15,6 +14,7 @@ from app.core.credentials import decrypt_json, decrypt_secret, encrypt_secret
 from app.models.business import PlatformAccount
 from app.publishers.base import PublishResult
 from app.services.platform_content import build_weibo_status, build_xiaohongshu_package
+from app.services.wechat_formatting import markdown_to_wechat_html
 
 
 class OfficialPublisher:
@@ -605,34 +605,6 @@ class WechatApiError(Exception):
         else:
             self.suggested_action = "请根据微信错误码检查公众号配置。"
         super().__init__(self.message)
-
-
-def markdown_to_wechat_html(value: str) -> str:
-    lines: list[str] = []
-    in_list = False
-    for raw in value.splitlines():
-        line = html.escape(raw.strip())
-        line = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", line)
-        if line.startswith("### "):
-            lines.append(f"<h3>{line[4:]}</h3>")
-        elif line.startswith("## "):
-            lines.append(f"<h2>{line[3:]}</h2>")
-        elif line.startswith("# "):
-            lines.append(f"<h1>{line[2:]}</h1>")
-        elif line.startswith(("- ", "* ")):
-            if not in_list:
-                lines.append("<ul>")
-                in_list = True
-            lines.append(f"<li>{line[2:]}</li>")
-        else:
-            if in_list:
-                lines.append("</ul>")
-                in_list = False
-            if line:
-                lines.append(f"<p>{line}</p>")
-    if in_list:
-        lines.append("</ul>")
-    return "".join(lines)
 
 
 def _local_image(value: str) -> Path | None:

@@ -35,7 +35,7 @@ FINAL_STATUSES: set[str] = {
     "DRAFT_CREATED",
     "PUBLISH_SUBMITTED",
     "CANCELLED",
-    "FAILED",
+    # NOTE: "FAILED" is intentionally excluded — failed schedules are retryable.
 }
 
 CDP_FALLBACK_WECHAT_CODES = {"48001", "api unauthorized", "43004"}
@@ -91,11 +91,11 @@ def resolve_publisher(
         return _get_xhs_mcp()  # type: ignore[return-value]
 
     if platform == "TOUTIAO":
-        if mode != "BROWSER_PUBLISH":
-            raise AppException(40081, "今日头条仅支持本机浏览器发布")
+        if mode not in {"BROWSER_PUBLISH", "BROWSER_DRAFT"}:
+            raise AppException(40081, "今日头条仅支持本机浏览器发布或保存草稿")
         if not settings.toutiao_browser_publishing_enabled:
             raise AppException(40082, "今日头条本机浏览器发布功能已关闭")
-        return ToutiaoBrowserPublisher(account.id)
+        return ToutiaoBrowserPublisher(account.id, mode=mode)
 
     if platform == "WECHAT_OFFICIAL" and mode == "BROWSER_DRAFT":
         if not settings.wechat_browser_publishing_enabled:
@@ -123,15 +123,17 @@ def validate_schedule_account(schedule: PublishSchedule, account: PlatformAccoun
     if schedule.platform == "X" and not x_public_publish_enabled(account):
         raise AppException(40080, "X 公开发布安全开关未开启，请由管理员确认后启用")
     if schedule.platform == "TOUTIAO":
-        if schedule.publish_mode != "BROWSER_PUBLISH":
-            raise AppException(40081, "今日头条仅支持本机浏览器发布")
+        if schedule.publish_mode not in {"BROWSER_PUBLISH", "BROWSER_DRAFT"}:
+            raise AppException(40081, "今日头条仅支持本机浏览器发布或保存草稿")
         if not settings.toutiao_browser_publishing_enabled:
             raise AppException(40082, "今日头条本机浏览器发布功能已关闭")
         if account.publish_mode != "BROWSER_PUBLISH":
             raise AppException(40075, "今日头条账号未启用本机浏览器发布")
         if effective_status(account) != "CONNECTED":
             raise AppException(40075, "今日头条账号尚未扫码登录或登录已失效")
-        if not toutiao_public_publish_enabled(account):
+        if schedule.publish_mode == "BROWSER_PUBLISH" and not toutiao_public_publish_enabled(
+            account
+        ):
             raise AppException(40083, "今日头条真实发布开关未开启，请由管理员确认后启用")
         return
 
@@ -417,6 +419,8 @@ def _apply_result(schedule: PublishSchedule, result: PublishResult) -> None:
     schedule.publish_package_json = result.detail.get("publishPackage", {})
     if result.status in ("PUBLISHED", "DRAFT_CREATED", "PUBLISH_SUBMITTED"):
         schedule.actual_publish_at = datetime.now()
+    else:
+        schedule.retry_count += 1
     schedule.error_message = result.error_message or None
 
 
@@ -459,7 +463,7 @@ def execute_publish_sync(schedule_id: int) -> None:
         if (
             schedule
             and schedule.status == "FAILED"
-            and schedule.retry_count <= schedule.max_retry_count
+            and schedule.retry_count < schedule.max_retry_count
         ):
             from app.scheduler.runtime import add_schedule_job
 

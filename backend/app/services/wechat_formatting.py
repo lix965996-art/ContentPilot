@@ -263,3 +263,36 @@ def format_wechat_html(markdown: str, profile: dict | None = None) -> tuple[str,
         f"'Microsoft YaHei',sans-serif;\">{body}</section>"
     )
     return root, settings
+
+
+def markdown_to_wechat_html(value: str) -> str:
+    """Lightweight Markdown→HTML for WeChat API drafts (no inline-CSS theming).
+
+    Used as a fallback when ``content_html`` is not pre-rendered.  For the
+    full themed pipeline see :func:`format_wechat_html` above.
+    """
+    lines: list[str] = []
+    in_list = False
+    for raw in value.splitlines():
+        line = html.escape(raw.strip())
+        line = re.sub(r"\*\*(.+?)\*\*", r"<strong>\1</strong>", line)
+        if line.startswith("### "):
+            lines.append(f"<h3>{line[4:]}</h3>")
+        elif line.startswith("## "):
+            lines.append(f"<h2>{line[3:]}</h2>")
+        elif line.startswith("# "):
+            lines.append(f"<h1>{line[2:]}</h1>")
+        elif line.startswith(("- ", "* ")):
+            if not in_list:
+                lines.append("<ul>")
+                in_list = True
+            lines.append(f"<li>{line[2:]}</li>")
+        else:
+            if in_list:
+                lines.append("</ul>")
+                in_list = False
+            if line:
+                lines.append(f"<p>{line}</p>")
+    if in_list:
+        lines.append("</ul>")
+    return "".join(lines)

@@ -140,6 +140,7 @@ class PlatformAccount(TimestampMixin, Base):
     publish_mode: Mapped[str] = mapped_column(String(30), default="MANUAL")
     app_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
     client_id: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    # DEPRECATED: legacy column retained for migration compatibility; use credentials_encrypted.
     credential_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     credentials_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)
     access_token_encrypted: Mapped[str | None] = mapped_column(Text, nullable=True)

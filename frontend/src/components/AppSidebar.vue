@@ -1,116 +1,22 @@
 <script setup lang="ts">
-import { computed, type Component } from 'vue'
+import { computed } from 'vue'
 import { useRoute } from 'vue-router'
-import {
-  BarChart3,
-  Beaker,
-  CalendarDays,
-  Clock3,
-  FileText,
-  Flame,
-  Image,
-  LayoutDashboard,
-  PanelLeftClose,
-  PenLine,
-  Rocket,
-  Activity,
-  Share2,
-  Settings,
-  X,
-} from 'lucide-vue-next'
+import { PanelLeftClose, X } from 'lucide-vue-next'
 import BrandMark from '@/components/BrandMark.vue'
 import UserAvatar from '@/components/UserAvatar.vue'
 import { useAuthStore } from '@/stores/auth'
-import type { RoleCode } from '@/types/user'
+import { NAV_GROUPS, NAV_ITEMS } from '@/config/navigation'
 
 defineProps<{ collapsed: boolean; mobileOpen: boolean }>()
 const emit = defineEmits<{ toggle: []; close: [] }>()
 const route = useRoute()
 const auth = useAuthStore()
 
-interface NavItem {
-  label: string
-  icon: Component
-  name: string
-  roles: RoleCode[]
-}
-
-const allSections: Array<{ label: string; items: NavItem[] }> = [
-  {
-    label: '',
-    items: [
-      {
-        label: '工作台',
-        icon: LayoutDashboard,
-        name: 'dashboard',
-        roles: ['ADMIN', 'OPERATOR', 'VIEWER'],
-      },
-    ],
-  },
-  {
-    label: '内容',
-    items: [
-      {
-        label: '内容库',
-        icon: FileText,
-        name: 'articles',
-        roles: ['ADMIN', 'OPERATOR', 'VIEWER'],
-      },
-      {
-        label: '创作',
-        icon: PenLine,
-        name: 'studio',
-        roles: ['ADMIN', 'OPERATOR'],
-      },
-      { label: '选题研究', icon: Flame, name: 'trends', roles: ['ADMIN', 'OPERATOR'] },
-      { label: '媒体', icon: Image, name: 'media', roles: ['ADMIN', 'OPERATOR'] },
-    ],
-  },
-  {
-    label: '发布',
-    items: [
-      {
-        label: '发布时间',
-        icon: Clock3,
-        name: 'recommendation',
-        roles: ['ADMIN', 'OPERATOR'],
-      },
-      {
-        label: '日历',
-        icon: CalendarDays,
-        name: 'calendar',
-        roles: ['ADMIN', 'OPERATOR', 'VIEWER'],
-      },
-      { label: '发布', icon: Rocket, name: 'publish', roles: ['ADMIN', 'OPERATOR'] },
-      { label: '运行中心', icon: Activity, name: 'runs', roles: ['ADMIN', 'OPERATOR'] },
-      { label: '平台账号', icon: Share2, name: 'platform-accounts', roles: ['ADMIN', 'OPERATOR'] },
-    ],
-  },
-  {
-    label: '分析',
-    items: [
-      {
-        label: '数据',
-        icon: BarChart3,
-        name: 'analytics',
-        roles: ['ADMIN', 'OPERATOR', 'VIEWER'],
-      },
-      { label: '实验', icon: Beaker, name: 'experiments', roles: ['ADMIN', 'OPERATOR'] },
-    ],
-  },
-  {
-    label: '系统',
-    items: [{ label: '设置', icon: Settings, name: 'settings', roles: ['ADMIN'] }],
-  },
-]
-
 const sections = computed(() =>
-  allSections
-    .map((section) => ({
-      ...section,
-      items: section.items.filter((item) => auth.hasRole(item.roles)),
-    }))
-    .filter((section) => section.items.length > 0),
+  NAV_GROUPS.map((group) => ({
+    label: group,
+    items: NAV_ITEMS.filter((item) => item.group === group && auth.hasRole(item.roles)),
+  })).filter((section) => section.items.length > 0),
 )
 </script>
 <template>

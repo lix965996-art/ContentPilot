@@ -1,4 +1,5 @@
 import uuid
+from collections.abc import Callable
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
@@ -181,8 +182,9 @@ def update_article(
     article = db.get(ContentArticle, article_id)
     if not article:
         raise AppException(40401, "文章不存在", 404)
-    for key, value in payload.model_dump(exclude={"keywords"}).items():
-        setattr(article, key, value)
+    for key, value in payload.model_dump(exclude={"keywords"}, exclude_unset=True).items():
+        if value is not None or key != "status":
+            setattr(article, key, value)
     article.keywords_json = payload.keywords
     record_audit(db, request, user, "UPDATE", "CONTENT", "ARTICLE", article.id)
     db.commit()
@@ -354,39 +356,47 @@ def format_wechat_variant(
     return success_response(request, model_dict(variant, camel=True), "公众号排版已保存")
 
 
-@router.post("/variants/{variant_id}/wechat-draft")
-async def save_wechat_variant_to_draft(
+async def _save_variant_to_draft(
     variant_id: int,
     request: Request,
-    db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    db: Session,
+    user: User,
+    *,
+    platform: str,
+    error_code: int,
+    success_message: str,
+    platform_check_message: str,
+    account_missing_message: str,
+    publish_mode_resolver: Callable | None = None,
+    pre_publish: Callable | None = None,
 ) -> dict:
-    """Save the current edited WeChat variant to the real account draft box now."""
+    """Shared logic for saving a variant to a platform draft box.
+
+    ``publish_mode_resolver`` receives the account and returns the publish mode
+    string (defaults to ``"BROWSER_DRAFT"``).  ``pre_publish`` receives
+    ``(variant, account)`` for platform-specific preprocessing (e.g. HTML
+    rendering) before the schedule row is created.
+    """
     variant = db.get(ContentVariant, variant_id)
     if not variant:
         raise AppException(40402, "内容版本不存在", 404)
-    if variant.platform != "WECHAT_OFFICIAL":
-        raise AppException(40078, "只有微信公众号版本可以保存到公众号草稿箱")
-    account = get_platform_account(db, "WECHAT_OFFICIAL")
+    if variant.platform != platform:
+        raise AppException(40078, platform_check_message)
+    account = get_platform_account(db, platform)
     if not account:
-        raise AppException(40411, "请先连接微信公众号账号", 404)
+        raise AppException(40411, account_missing_message, 404)
 
-    if account.publish_mode == "BROWSER_DRAFT":
-        publish_mode = "BROWSER_DRAFT"
-    elif account.publish_mode in {"DRAFT_ONLY", "SUBMIT_PUBLISH"}:
-        publish_mode = "DRAFT_ONLY"
-    else:
-        raise AppException(40075, "微信公众号账号没有启用可用的草稿保存方式")
-
-    variant.content_html, variant.format_profile_json = format_wechat_html(
-        variant.content_text,
-        variant.format_profile_json or {},
+    publish_mode = (
+        publish_mode_resolver(account) if publish_mode_resolver else "BROWSER_DRAFT"
     )
+    if pre_publish:
+        pre_publish(variant, account)
+
     row = PublishSchedule(
         article_id=variant.article_id,
         variant_id=variant.id,
         account_id=account.id,
-        platform="WECHAT_OFFICIAL",
+        platform=platform,
         scheduled_at=datetime.now(),
         publish_mode=publish_mode,
         status="PENDING",
@@ -402,8 +412,8 @@ async def save_wechat_variant_to_draft(
     result = await execute_publish(db, row.id)
     if result.status != "DRAFT_CREATED":
         raise AppException(
-            50218,
-            result.error_message or "微信公众号草稿保存失败，请查看发布中心详情",
+            error_code,
+            result.error_message or f"{platform}草稿保存失败，请查看发布中心详情",
             502,
         )
     return success_response(
@@ -415,7 +425,66 @@ async def save_wechat_variant_to_draft(
             "draftUrl": result.published_url or "",
             "resultMode": result.result_mode or publish_mode,
         },
-        "文章已保存到微信公众号草稿箱",
+        success_message,
+    )
+
+
+def _resolve_wechat_publish_mode(account) -> str:
+    if account.publish_mode == "BROWSER_DRAFT":
+        return "BROWSER_DRAFT"
+    if account.publish_mode in {"DRAFT_ONLY", "SUBMIT_PUBLISH"}:
+        return "DRAFT_ONLY"
+    raise AppException(40075, "微信公众号账号没有启用可用的草稿保存方式")
+
+
+def _render_wechat_html(variant: ContentVariant, _account) -> None:
+    variant.content_html, variant.format_profile_json = format_wechat_html(
+        variant.content_text,
+        variant.format_profile_json or {},
+    )
+
+
+@router.post("/variants/{variant_id}/wechat-draft")
+async def save_wechat_variant_to_draft(
+    variant_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+) -> dict:
+    """Save the current edited WeChat variant to the real account draft box now."""
+    return await _save_variant_to_draft(
+        variant_id,
+        request,
+        db,
+        user,
+        platform="WECHAT_OFFICIAL",
+        error_code=50218,
+        success_message="文章已保存到微信公众号草稿箱",
+        platform_check_message="只有微信公众号版本可以保存到公众号草稿箱",
+        account_missing_message="请先连接微信公众号账号",
+        publish_mode_resolver=_resolve_wechat_publish_mode,
+        pre_publish=_render_wechat_html,
+    )
+
+
+@router.post("/variants/{variant_id}/toutiao-draft")
+async def save_toutiao_variant_to_draft(
+    variant_id: int,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+) -> dict:
+    """Save the current edited Toutiao variant to the real account draft box now."""
+    return await _save_variant_to_draft(
+        variant_id,
+        request,
+        db,
+        user,
+        platform="TOUTIAO",
+        error_code=50219,
+        success_message="文章已保存到今日头条草稿箱",
+        platform_check_message="只有今日头条版本可以保存到头条草稿箱",
+        account_missing_message="请先连接今日头条账号",
     )
 
 
@@ -429,6 +498,8 @@ def approve_variant(
     variant = db.get(ContentVariant, variant_id)
     if not variant:
         raise AppException(40402, "内容版本不存在", 404)
+    if variant.review_status == "APPROVED":
+        raise AppException(40906, "该版本已经是审核通过状态", 409)
     variant.review_status = "APPROVED"
     variant.article.status = "APPROVED"
     record_audit(db, request, user, "APPROVE", "CONTENT", "VARIANT", variant.id)

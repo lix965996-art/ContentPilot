@@ -5,23 +5,26 @@ the first login is completed by scanning Toutiao's QR code and the resulting
 browser profile remains on this computer.  ContentPilot never serializes
 cookies into its database and never reports success unless the creator page
 shows a success signal after the final confirmation.
+
+Browser-session lifecycle (launch / QR login / logout) is handled by
+:class:`~app.publishers.browser_session.BrowserSessionManager`; this module
+only contains Toutiao-specific page automation and the publisher.
 """
 
 from __future__ import annotations
 
 import asyncio
-import base64
-import os
 import re
+import tempfile
 import time
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-from playwright.async_api import BrowserContext, Page, Playwright, async_playwright
+from playwright.async_api import Page
 
-from app.core.config import settings
 from app.publishers.base import PublishResult
+from app.publishers.browser_session import BrowserSessionManager, LoginSession
+from app.publishers.wechat_browser import _materialize_images
 
 TOUTIAO_HOME = "https://mp.toutiao.com/"
 TOUTIAO_PUBLISH = "https://mp.toutiao.com/profile_v4/graphic/publish"
@@ -40,78 +43,7 @@ _ACCOUNT_NAME_SELECTORS = (
 )
 
 
-@dataclass
-class LoginSession:
-    playwright: Playwright
-    context: BrowserContext
-    page: Page
-
-
-_login_sessions: dict[int, LoginSession] = {}
-_session_lock = asyncio.Lock()
-
-
-def _profile_root() -> Path:
-    configured = settings.toutiao_browser_profile_root.strip()
-    root = (
-        Path(configured).expanduser() if configured else Path.home() / ".contentpilot" / "toutiao"
-    )
-    root.mkdir(parents=True, exist_ok=True)
-    return root.resolve()
-
-
-def _profile_dir(account_id: int) -> Path:
-    path = (_profile_root() / f"account-{account_id}").resolve()
-    if path.parent != _profile_root():
-        raise RuntimeError("今日头条浏览器会话目录无效")
-    path.mkdir(parents=True, exist_ok=True)
-    return path
-
-
-def _chrome_path() -> str | None:
-    configured = os.environ.get("CONTENTPILOT_CHROME_PATH", "").strip()
-    candidates = (
-        configured,
-        r"C:\Program Files\Google\Chrome\Application\chrome.exe",
-        r"C:\Program Files (x86)\Google\Chrome\Application\chrome.exe",
-    )
-    return next((item for item in candidates if item and Path(item).is_file()), None)
-
-
-async def _launch(account_id: int, *, headless: bool | None = None) -> LoginSession:
-    playwright = await async_playwright().start()
-    launch_args: dict[str, Any] = {
-        "headless": settings.toutiao_browser_headless if headless is None else headless,
-        "locale": "zh-CN",
-        "timezone_id": "Asia/Shanghai",
-        "viewport": {"width": 1440, "height": 900},
-        "args": [
-            "--disable-blink-features=AutomationControlled",
-            "--disable-features=TranslateUI",
-        ],
-    }
-    chrome = _chrome_path()
-    if chrome:
-        launch_args["executable_path"] = chrome
-    try:
-        context = await playwright.chromium.launch_persistent_context(
-            str(_profile_dir(account_id)), **launch_args
-        )
-    except Exception:
-        await playwright.stop()
-        raise
-    page = context.pages[0] if context.pages else await context.new_page()
-    return LoginSession(playwright, context, page)
-
-
-async def _close(session: LoginSession) -> None:
-    try:
-        await session.context.close()
-    finally:
-        await session.playwright.stop()
-
-
-async def _logged_in(page: Page) -> bool:
+async def _toutiao_logged_in(page: Page) -> bool:
     url = page.url.lower()
     if "/profile_v4" in url and "/auth/" not in url:
         return True
@@ -121,122 +53,88 @@ async def _logged_in(page: Page) -> bool:
     return False
 
 
-async def _account_name(page: Page) -> str:
-    for selector in _ACCOUNT_NAME_SELECTORS:
-        locator = page.locator(selector).first
-        if await locator.count():
-            value = (await locator.inner_text()).strip()
-            if value:
-                return value[:100]
-    return ""
+_manager = BrowserSessionManager(
+    home_url=TOUTIAO_HOME,
+    qr_selectors=_QR_SELECTORS,
+    account_name_selectors=_ACCOUNT_NAME_SELECTORS,
+    profile_root_setting="toutiao_browser_profile_root",
+    headless_setting="toutiao_browser_headless",
+    platform_label="今日头条",
+    logged_in_check=_toutiao_logged_in,
+    login_timeout=45_000,
+)
+
+# Public API – re-exported so existing callers are unchanged.
+get_login_qrcode = _manager.get_login_qrcode
+check_login = _manager.check_login
+logout = _manager.logout
+
+# Internal helpers used by ToutiaoBrowserPublisher below.
+_launch = _manager._launch  # noqa: SLF001
+_close = _manager._close  # noqa: SLF001
+_logged_in = _manager._logged_in  # noqa: SLF001
 
 
-async def _qr_data_url(page: Page) -> str:
-    for selector in _QR_SELECTORS:
-        locator = page.locator(selector).first
-        if not await locator.count() or not await locator.is_visible():
-            continue
-        png = await locator.screenshot(type="png")
-        return f"data:image/png;base64,{base64.b64encode(png).decode('ascii')}"
-    return ""
+async def _append_article_images(page: Page, paths: list[Path]) -> int:
+    if not paths:
+        return 0
+    editor = page.locator(
+        ".ProseMirror[contenteditable='true'], .ql-editor[contenteditable='true'], "
+        "[contenteditable='true'][class*='editor'], [contenteditable='true']"
+    ).first
+    before = await editor.locator("img").count()
+    await editor.focus()
+    await editor.evaluate(
+        """element => {
+          const selection = window.getSelection();
+          const range = document.createRange();
+          range.selectNodeContents(element);
+          range.collapse(false);
+          selection.removeAllRanges();
+          selection.addRange(range);
+        }"""
+    )
+    image_tool = page.locator(".syl-toolbar-tool.image button").first
+    if not await image_tool.count():
+        raise RuntimeError("未找到今日头条正文图片入口，页面结构可能已经更新")
+    # Toutiao places a transparent editor layer above the toolbar while it is
+    # autosaving. A normal Playwright click can therefore wait forever even
+    # though the button itself is visible. Trigger the button's own handler
+    # directly, then upload through the file input created by that handler.
+    await image_tool.evaluate("element => element.click()")
+    file_input = page.locator("input[type='file'][accept*='image']").first
+    await file_input.wait_for(state="attached", timeout=10_000)
+    await file_input.set_input_files([str(path) for path in paths])
+    uploaded_items = page.locator(".upload-image-wrapper .pic-select-image-item-wrap")
+    successful_items = page.locator(".upload-image-wrapper .pic-select-image-item-wrap .success")
+    for _ in range(90):
+        await page.wait_for_timeout(500)
+        if await uploaded_items.count() >= len(paths) and await successful_items.count() >= len(
+            paths
+        ):
+            break
+    else:
+        raise RuntimeError("今日头条图片上传没有完成，请检查图片格式或网络")
 
-
-async def get_login_qrcode(account_id: int) -> dict[str, str | bool]:
-    """Start or reuse one QR-login browser session for this account."""
-    async with _session_lock:
-        session = _login_sessions.get(account_id)
-        if session is None:
-            try:
-                session = await _launch(account_id)
-                await session.page.goto(TOUTIAO_HOME, wait_until="domcontentloaded", timeout=45_000)
-                await session.page.wait_for_timeout(2_000)
-                _login_sessions[account_id] = session
-            except Exception as exc:
-                return {
-                    "connected": False,
-                    "image_data_url": "",
-                    "message": f"无法启动本机 Chrome：{str(exc)[:300]}",
-                }
-        try:
-            if await _logged_in(session.page):
-                return {
-                    "connected": True,
-                    "image_data_url": "",
-                    "username": await _account_name(session.page),
-                    "message": "今日头条账号已登录",
-                }
-            image = await _qr_data_url(session.page)
-            if not image:
-                await session.page.reload(wait_until="domcontentloaded", timeout=45_000)
-                await session.page.wait_for_timeout(1_500)
-                image = await _qr_data_url(session.page)
-            return {
-                "connected": False,
-                "image_data_url": image,
-                "message": "请使用抖音或今日头条 App 扫码，并在手机端确认登录"
-                if image
-                else "登录页已打开，但没有识别到二维码；平台页面可能已更新，请重试。",
-            }
-        except Exception as exc:
-            return {
-                "connected": False,
-                "image_data_url": "",
-                "message": f"读取今日头条登录页失败：{str(exc)[:300]}",
-            }
-
-
-async def check_login(account_id: int) -> tuple[bool, str]:
-    async with _session_lock:
-        active = _login_sessions.get(account_id)
-        if active:
-            try:
-                if await _logged_in(active.page):
-                    name = await _account_name(active.page)
-                    _login_sessions.pop(account_id, None)
-                    await _close(active)
-                    return True, name
-                return False, "等待扫码确认"
-            except Exception:
-                _login_sessions.pop(account_id, None)
-                await _close(active)
-        try:
-            session = await _launch(account_id, headless=True)
-            await session.page.goto(TOUTIAO_HOME, wait_until="domcontentloaded", timeout=45_000)
-            await session.page.wait_for_timeout(1_500)
-            logged = await _logged_in(session.page)
-            name = await _account_name(session.page) if logged else ""
-            await _close(session)
-            return logged, name or ("账号已登录" if logged else "需要扫码登录")
-        except Exception as exc:
-            return False, f"无法检测本机登录：{str(exc)[:300]}"
-
-
-async def logout(account_id: int) -> tuple[bool, str]:
-    async with _session_lock:
-        session = _login_sessions.pop(account_id, None)
-        created = session is None
-        try:
-            session = session or await _launch(account_id, headless=True)
-            await session.context.clear_cookies()
-            for page in session.context.pages:
-                try:
-                    await page.evaluate("() => { localStorage.clear(); sessionStorage.clear(); }")
-                except Exception:
-                    pass
-            return True, "本机今日头条登录会话已清除"
-        except Exception as exc:
-            return False, f"清除今日头条会话失败：{str(exc)[:300]}"
-        finally:
-            if session and (created or account_id not in _login_sessions):
-                await _close(session)
+    confirm = page.get_by_role("button", name="确定", exact=True).last
+    if not await confirm.count():
+        raise RuntimeError("未找到今日头条图片上传确认按钮，页面结构可能已经更新")
+    await confirm.evaluate("element => element.click()")
+    expected = before + len(paths)
+    for _ in range(90):
+        await page.wait_for_timeout(500)
+        if await editor.locator("img").count() >= expected:
+            return len(paths)
+    raise RuntimeError("今日头条图片上传超时，请检查图片格式或平台页面")
 
 
 class ToutiaoBrowserPublisher:
     platform = "TOUTIAO"
     mode = "BROWSER_PUBLISH"
 
-    def __init__(self, account_id: int) -> None:
+    def __init__(self, account_id: int, mode: str = "BROWSER_PUBLISH") -> None:
         self.account_id = account_id
+        self.mode = mode
 
     async def validate_credentials(self) -> PublishResult:
         logged, info = await check_login(self.account_id)
@@ -252,7 +150,7 @@ class ToutiaoBrowserPublisher:
         )
 
     async def get_capabilities(self) -> list[str]:
-        return ["ARTICLE_PUBLISH", "STATUS_READ"]
+        return ["ARTICLE_PUBLISH", "DRAFT_CREATE", "DRAFT_UPDATE", "STATUS_READ"]
 
     async def publish(self, request: dict[str, Any]) -> PublishResult:
         title = str(request.get("title") or "").strip()
@@ -264,8 +162,13 @@ class ToutiaoBrowserPublisher:
             return self._failure("VALIDATION_ERROR", "今日头条正文不能为空")
 
         started = time.perf_counter()
+        session: LoginSession | None = None
         try:
-            session = await _launch(self.account_id, headless=settings.toutiao_browser_headless)
+            # Toutiao currently returns business error 7050 for cloud-draft
+            # writes from headless Chrome, while the same authenticated profile
+            # succeeds in a normal Chrome window. Keep publishing headful so the
+            # platform receives an ordinary creator-browser environment.
+            session = await _launch(self.account_id, headless=False)
             page = session.page
             await page.goto(TOUTIAO_PUBLISH, wait_until="domcontentloaded", timeout=60_000)
             await page.wait_for_timeout(2_000)
@@ -273,6 +176,38 @@ class ToutiaoBrowserPublisher:
                 await _close(session)
                 return self._failure(
                     "LOGIN_REQUIRED", "今日头条登录已失效，请重新扫码", status="LOGIN_REQUIRED"
+                )
+
+            draft_future: asyncio.Future[tuple[bool, str]] | None = None
+            if self.mode == "BROWSER_DRAFT":
+                draft_future = asyncio.get_running_loop().create_future()
+
+                async def capture_draft_id(response) -> None:
+                    if (
+                        response.request.method != "POST"
+                        or "/mp/agw/article/publish" not in response.url
+                    ):
+                        return
+                    try:
+                        payload = await response.json()
+                        data = payload.get("data") or {}
+                        draft_id = str(data.get("pgcId") or data.get("pgc_id") or "")
+                        if draft_future.done():
+                            return
+                        if payload.get("code") == 0 and draft_id:
+                            draft_future.set_result((True, draft_id))
+                        elif payload.get("code") != 0:
+                            message = str(
+                                payload.get("reason")
+                                or payload.get("message")
+                                or "今日头条拒绝保存草稿"
+                            )
+                            draft_future.set_result((False, message))
+                    except Exception:
+                        return
+
+                page.on(
+                    "response", lambda response: asyncio.create_task(capture_draft_id(response))
                 )
 
             title_input = page.locator(
@@ -291,14 +226,83 @@ class ToutiaoBrowserPublisher:
             if not await editor.count():
                 await _close(session)
                 return self._failure("PAGE_CHANGED", "未找到正文编辑器，今日头条页面可能已更新")
-            safe_html = content_html or "".join(
-                f"<p>{line}</p>" for line in content.splitlines() if line.strip()
-            )
-            await editor.evaluate(
-                "(el, html) => { el.innerHTML = html; el.dispatchEvent(new InputEvent('input', "
-                "{ bubbles: true, inputType: 'insertText', data: null })); }",
-                safe_html,
-            )
+            if self.mode == "BROWSER_DRAFT":
+                # Playwright's contenteditable fill emits the native events used
+                # by Toutiao's editor state and cloud-draft debounce. Replacing
+                # innerHTML alone changes what is visible but does not reliably
+                # update the React/editor model, so no cloud draft is created.
+                await editor.fill(content)
+            else:
+                safe_html = content_html or "".join(
+                    f"<p>{line}</p>" for line in content.splitlines() if line.strip()
+                )
+                await editor.evaluate(
+                    "(el, html) => { el.innerHTML = html; el.dispatchEvent(new InputEvent('input', "
+                    "{ bubbles: true, inputType: 'insertText', data: null })); }",
+                    safe_html,
+                )
+
+            image_values = [str(value) for value in request.get("images", []) if value]
+            image_inserted_count = 0
+            if self.mode == "BROWSER_DRAFT" and image_values:
+                with tempfile.TemporaryDirectory(prefix="contentpilot-toutiao-images-") as temp_dir:
+                    image_paths = await _materialize_images(image_values, Path(temp_dir))
+                    image_inserted_count = await _append_article_images(page, image_paths)
+
+            if self.mode == "BROWSER_DRAFT":
+                # Ignore any intermediate autosave caused by the title alone.
+                # The next successful publish response is the one scheduled
+                # after the final body/image change.
+                draft_future = asyncio.get_running_loop().create_future()
+                try:
+                    draft_saved, draft_result = await asyncio.wait_for(
+                        asyncio.shield(draft_future), timeout=60
+                    )
+                except TimeoutError:
+                    messages = await page.locator(
+                        ".byte-message, [class*='toast'], [class*='message']"
+                    ).all_inner_texts()
+                    detail = next(
+                        (value.strip() for value in messages if "失败" in value),
+                        "页面没有返回明确的草稿保存结果",
+                    )
+                    await _close(session)
+                    return self._failure("DRAFT_SAVE_UNCONFIRMED", detail)
+                if not draft_saved:
+                    await _close(session)
+                    return self._failure("DRAFT_SAVE_FAILED", draft_result)
+                draft_id = draft_result
+
+                try:
+                    await page.wait_for_function(
+                        """() => Array.from(document.querySelectorAll('.footer-draft-save'))
+                          .some((el) => (el.textContent || '').includes('草稿已保存'))""",
+                        timeout=10_000,
+                    )
+                except Exception:
+                    # The successful cloud response with pgcId is authoritative;
+                    # the status label can lag or be hidden by another panel.
+                    pass
+                await _close(session)
+                return PublishResult(
+                    True,
+                    self.platform,
+                    self.mode,
+                    "DRAFT_CREATED",
+                    external_id=draft_id,
+                    published_url="https://mp.toutiao.com/profile_v4/manage/draft?from=creation",
+                    detail={
+                        "draftId": draft_id,
+                        "method": "local_browser_autosave",
+                        "imageRequestedCount": len(image_values),
+                        "imageInsertedCount": image_inserted_count,
+                        "publishPackage": {
+                            "imageRequestedCount": len(image_values),
+                            "imageInsertedCount": image_inserted_count,
+                        },
+                        "durationMs": int((time.perf_counter() - started) * 1000),
+                    },
+                )
 
             no_cover = page.get_by_text(re.compile("无封面")).first
             if await no_cover.count() and await no_cover.is_visible():
@@ -341,7 +345,12 @@ class ToutiaoBrowserPublisher:
                 )
             return self._failure("PUBLISH_UNCONFIRMED", "页面没有返回明确的发布成功状态")
         except Exception as exc:
-            return self._failure("BROWSER_ERROR", f"今日头条浏览器发布失败：{str(exc)[:400]}")
+            if session:
+                await _close(session)
+            detail = str(exc)
+            if "Locator." in detail or "Call log:" in detail or "Timeout" in detail:
+                detail = "今日头条编辑器响应超时，请重试；若持续失败，请检查头条页面是否弹出提示"
+            return self._failure("BROWSER_ERROR", f"今日头条浏览器发布失败：{detail[:400]}")
 
     async def query_status(self, task_id: str) -> dict[str, Any]:
         return {"taskId": task_id, "status": "UNKNOWN", "source": "local_browser"}

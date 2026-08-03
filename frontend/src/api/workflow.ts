@@ -320,25 +320,38 @@ export const workflowApi = {
     >(apiClient.post(`/platform-accounts/${platform}/test`))
   },
   xiaohongshuLoginQrcode() {
-    return unwrap<{ imageDataUrl: string; message: string }>(
+    return unwrap<{ imageDataUrl: string; message: string; expiresInSeconds: number }>(
       apiClient.post('/platform-accounts/XIAOHONGSHU/login-qrcode'),
     )
   },
   xiaohongshuLogout() {
     return unwrap<PlatformAccount>(apiClient.post('/platform-accounts/XIAOHONGSHU/logout'))
   },
-  toutiaoLoginQrcode() {
-    return unwrap<{ connected: boolean; imageDataUrl: string; message: string }>(
-      apiClient.post('/platform-accounts/TOUTIAO/login-qrcode'),
+  toutiaoLoginQrcode(refresh = false) {
+    return unwrap<{
+      connected: boolean
+      imageDataUrl: string
+      message: string
+      expiresInSeconds: number
+    }>(
+      apiClient.post('/platform-accounts/TOUTIAO/login-qrcode', undefined, {
+        params: { refresh },
+      }),
     )
   },
   toutiaoLogout() {
     return unwrap<PlatformAccount>(apiClient.post('/platform-accounts/TOUTIAO/logout'))
   },
-  wechatLoginQrcode() {
-    return unwrap<{ connected: boolean; imageDataUrl: string; message: string }>(
+  wechatLoginQrcode(refresh = false) {
+    return unwrap<{
+      connected: boolean
+      imageDataUrl: string
+      message: string
+      expiresInSeconds: number
+    }>(
       apiClient.post('/platform-accounts/WECHAT_OFFICIAL/login-qrcode', undefined, {
         timeout: 60_000,
+        params: { refresh },
       }),
     )
   },
@@ -357,6 +370,15 @@ export const workflowApi = {
       draftUrl?: string
       resultMode: string
     }>(apiClient.post(`/variants/${variantId}/wechat-draft`, undefined, { timeout: 180_000 }))
+  },
+  saveToutiaoDraft(variantId: number) {
+    return unwrap<{
+      scheduleId: number
+      status: string
+      draftId: string
+      draftUrl?: string
+      resultMode: string
+    }>(apiClient.post(`/variants/${variantId}/toutiao-draft`, undefined, { timeout: 180_000 }))
   },
   disconnectPlatformAccount(platform: Platform) {
     return unwrap<PlatformAccount>(apiClient.delete(`/platform-accounts/${platform}`))
