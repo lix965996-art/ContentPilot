@@ -42,3 +42,18 @@ def test_all_roles_can_access_dashboard(client: TestClient, login_as) -> None:
         )
         assert response.status_code == 200
         assert response.json()["data"]["phase"] == 9
+
+
+def test_viewer_can_read_platform_accounts_and_variants(client: TestClient, login_as) -> None:
+    login_data = login_as("viewer", "Viewer@123456")
+    headers = authorization_header(login_data["access_token"])
+
+    accounts = client.get("/api/platform-accounts", headers=headers)
+    assert accounts.status_code == 200
+    assert len(accounts.json()["data"]) >= 1
+
+    articles = client.get("/api/articles?page_size=1", headers=headers).json()["data"]["items"]
+    assert articles
+    article_id = articles[0]["id"]
+    variants = client.get(f"/api/articles/{article_id}/variants", headers=headers)
+    assert variants.status_code == 200

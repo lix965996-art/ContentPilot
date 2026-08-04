@@ -12,22 +12,27 @@ import FilterBar from '@/components/FilterBar.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import PlatformIcon from '@/components/PlatformIcon.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
+import ArticlePlatformPreviewDialog from '@/components/ArticlePlatformPreviewDialog.vue'
+import EngagementMetricsBar from '@/components/EngagementMetricsBar.vue'
 import { useAuthStore } from '@/stores/auth'
-import type { Article, Platform } from '@/types/business'
+import type { Article, ArticleEngagementSummary, Platform } from '@/types/business'
 
 const router = useRouter()
 const route = useRoute()
 const auth = useAuthStore()
-const canOperate = computed(() => auth.hasRole(['ADMIN', 'OPERATOR']))
+const canOperate = computed(() => auth.canManageBusiness)
 const rows = ref<Article[]>([])
 const total = ref(0)
 const loading = ref(false)
 const importing = ref(false)
 const editorOpen = ref(false)
+const previewOpen = ref(false)
+const previewArticle = ref<Article>()
 const confirmDeleteOpen = ref(false)
 const deleteTarget = ref<Article>()
 const editingId = ref<number>()
 const rowPlatforms = ref<Record<number, Platform[]>>({})
+const rowEngagement = ref<Record<number, ArticleEngagementSummary>>({})
 const filters = reactive({ keyword: '', status: '', platform: '' })
 const tabs = [
   ['全部', ''],
@@ -67,6 +72,10 @@ async function load() {
     const mapping: Record<number, Platform[]> = {}
     for (const [id, platforms] of pairs) mapping[id] = [...platforms]
     rowPlatforms.value = mapping
+    const engagementData = await workflowApi.articlesEngagement(data.items.map((row) => row.id))
+    const engagementMap: Record<number, ArticleEngagementSummary> = {}
+    for (const item of engagementData.items) engagementMap[item.articleId] = item
+    rowEngagement.value = engagementMap
   } catch (error) {
     ElMessage.error(getApiErrorMessage(error))
   } finally {
@@ -102,6 +111,17 @@ function openCreate() {
     status: 'DRAFT',
   })
   editorOpen.value = true
+}
+function openPreview(row: Article) {
+  previewArticle.value = row
+  previewOpen.value = true
+}
+async function openArticle(row: Article) {
+  if (!canOperate.value) {
+    openPreview(row)
+    return
+  }
+  await openEdit(row)
 }
 async function openEdit(row: Article) {
   const detail = await workflowApi.article(row.id)
@@ -222,13 +242,25 @@ onMounted(async () => {
     </FilterBar>
     <DataList :loading="loading" :empty="!rows.length" class="content-list mt-3">
       <article v-for="row in rows" :key="row.id" class="content-row">
-        <button class="content-thumb" @click="openEdit(row)">
-          <span>{{ row.title.slice(0, 1) }}</span>
+        <button class="content-thumb" @click="openArticle(row)">
+          <img
+            v-if="row.coverThumbnailUrl"
+            :src="row.coverThumbnailUrl"
+            :alt="`${row.title} 封面`"
+            loading="lazy"
+          />
+          <span v-else>{{ row.title.slice(0, 1) }}</span>
         </button>
-        <button class="content-summary" @click="openEdit(row)">
+        <button class="content-summary" @click="openArticle(row)">
           <strong>{{ row.title }}</strong
           ><span>{{ row.summary || row.sourceText }}</span
           ><small>{{ row.topic || '未分类' }} · {{ row.variantCount }} 个平台版本</small>
+          <EngagementMetricsBar
+            v-if="rowEngagement[row.id]?.totals"
+            compact
+            :totals="rowEngagement[row.id]?.totals"
+            :simulated="rowEngagement[row.id]?.simulated"
+          />
         </button>
         <div class="content-platforms">
           <PlatformIcon
@@ -277,6 +309,7 @@ onMounted(async () => {
         ></template
       >
     </DataList>
+    <ArticlePlatformPreviewDialog v-model="previewOpen" :article="previewArticle" />
     <ConfirmDialog
       v-model="confirmDeleteOpen"
       title="删除内容"

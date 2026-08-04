@@ -1,38 +1,39 @@
 <script setup lang="ts">
 import { computed, onMounted, ref } from 'vue'
+import { useRouter } from 'vue-router'
 import { ElMessage } from 'element-plus'
-import { Download, FileSpreadsheet, Plus, ScrollText, Upload } from 'lucide-vue-next'
+import type { UploadRequestOptions } from 'element-plus'
+import { Download, FileSpreadsheet, Plus, Upload } from 'lucide-vue-next'
 import PageHeader from '@/components/PageHeader.vue'
-import ChartPanel from '@/components/ChartPanel.vue'
+import HistorySlotInsightPanel from '@/components/HistorySlotInsightPanel.vue'
+import PublishReviewPanel from '@/components/PublishReviewPanel.vue'
+import DecisionChainPanel from '@/components/DecisionChainPanel.vue'
 import EmptyState from '@/components/EmptyState.vue'
+import Skeleton from '@/components/Skeleton.vue'
 import { workflowApi } from '@/api/workflow'
 import { apiClient, getApiErrorMessage } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
+import type { ActivityAnalysis, RecommendationEffect } from '@/types/business'
+
+const router = useRouter()
 const auth = useAuthStore()
-const canOperate = computed(() => auth.hasRole(['ADMIN', 'OPERATOR']))
+const canOperate = computed(() => auth.canManageBusiness)
+const activeTab = ref<'history' | 'publish' | 'chain'>('history')
+
 const overview = ref<Record<string, number>>({})
-const platforms = ref<Array<any>>([])
-const times = ref<Array<any>>([])
-const ranking = ref<Array<any>>([])
-const summary = ref<Record<string, any>>()
+const ranking = ref<Array<Record<string, any>>>([])
 const importing = ref(false)
 const manualOpen = ref(false)
-const schedules = ref<Array<any>>([])
-const dashboard = ref<Record<string, any>>({})
-const bestPlatform = computed(() => platforms.value[0]?.name || '—')
-const timeLift = computed(() => {
-  const recommended = times.value.find((x) => x.name === 'RECOMMENDED_TIME')?.engagementRate || 0
-  const fixed = times.value.find((x) => x.name === 'FIXED_TIME')?.engagementRate || 0
-  return Number((recommended - fixed).toFixed(2))
-})
-const publishRate = computed(() =>
-  schedules.value.length
-    ? Math.round(
-        (schedules.value.filter((x) => x.status === 'SUCCESS').length / schedules.value.length) *
-          100,
-      )
-    : 0,
-)
+const schedules = ref<Array<Record<string, any>>>([])
+const historyTotal = ref(0)
+const historyAnalysis = ref<ActivityAnalysis>()
+const historyLoading = ref(false)
+const effect = ref<RecommendationEffect>()
+
+const publishSampleCount = computed(() => overview.value.sampleCount || 0)
+const hasPublishData = computed(() => publishSampleCount.value > 0)
+const hasHistoryData = computed(() => historyTotal.value > 0)
+
 const metric = ref<Record<string, any>>({
   schedule_id: 0,
   platform: 'WEIBO',
@@ -46,72 +47,46 @@ const metric = ref<Record<string, any>>({
   group_type: 'RECOMMENDED_TIME',
   data_source: 'MANUAL',
 })
-const platformOption = computed(() => ({
-  tooltip: { trigger: 'axis' },
-  grid: { left: 48, right: 16, top: 20, bottom: 32 },
-  xAxis: { type: 'category', data: platforms.value.map((x) => x.name) },
-  yAxis: { type: 'value' },
-  series: [
-    {
-      type: 'bar',
-      data: platforms.value.map((x) => x.engagementRate),
-      barWidth: 34,
-      itemStyle: { color: '#2563eb', borderRadius: [5, 5, 0, 0] },
-    },
-  ],
-}))
-const timeOption = computed(() => ({
-  tooltip: { trigger: 'axis' },
-  grid: { left: 48, right: 16, top: 20, bottom: 32 },
-  xAxis: {
-    type: 'category',
-    data: times.value.map((x) => (x.name === 'RECOMMENDED_TIME' ? '推荐时间组' : '固定时间组')),
-  },
-  yAxis: { type: 'value' },
-  series: [
-    {
-      type: 'bar',
-      data: times.value.map((x) => x.engagementRate),
-      barWidth: 42,
-      itemStyle: {
-        color: (p: any) => (p.dataIndex === 0 ? '#7c3aed' : '#94a3b8'),
-        borderRadius: [5, 5, 0, 0],
-      },
-    },
-  ],
-}))
-async function load() {
-  ;[overview.value, platforms.value, times.value, ranking.value, schedules.value, dashboard.value] =
-    await Promise.all([
-      workflowApi.analyticsOverview(),
-      workflowApi.analyticsPlatforms(),
-      workflowApi.analyticsTimes(),
-      workflowApi.analyticsRanking(),
-      workflowApi.schedules(),
-      workflowApi.dashboard(),
-    ])
+
+async function loadHistoryAnalysis() {
+  historyLoading.value = true
+  historyAnalysis.value = undefined
+  try {
+    historyAnalysis.value = await workflowApi.activityAnalysis({
+      source_scope: 'ALL',
+      window: 'ALL',
+    })
+  } catch (error) {
+    ElMessage.error(getApiErrorMessage(error))
+  } finally {
+    historyLoading.value = false
+  }
 }
-const trendOption = computed(() => ({
-  tooltip: { trigger: 'axis' },
-  grid: { left: 45, right: 16, top: 20, bottom: 30 },
-  xAxis: {
-    type: 'category',
-    data: (dashboard.value.trend || []).map((x: any) => x.date.slice(5)),
-    axisLine: { lineStyle: { color: '#e5e7eb' } },
-  },
-  yAxis: { type: 'value', splitLine: { lineStyle: { color: '#eef0f3' } } },
-  series: [
-    {
-      type: 'line',
-      smooth: true,
-      symbolSize: 5,
-      data: (dashboard.value.trend || []).map((x: any) => x.engagement),
-      lineStyle: { color: '#2563eb', width: 2 },
-      itemStyle: { color: '#2563eb' },
-    },
-  ],
-}))
-async function upload(options: any) {
+
+async function load() {
+  const [overviewData, rankingData, scheduleData, effectData, historyData] = await Promise.all([
+    workflowApi.analyticsOverview(),
+    workflowApi.analyticsRanking(),
+    workflowApi.schedules(),
+    workflowApi.recommendationEffect(),
+    workflowApi.historyBatches(),
+  ])
+  overview.value = overviewData
+  ranking.value = rankingData
+  schedules.value = scheduleData
+  effect.value = effectData
+  historyTotal.value = historyData.totalRecords || 0
+
+  if (historyTotal.value) {
+    await loadHistoryAnalysis()
+  }
+
+  if (!hasHistoryData.value && hasPublishData.value) {
+    activeTab.value = 'publish'
+  }
+}
+
+async function upload(options: UploadRequestOptions) {
   importing.value = true
   const body = new FormData()
   body.append('file', options.file)
@@ -121,15 +96,13 @@ async function upload(options: any) {
     })
     ElMessage.success(`导入完成：成功 ${response.data.data.successCount} 行`)
     await load()
-  } catch (e) {
-    ElMessage.error(getApiErrorMessage(e))
+  } catch (error) {
+    ElMessage.error(getApiErrorMessage(error))
   } finally {
     importing.value = false
   }
 }
-async function aiSummary() {
-  summary.value = await workflowApi.analyticsSummary()
-}
+
 async function download(path: string) {
   try {
     const response = await apiClient.get(path, { responseType: 'blob' })
@@ -145,6 +118,7 @@ async function download(path: string) {
     ElMessage.error(getApiErrorMessage(error, '下载失败'))
   }
 }
+
 async function openManual() {
   schedules.value = await workflowApi.schedules()
   const first = schedules.value[0]
@@ -153,10 +127,12 @@ async function openManual() {
   metric.value.platform = first.platform
   manualOpen.value = true
 }
+
 function syncPlatform() {
   const row = schedules.value.find((item) => item.id === metric.value.schedule_id)
   if (row) metric.value.platform = row.platform
 }
+
 async function saveManual() {
   try {
     await apiClient.post('/analytics/manual', metric.value)
@@ -167,136 +143,106 @@ async function saveManual() {
     ElMessage.error(getApiErrorMessage(error))
   }
 }
-onMounted(() => load().catch((e) => ElMessage.error(getApiErrorMessage(e))))
+
+onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error))))
 </script>
+
 <template>
-  <div>
-    <PageHeader
-      title="数据复盘"
-      description="导入经过核验的互动数据，对比平台、内容和发布时间实验。"
-      ><el-button v-if="canOperate" @click="openManual"
-        ><Plus :size="15" class="mr-2" />手工录入</el-button
-      ><el-button @click="download('/analytics/template')"
-        ><Download :size="15" class="mr-2" />下载模板</el-button
-      ><el-upload
-        v-if="canOperate"
-        :show-file-list="false"
-        :http-request="upload"
-        accept=".csv,.xlsx"
-        ><el-button type="primary" :loading="importing"
-          ><Upload :size="15" class="mr-2" />导入数据</el-button
-        ></el-upload
-      ></PageHeader
-    >
-    <div class="notice-strip">
-      <FileSpreadsheet :size="16" /><span
-        >当前统计 {{ overview.sampleCount || 0 }} 条记录；导入数据前请确认平台口径和日期。</span
-      >
-    </div>
-    <section class="metric-grid">
-      <article>
-        <span>平均互动率</span><strong>{{ overview.engagementRate || 0 }}%</strong
-        ><small>{{ overview.sampleCount || 0 }} 条记录</small>
-      </article>
-      <article>
-        <span>推荐时间提升</span><strong>{{ timeLift }}%</strong><small>相对固定时间组</small>
-      </article>
-      <article>
-        <span>发布成功率</span><strong>{{ publishRate }}%</strong
-        ><small>{{ schedules.length }} 个任务</small>
-      </article>
-      <article>
-        <span>表现最佳平台</span><strong class="!text-lg">{{ bestPlatform }}</strong
-        ><small>按当前互动率</small>
-      </article>
-    </section>
-    <template v-if="overview.sampleCount">
-      <section class="mt-4 grid gap-4 lg:grid-cols-[1.35fr_.65fr]">
-        <article class="panel p-5">
-          <p class="section-label">互动趋势</p>
-          <h2 class="section-title mt-1">最近 14 天</h2>
-          <ChartPanel :option="trendOption" />
-        </article>
-        <article class="panel p-5">
-          <p class="section-label">时间实验</p>
-          <h2 class="section-title mt-1">推荐时间与固定时间</h2>
-          <ChartPanel :option="timeOption" />
-        </article>
-      </section>
-      <section class="mt-4 grid gap-4 lg:grid-cols-2">
-        <article class="panel rounded-xl p-5">
-          <p class="section-label">平台对比</p>
-          <h2 class="section-title mt-1">平均互动率</h2>
-          <ChartPanel :option="platformOption" />
-        </article>
-      </section>
-      <section class="mt-4 grid gap-4 lg:grid-cols-[1.3fr_1fr]">
-        <article class="panel rounded-xl p-5">
-          <div class="flex justify-between">
-            <div>
-              <p class="section-label">内容排行</p>
-              <h2 class="section-title mt-1">表现最佳内容</h2>
-            </div>
-            <el-button link @click="download('/analytics/report')">导出 HTML 报告</el-button>
-          </div>
-          <div class="mt-4 divide-y divide-line">
-            <div
-              v-for="(item, index) in ranking"
-              :key="item.scheduleId"
-              class="flex items-center gap-3 py-3"
-            >
-              <span class="rank-number">{{ index + 1 }}</span>
-              <div class="min-w-0 flex-1">
-                <p class="truncate text-sm font-medium">{{ item.title }}</p>
-                <p class="mt-1 text-xs text-muted">{{ item.platform }} · {{ item.dataSource }}</p>
-              </div>
-              <strong class="text-sm text-brand">{{ item.engagementRate }}%</strong>
-            </div>
-          </div>
-        </article>
-        <article class="panel rounded-xl p-5">
-          <div class="flex items-start justify-between">
-            <div>
-              <p class="section-label">数据洞察</p>
-              <h2 class="section-title mt-1">复盘摘要</h2>
-            </div>
-            <el-button type="primary" plain @click="aiSummary"
-              ><ScrollText :size="15" class="mr-1" />生成摘要</el-button
-            >
-          </div>
-          <template v-if="summary"
-            ><p class="mt-5 text-sm leading-7">{{ summary.summary }}</p>
-            <ul class="mt-4 space-y-2 text-sm text-muted">
-              <li v-for="item in summary.keyFindings" :key="item">• {{ item }}</li>
-              <li v-for="item in summary.recommendations" :key="item">→ {{ item }}</li>
-            </ul>
-            <div class="notice-strip mt-4 !bg-amber-50 !text-amber-800">
-              {{ summary.limitations?.[0] }}
-            </div></template
-          >
-          <div v-else class="empty-state">
-            <ScrollText :size="27" />
-            <p>生成数据摘要</p>
-          </div>
-        </article>
-      </section>
-    </template>
-    <EmptyState
-      v-else
-      class="analytics-empty"
-      title="还没有互动数据"
-      description="导入发布数据后生成趋势"
-    >
-      <template #icon><FileSpreadsheet :size="23" /></template>
+  <div class="analytics-page">
+    <PageHeader title="数据">
+      <el-button v-if="canOperate" @click="openManual">
+        <Plus :size="15" class="mr-2" />手工录入
+      </el-button>
+      <el-button @click="download('/analytics/template')">
+        <Download :size="15" class="mr-2" />下载模板
+      </el-button>
       <el-upload
         v-if="canOperate"
         :show-file-list="false"
         :http-request="upload"
         accept=".csv,.xlsx"
       >
-        <el-button size="small" type="primary" :loading="importing">导入数据</el-button>
+        <el-button type="primary" :loading="importing">
+          <Upload :size="15" class="mr-2" />导入复盘数据
+        </el-button>
       </el-upload>
-    </EmptyState>
+    </PageHeader>
+
+    <div class="analytics-segment">
+      <button
+        type="button"
+        :class="{ active: activeTab === 'history' }"
+        @click="activeTab = 'history'"
+      >
+        历史基线
+      </button>
+      <button
+        type="button"
+        :class="{ active: activeTab === 'publish' }"
+        @click="activeTab = 'publish'"
+      >
+        发布复盘
+      </button>
+      <button type="button" :class="{ active: activeTab === 'chain' }" @click="activeTab = 'chain'">
+        决策链路
+      </button>
+    </div>
+
+    <div v-show="activeTab === 'history'" class="analytics-pane">
+      <template v-if="hasHistoryData">
+        <Skeleton v-if="historyLoading" :lines="6" />
+        <HistorySlotInsightPanel
+          v-else-if="historyAnalysis?.sampleCount"
+          :analysis="historyAnalysis"
+          :loading="historyLoading"
+          :can-schedule="canOperate"
+          @recalculate="loadHistoryAnalysis"
+        />
+        <EmptyState
+          v-else-if="!historyLoading"
+          title="分析结果为空"
+          description="历史库有记录，但暂无可用时段。"
+        />
+      </template>
+      <EmptyState v-else title="还没有历史基线数据" description="请先导入历史数据">
+        <template #icon><FileSpreadsheet :size="23" /></template>
+        <el-button size="small" @click="router.push({ name: 'recommendation' })">
+          去导入
+        </el-button>
+      </EmptyState>
+    </div>
+
+    <div v-show="activeTab === 'publish'" class="analytics-pane">
+      <PublishReviewPanel
+        v-if="hasPublishData"
+        :overview="overview"
+        :ranking="ranking"
+        :effect="effect"
+      />
+      <EmptyState v-else title="还没有发布复盘数据" description="导入或手工录入互动指标后查看">
+        <template #icon><FileSpreadsheet :size="23" /></template>
+        <el-upload
+          v-if="canOperate"
+          :show-file-list="false"
+          :http-request="upload"
+          accept=".csv,.xlsx"
+        >
+          <el-button size="small" type="primary" :loading="importing">导入复盘数据</el-button>
+        </el-upload>
+      </EmptyState>
+    </div>
+
+    <div v-if="activeTab === 'chain'" class="analytics-pane">
+      <DecisionChainPanel v-if="hasPublishData" :effect="effect" />
+      <EmptyState
+        v-else
+        title="还没有可追溯的发布记录"
+        description="需要至少一条已发布并回收互动数据的内容"
+      >
+        <template #icon><FileSpreadsheet :size="23" /></template>
+      </EmptyState>
+    </div>
+
     <el-dialog v-model="manualOpen" title="手工录入互动数据" width="620px">
       <el-form label-position="top">
         <div class="grid grid-cols-2 gap-x-4">
@@ -315,15 +261,19 @@ onMounted(() => load().catch((e) => ElMessage.error(getApiErrorMessage(e))))
               />
             </el-select>
           </el-form-item>
-          <el-form-item label="统计日期"
-            ><el-date-picker v-model="metric.metric_date" value-format="YYYY-MM-DD" class="!w-full"
-          /></el-form-item>
-          <el-form-item label="实验分组"
-            ><el-select v-model="metric.group_type" class="w-full"
-              ><el-option label="推荐时间组" value="RECOMMENDED_TIME" /><el-option
-                label="固定时间组"
-                value="FIXED_TIME" /></el-select
-          ></el-form-item>
+          <el-form-item label="统计日期">
+            <el-date-picker
+              v-model="metric.metric_date"
+              value-format="YYYY-MM-DD"
+              class="!w-full"
+            />
+          </el-form-item>
+          <el-form-item label="归到哪边">
+            <el-select v-model="metric.group_type" class="w-full">
+              <el-option label="按推荐时间发" value="RECOMMENDED_TIME" />
+              <el-option label="按平时时间发" value="FIXED_TIME" />
+            </el-select>
+          </el-form-item>
           <el-form-item
             v-for="field in ['impressions', 'likes', 'comments', 'collects', 'shares', 'followers']"
             :key="field"
@@ -342,10 +292,46 @@ onMounted(() => load().catch((e) => ElMessage.error(getApiErrorMessage(e))))
           </el-form-item>
         </div>
       </el-form>
-      <template #footer
-        ><el-button @click="manualOpen = false">取消</el-button
-        ><el-button type="primary" @click="saveManual">保存数据</el-button></template
-      >
+      <template #footer>
+        <el-button @click="manualOpen = false">取消</el-button>
+        <el-button type="primary" @click="saveManual">保存数据</el-button>
+      </template>
     </el-dialog>
   </div>
 </template>
+
+<style scoped>
+.analytics-segment {
+  display: inline-flex;
+  gap: 2px;
+  margin-top: 16px;
+  padding: 3px;
+  border-radius: 12px;
+  background: #eef1f5;
+}
+
+.analytics-segment button {
+  border: none;
+  border-radius: 10px;
+  background: transparent;
+  color: #6b7280;
+  font-size: 13px;
+  font-weight: 500;
+  padding: 8px 18px;
+  cursor: pointer;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease,
+    box-shadow 0.15s ease;
+}
+
+.analytics-segment button.active {
+  background: #fff;
+  color: #111827;
+  box-shadow: 0 1px 2px rgba(16, 24, 40, 0.06);
+}
+
+.analytics-pane {
+  margin-top: 14px;
+}
+</style>

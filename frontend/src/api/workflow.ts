@@ -1,8 +1,18 @@
 import { apiClient } from '@/api/client'
 import type { ApiResponse } from '@/types/api'
 import type {
+  ActivityAnalysis,
+  ActivityCurvePoint,
   Article,
+  ArticleEngagementSummary,
   GenerationTask,
+  HistoryImportBatch,
+  HistoryImportPreview,
+  PublishDecisionChain,
+  PublishTimeRecommendation,
+  RecommendationEffect,
+  ScheduleConflict,
+  TimeSource,
   LlmConfig,
   LlmConnectionResult,
   LlmUsage,
@@ -190,8 +200,114 @@ export const workflowApi = {
   archiveResearchItem(id: number) {
     return unwrap<{ id: number }>(apiClient.delete(`/research-items/${id}`))
   },
-  recommend(data: { article_id: number; variant_id?: number; platform: Platform }) {
-    return unwrap<Record<string, unknown>>(apiClient.post('/recommendations/publish-time', data))
+  recommend(data: {
+    article_id: number
+    variant_id?: number
+    platform: Platform
+    account_id?: number
+    content_type?: string
+    target_date?: string
+    horizon_days?: number
+    window?: '30D' | '90D' | 'ALL' | 'CUSTOM'
+    window_start_date?: string
+    window_end_date?: string
+  }) {
+    return unwrap<PublishTimeRecommendation>(
+      apiClient.post('/recommendations/publish-time', data, { timeout: 120_000 }),
+    )
+  },
+  activityAnalysis(params: Record<string, unknown> = {}) {
+    return unwrap<ActivityAnalysis>(apiClient.get('/activity/analysis', { params }))
+  },
+  activityCurve(params: Record<string, unknown> = {}) {
+    return unwrap<{
+      platform: Platform
+      date: string
+      points: ActivityCurvePoint[]
+      source: string
+    }>(apiClient.get('/activity/curve', { params }))
+  },
+  activityContentTypes() {
+    return unwrap<Array<{ value: string; label: string }>>(apiClient.get('/activity/content-types'))
+  },
+  previewHistoryImport(data: FormData) {
+    return unwrap<HistoryImportPreview>(
+      apiClient.post('/activity/history/preview', data, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: 120_000,
+      }),
+    )
+  },
+  importHistory(data: FormData) {
+    return unwrap<HistoryImportBatch & { window: Record<string, unknown> }>(
+      apiClient.post('/activity/history/import', data, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+        timeout: 180_000,
+      }),
+    )
+  },
+  historyBatches() {
+    return unwrap<{
+      items: HistoryImportBatch[]
+      totalRecords: number
+      bySource: Array<{ sourceType: string; label: string; count: number }>
+    }>(apiClient.get('/activity/history/batches'))
+  },
+  historyRecords(params: Record<string, unknown> = {}) {
+    return unwrap<{
+      items: Array<Record<string, unknown>>
+      total: number
+      page: number
+      pageSize: number
+    }>(apiClient.get('/activity/history/records', { params }))
+  },
+  deleteHistoryBatch(id: number) {
+    return unwrap<{ id: number; removed: number }>(
+      apiClient.delete(`/activity/history/batches/${id}`),
+    )
+  },
+  async downloadHistoryTemplate() {
+    const response = await apiClient.get('/activity/history/template', { responseType: 'blob' })
+    const url = URL.createObjectURL(response.data)
+    const anchor = document.createElement('a')
+    anchor.href = url
+    anchor.download = 'contentpilot-history-template.xlsx'
+    anchor.click()
+    URL.revokeObjectURL(url)
+  },
+  scheduleConflictCheck(params: {
+    platform: Platform
+    scheduled_at: string
+    account_id?: number
+    exclude_schedule_id?: number
+  }) {
+    return unwrap<{
+      platform: Platform
+      scheduledAt: string
+      hasConflict: boolean
+      hasDensityWarning: boolean
+      conflicts: ScheduleConflict[]
+    }>(apiClient.get('/schedules/conflict-check', { params }))
+  },
+  scheduleRecommendationBasis(id: number) {
+    return unwrap<{
+      scheduleId: number
+      timeSource: TimeSource
+      scheduledAt: string
+      recommendedAt: string | null
+      deviationMinutes: number | null
+      contentType?: string
+      contentTypeName: string
+      snapshot: Record<string, unknown>
+      recommendation: Record<string, unknown> | null
+      slotEvidence: Record<string, unknown>
+    }>(apiClient.get(`/schedules/${id}/recommendation-basis`))
+  },
+  recommendationEffect() {
+    return unwrap<RecommendationEffect>(apiClient.get('/analytics/recommendation-effect'))
+  },
+  publishDecision(scheduleId: number) {
+    return unwrap<PublishDecisionChain>(apiClient.get(`/analytics/publish-decision/${scheduleId}`))
   },
   schedules(params: Record<string, unknown> = {}) {
     return unwrap<Schedule[]>(apiClient.get('/schedules', { params }))
@@ -238,6 +354,21 @@ export const workflowApi = {
       apiClient.get('/analytics/content-ranking'),
     )
   },
+  articleEngagement(articleId: number) {
+    return unwrap<ArticleEngagementSummary>(
+      apiClient.get(`/analytics/articles/${articleId}/engagement`),
+    )
+  },
+  articlesEngagement(articleIds: number[]) {
+    if (!articleIds.length) {
+      return Promise.resolve({ items: [] as ArticleEngagementSummary[] })
+    }
+    return unwrap<{ items: ArticleEngagementSummary[] }>(
+      apiClient.get('/analytics/articles/engagement', {
+        params: { ids: articleIds.join(',') },
+      }),
+    )
+  },
   analyticsSummary() {
     return unwrap<Record<string, unknown>>(apiClient.post('/analytics/ai-summary'))
   },
@@ -252,6 +383,26 @@ export const workflowApi = {
   },
   experimentAction(id: number, action: string) {
     return unwrap<Record<string, unknown>>(apiClient.post(`/experiments/${id}/${action}`))
+  },
+  syncExperimentSchedules(id: number, platform?: Platform) {
+    return unwrap<{
+      experiment: Record<string, unknown>
+      created: number
+      skippedNoMetric: number
+    }>(
+      apiClient.post(`/experiments/${id}/sync-schedules`, null, {
+        params: platform ? { platform } : undefined,
+      }),
+    )
+  },
+  overrideExperimentSampleGroup(
+    experimentId: number,
+    sampleId: number,
+    data: { group_type: 'CONTROL' | 'TREATMENT'; reason: string },
+  ) {
+    return unwrap<Record<string, unknown>>(
+      apiClient.put(`/experiments/${experimentId}/samples/${sampleId}/group`, data),
+    )
   },
   users() {
     return unwrap<Array<Record<string, unknown>>>(apiClient.get('/admin/users'))

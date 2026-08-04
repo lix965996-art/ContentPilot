@@ -45,9 +45,17 @@ def client(database: None) -> Generator[TestClient, None, None]:
 def intercept_llm_transport(monkeypatch):
     """Intercept the external LLM transport; product code still uses the real provider path."""
 
-    async def fake_chat(_runtime, system_prompt, messages):
+    async def fake_chat(_runtime, system_prompt, messages, **_kwargs):
         prompt = messages[-1]["content"]
-        if "关键词" in system_prompt:
+        if "只做分类" in system_prompt:
+            payload = {
+                "content_type": "KNOWLEDGE",
+                "topic": "内容运营",
+                "audience": "校园新媒体团队",
+            }
+        elif "统计结果由系统计算完成" in system_prompt:
+            payload = {"narrative": "统计显示该时段的历史互动表现最好，建议按推荐时间发布。"}
+        elif "关键词" in system_prompt:
             payload = {
                 "keywords": [
                     {"zh": "内容运营", "en": "content operations", "reason": "文章核心主题"}

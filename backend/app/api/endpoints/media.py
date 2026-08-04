@@ -91,7 +91,7 @@ def _select_generated_asset(db: Session, asset: MediaAsset) -> None:
 async def image_models(
     request: Request,
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    _: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     runtime = load_llm_runtime(db)
     try:
@@ -114,7 +114,7 @@ async def generate_media_image(
     payload: MediaImageGenerateRequest,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     if not db.get(ContentArticle, payload.article_id):
         raise AppException(40401, "文章不存在", 404)
@@ -150,7 +150,7 @@ async def transform_media_image(
     payload: MediaImageTransformRequest,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     source_asset = db.get(MediaAsset, payload.asset_id)
     if not source_asset or source_asset.article_id != payload.article_id:
@@ -256,7 +256,7 @@ async def upload_media(
     usage_type: str = Form("BODY"),
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     if article_id is not None and not db.get(ContentArticle, article_id):
         raise AppException(40401, "文章不存在", 404)
@@ -317,7 +317,7 @@ def select_media(
     payload: MediaSelectRequest,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     if not db.get(ContentArticle, payload.article_id):
         raise AppException(40401, "文章不存在", 404)
@@ -357,7 +357,7 @@ def delete_media(
     asset_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     asset = db.get(MediaAsset, asset_id)
     if not asset:
@@ -373,7 +373,7 @@ def detach_media(
     asset_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     asset = db.get(MediaAsset, asset_id)
     if not asset:
@@ -399,7 +399,7 @@ def set_media_cover(
     asset_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     asset = db.get(MediaAsset, asset_id)
     if not asset:
@@ -503,7 +503,7 @@ def update_media_asset(
     payload: MediaAssetUpdate,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     asset = db.get(MediaAsset, asset_id)
     if not asset:
@@ -525,7 +525,7 @@ def attach_media_asset(
     payload: MediaAttachRequest,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     source = db.get(MediaAsset, asset_id)
     article = db.get(ContentArticle, payload.article_id)

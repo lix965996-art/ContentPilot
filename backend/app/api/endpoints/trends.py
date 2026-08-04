@@ -21,7 +21,7 @@ async def trends(
     limit: int = Query(default=20, ge=1, le=50),
     query: str = Query(default="", max_length=100),
     refresh: bool = False,
-    _: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    _: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     return success_response(request, await aggregate_trends(source, limit, query, refresh))
 
@@ -31,7 +31,7 @@ async def analyze_trend(
     payload: TrendAnalyzeRequest,
     request: Request,
     db: Session = Depends(get_db),
-    _: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    _: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     runtime = load_llm_runtime(db)
     system_prompt = """你是中文内容策划编辑。

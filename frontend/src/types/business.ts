@@ -11,9 +11,44 @@ export interface Article {
   keywords: string[]
   status: string
   variantCount: number
+  coverThumbnailUrl?: string
   createdAt: string
   updatedAt: string
   variants?: Variant[]
+}
+
+export interface ArticleEngagementMetric {
+  scheduleId: number
+  platform: Platform
+  metricDate: string
+  impressions: number
+  likes: number
+  comments: number
+  collects: number
+  shares: number
+  followers: number
+  engagementTotal: number
+  engagementRate: number
+  dataSource: string
+}
+
+export interface ArticleEngagementTotals {
+  impressions: number
+  likes: number
+  comments: number
+  collects: number
+  shares: number
+  engagementTotal: number
+  engagementRate: number
+}
+
+export interface ArticleEngagementSummary {
+  articleId: number
+  hasData: boolean
+  platforms?: ArticleEngagementMetric[]
+  totals: ArticleEngagementTotals | null
+  dataSources: string[]
+  simulated: boolean
 }
 
 export interface Variant {
@@ -244,6 +279,8 @@ export interface OperationRun {
   steps: OperationStep[]
 }
 
+export type TimeSource = 'RECOMMENDED' | 'ALTERNATIVE' | 'CUSTOM'
+
 export interface Schedule {
   id: number
   articleId: number
@@ -264,6 +301,327 @@ export interface Schedule {
   publishPackageJson?: PublishPackage
   errorMessage?: string
   logs?: Array<Record<string, unknown>>
+  recommendationId?: number
+  recommendedAt?: string
+  timeSource: TimeSource
+  contentType?: string
+  contentTypeName?: string
+  timeDeviationMinutes?: number | null
+  usedRecommendedTime?: boolean
+  recommendationSnapshotJson?: Record<string, unknown>
+}
+
+export interface RecommendationReason {
+  type: string
+  description: string
+  contribution: number
+}
+
+export interface RecommendationAlternative {
+  recommendedAt: string
+  score: number
+  confidence: string
+  sampleCount: number
+  reason: string
+}
+
+export interface ScheduleConflict {
+  scheduleId: number
+  articleTitle?: string
+  scheduledAt: string
+  minutes: number
+  sameAccount: boolean
+  level: 'CONFLICT' | 'DENSITY'
+  message: string
+}
+
+export type TimeWindow = '30D' | '90D' | 'ALL' | 'CUSTOM'
+
+export interface TimeWindowInfo {
+  window: TimeWindow
+  label: string
+  startDate: string | null
+  endDate: string | null
+  sufficient: boolean
+  message: string
+  sampleCount?: number
+  accountSampleCount?: number
+  baselineSampleCount?: number
+}
+
+export interface ActivityCurvePoint {
+  hour: number
+  time: string
+  platformPrior: number
+  accountHistory: number | null
+  publicBaseline: number | null
+  sampleCount: number
+}
+
+export interface PublishTimeRecommendation {
+  id: number
+  articleId: number
+  variantId?: number
+  platform: Platform
+  accountId?: number
+  recommendedAt: string
+  score: number
+  confidence: 'HIGH' | 'MEDIUM' | 'LOW'
+  algorithmVersion: string
+  contentType?: string
+  contentTypeName?: string
+  contentTypeProvider?: string
+  topic?: string
+  audience?: string
+  sampleCount: number
+  accountSampleCount: number
+  baselineSampleCount: number
+  reasons: RecommendationReason[]
+  alternatives: RecommendationAlternative[]
+  warnings: string[]
+  conflicts: ScheduleConflict[]
+  weights: { baseline: number; history: number; content: number; timezone: number }
+  dataSource: {
+    baseline: string
+    accountHistory: string
+    priorRuleCount: number
+    publicSampleCount: number
+    accountSampleCount: number
+    sourceTypes: Array<{ sourceType: string; label: string; count: number }>
+  }
+  dataSufficiency: {
+    level: string
+    accountSamples: number
+    slotSamples: number
+    sufficient: boolean
+    message: string
+  }
+  narrative?: string
+  narrativeProvider?: string
+  window?: TimeWindowInfo
+  curve: ActivityCurvePoint[]
+}
+
+export interface ActivityBucket {
+  sampleCount: number
+  score: number
+  engagementRate: number
+  avgViews: number
+  avgLikes: number
+  avgComments: number
+  avgShares: number
+  avgFavorites: number
+}
+
+export interface ExperimentSampleRow {
+  id: number
+  experimentId: number
+  scheduleId?: number
+  groupType: 'CONTROL' | 'TREATMENT'
+  sampleLabel: string
+  metricValueJson: Record<string, unknown>
+  assignmentSource?: 'AUTO' | 'MANUAL'
+  assignmentReason?: string | null
+  createdAt: string
+}
+
+export interface ActivityAnalysis {
+  filters: Record<string, unknown>
+  windowInfo?: TimeWindowInfo
+  sampleCount: number
+  accountSampleCount: number
+  baselineSampleCount: number
+  globalMeanScore: number
+  weekday: Array<ActivityBucket & { dayOfWeek: number; name: string }>
+  hourly: Array<ActivityBucket & { hour: number; time: string }>
+  heatmap: Array<{
+    dayOfWeek: number
+    name: string
+    hour: number
+    sampleCount: number
+    score: number
+  }>
+  contentTypes: Array<
+    ActivityBucket & {
+      contentType: string
+      contentTypeName: string
+      bestSlots: Array<{
+        dayOfWeek: number
+        dayName: string
+        hour: number
+        time: string
+        sampleCount: number
+        score: number
+      }>
+    }
+  >
+  topSlots: Array<{
+    dayOfWeek: number
+    dayName: string
+    hour: number
+    time: string
+    sampleCount: number
+    score: number
+    rawScore: number
+  }>
+  completeness: {
+    score: number
+    fields: Array<{
+      field: string
+      label: string
+      filled: number
+      total: number
+      percent: number
+    }>
+    dateRange: { start: string | null; end: string | null }
+  }
+  sources: Array<{ sourceType: string; label: string; count: number }>
+  scoreFormula: string
+  notice: string
+}
+
+export interface HistoryImportPreview {
+  filename: string
+  headers: string[]
+  mapping: Record<string, string>
+  fields: Array<{ field: string; label: string; required: boolean; type: string }>
+  totalRows: number
+  validRows: number
+  errorRows: number
+  duplicateInFile: number
+  duplicateInDatabase: number
+  missingValueRows: number
+  importableRows: number
+  errors: Array<{ row: number; message: string }>
+  preview: Array<Record<string, unknown>>
+  sourceTypes: Array<{ value: string; label: string }>
+}
+
+export interface HistoryImportBatch {
+  id: number
+  filename: string
+  sourceType: string
+  sourceLabel: string
+  sourceNote?: string
+  platformHint?: string
+  totalRows: number
+  successCount: number
+  duplicateCount: number
+  errorCount: number
+  missingValueCount: number
+  status: string
+  remainingRows?: number
+  errorsJson?: Array<{ row: number; message: string }>
+  createdAt: string
+}
+
+export interface RecommendationEffect {
+  adoption: {
+    totalSchedules: number
+    withRecommendation: number
+    adoptedCount: number
+    adoptionRate: number
+    averageDeviationMinutes: number
+    deviationBuckets: Array<{ name: string; count: number }>
+  }
+  comparison: Array<{
+    name: string
+    scheduleCount: number
+    measuredCount: number
+    impressions: number
+    engagementTotal: number
+    engagementRate: number
+    avgEngagementRate: number
+  }>
+  experimentGroups: RecommendationEffect['comparison']
+  items: Array<{
+    scheduleId: number
+    title: string
+    platform: Platform
+    status: string
+    timeSource: TimeSource
+    contentType?: string
+    scheduledAt: string
+    recommendedAt: string | null
+    actualPublishAt: string | null
+    deviationMinutes: number | null
+    executionDelayMinutes: number | null
+    sampleCount: number
+    impressions: number
+    engagementTotal: number
+    engagementRate: number
+  }>
+  notice: string
+}
+
+export interface DecisionComponent {
+  type: string
+  label: string
+  weight: number
+  rawScore: number
+  contribution: number
+  description: string
+}
+
+/** Full "why this time" chain for one schedule: content → analysis → decision → result. */
+export interface PublishDecisionChain {
+  scheduleId: number
+  title: string
+  platform: Platform
+  status: string
+  explainSource: 'SNAPSHOT' | 'RECOMPUTED'
+  explainNotice: string
+  content: {
+    articleTitle: string | null
+    variantTitle: string | null
+    contentType: string
+    contentTypeName: string
+    contentTypeProvider: 'STORED' | 'RULE'
+    modelName: string | null
+    promptVersion: string | null
+    wordCount: number | null
+    emojiCount: number | null
+    hashtags: string[]
+    generationDurationMs: number | null
+    tokenUsage: number | null
+  }
+  analysis: {
+    algorithmVersion: string
+    weekday: number
+    weekdayName: string
+    hour: number
+    score: number
+    confidence: 'HIGH' | 'MEDIUM' | 'LOW'
+    weights: { baseline: number; history: number; content: number; timezone: number }
+    components: DecisionComponent[]
+    hourly: Array<{ hour: number; score: number }>
+    bestHour: number
+    bestHourScore: number
+    accountSampleCount: number
+    baselineSampleCount: number
+    contentSampleCount: number
+    window: { window: string; label: string }
+    sourceTypes: Array<{ sourceType: string; label: string; count: number }>
+  }
+  decision: {
+    recommendedAt: string | null
+    scheduledAt: string
+    actualPublishAt: string | null
+    timeSource: TimeSource
+    timeSourceLabel: string
+    deviationMinutes: number | null
+    snapshotScore: number | null
+    snapshotConfidence: string | null
+    narrative: string | null
+    alternatives: RecommendationAlternative[]
+  }
+  result: {
+    sampleCount: number
+    impressions: number
+    engagementTotal: number
+    engagementRate: number | null
+    dataSources: string[]
+  }
 }
 
 export type PublishMode =
@@ -420,6 +778,12 @@ export const platformNames: Record<Platform, string> = {
   WECHAT_OFFICIAL: '微信公众号',
   TOUTIAO: '今日头条',
   X: 'X',
+}
+
+/** Extended labels for activity analysis (includes public research datasets). */
+export const analysisPlatformNames: Record<string, string> = {
+  ...platformNames,
+  YOUTUBE: 'YouTube（公开样本）',
 }
 
 export const platformColors: Record<Platform, string> = {

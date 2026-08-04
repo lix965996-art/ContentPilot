@@ -26,6 +26,7 @@ import { workflowApi } from '@/api/workflow'
 import EmptyState from '@/components/EmptyState.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import PlatformIcon from '@/components/PlatformIcon.vue'
+import ScheduleAdvisor from '@/components/ScheduleAdvisor.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import Toast from '@/components/Toast.vue'
 import WechatFormatterDialog from '@/components/WechatFormatterDialog.vue'
@@ -1364,6 +1365,11 @@ watch(visualMode, (mode) => {
   if (mode !== 'SEARCH') void loadImageModels()
 })
 
+async function goToCalendar(scheduleId: number) {
+  persistPreferences()
+  await router.push({ name: 'calendar', query: { schedule: scheduleId } })
+}
+
 async function scheduleCurrent() {
   if (!article.value || !current.value) return
   if (fitWeiboDraftForImage()) {
@@ -2122,6 +2128,14 @@ onMounted(() => {
                 >{{ item[0] }} {{ item[1] }}</span
               >
             </div>
+            <ScheduleAdvisor
+              :article-id="article?.id"
+              :variant-id="current.id"
+              :platform="current.platform"
+              :accounts="accounts"
+              :review-status="current.reviewStatus"
+              @scheduled="goToCalendar"
+            />
             <div class="version-history" data-testid="version-history">
               <header>
                 <strong>历史版本</strong>

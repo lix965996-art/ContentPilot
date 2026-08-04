@@ -28,7 +28,7 @@ def list_research_items(
     status: str = Query(default="", max_length=30),
     archived: bool = False,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     filters = [ResearchItem.created_by == user.id, ResearchItem.archived == archived]
     if query:
@@ -56,7 +56,7 @@ def create_research_item(
     payload: ResearchItemCreate,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     duplicate = None
     if payload.source_id:
@@ -85,7 +85,7 @@ def update_research_item(
     payload: ResearchItemUpdate,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     row = db.scalar(
         select(ResearchItem).where(ResearchItem.id == item_id, ResearchItem.created_by == user.id)
@@ -108,7 +108,7 @@ def archive_research_item(
     item_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     row = db.scalar(
         select(ResearchItem).where(ResearchItem.id == item_id, ResearchItem.created_by == user.id)

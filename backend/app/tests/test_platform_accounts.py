@@ -227,10 +227,11 @@ async def test_wechat_token_cache_does_not_require_network() -> None:
 
 
 def test_wechat_real_draft_uses_official_publisher(client, login_as, monkeypatch) -> None:
-    auth = _admin_auth(client, login_as)
+    admin_auth = _admin_auth(client, login_as)
+    operator_auth = _operator_auth(client, login_as)
     configured = client.put(
         "/api/platform-accounts/WECHAT_OFFICIAL",
-        headers=auth,
+        headers=admin_auth,
         json={
             "account_name": "真实公众号",
             "auth_type": "APP_SECRET",
@@ -259,10 +260,10 @@ def test_wechat_real_draft_uses_official_publisher(client, login_as, monkeypatch
         )
 
     monkeypatch.setattr(WechatDraftPublisher, "publish", official_draft)
-    article_id, variant_id = _variant_for(client, auth, "WECHAT_OFFICIAL")
+    article_id, variant_id = _variant_for(client, operator_auth, "WECHAT_OFFICIAL")
     scheduled = client.post(
         "/api/schedules",
-        headers=auth,
+        headers=operator_auth,
         json={
             "article_id": article_id,
             "variant_id": variant_id,
@@ -274,7 +275,7 @@ def test_wechat_real_draft_uses_official_publisher(client, login_as, monkeypatch
     )
     assert scheduled.status_code == 200, scheduled.text
     published = client.post(
-        f"/api/schedules/{scheduled.json()['data']['id']}/publish-now", headers=auth
+        f"/api/schedules/{scheduled.json()['data']['id']}/publish-now", headers=operator_auth
     )
     assert published.status_code == 200, published.text
     data = published.json()["data"]
@@ -285,10 +286,11 @@ def test_wechat_real_draft_uses_official_publisher(client, login_as, monkeypatch
 
 
 def test_wechat_browser_qrcode_and_direct_draft_flow(client, login_as, monkeypatch) -> None:
-    auth = _admin_auth(client, login_as)
+    admin_auth = _admin_auth(client, login_as)
+    operator_auth = _operator_auth(client, login_as)
     configured = client.put(
         "/api/platform-accounts/WECHAT_OFFICIAL",
-        headers=auth,
+        headers=admin_auth,
         json={
             "account_name": "本机扫码公众号",
             "auth_type": "QR_LOGIN",
@@ -319,7 +321,7 @@ def test_wechat_browser_qrcode_and_direct_draft_flow(client, login_as, monkeypat
     )
     qrcode = client.post(
         "/api/platform-accounts/WECHAT_OFFICIAL/login-qrcode?refresh=true",
-        headers=auth,
+        headers=admin_auth,
     )
     assert qrcode.status_code == 200, qrcode.text
     assert qrcode.json()["data"]["imageDataUrl"] == "data:image/png;base64,aW1hZ2U="
@@ -336,7 +338,7 @@ def test_wechat_browser_qrcode_and_direct_draft_flow(client, login_as, monkeypat
         account.token_expires_at = datetime.now() - timedelta(days=1)
         db.commit()
 
-    account_rows = client.get("/api/platform-accounts", headers=auth)
+    account_rows = client.get("/api/platform-accounts", headers=admin_auth)
     browser_account = next(
         row for row in account_rows.json()["data"] if row["platform"] == "WECHAT_OFFICIAL"
     )
@@ -358,8 +360,8 @@ def test_wechat_browser_qrcode_and_direct_draft_flow(client, login_as, monkeypat
         )
 
     monkeypatch.setattr(WechatBrowserDraftPublisher, "publish", browser_draft)
-    _, variant_id = _variant_for(client, auth, "WECHAT_OFFICIAL")
-    saved = client.post(f"/api/variants/{variant_id}/wechat-draft", headers=auth)
+    _, variant_id = _variant_for(client, operator_auth, "WECHAT_OFFICIAL")
+    saved = client.post(f"/api/variants/{variant_id}/wechat-draft", headers=operator_auth)
 
     assert saved.status_code == 200, saved.text
     data = saved.json()["data"]
@@ -374,10 +376,11 @@ def test_xiaohongshu_package_download_and_manual_confirmation(
     client, login_as, monkeypatch
 ) -> None:
     monkeypatch.setattr(settings, "experimental_browser_publishing_enabled", False)
-    auth = _admin_auth(client, login_as)
+    admin_auth = _admin_auth(client, login_as)
+    operator_auth = _operator_auth(client, login_as)
     experimental = client.put(
         "/api/platform-accounts/XIAOHONGSHU",
-        headers=auth,
+        headers=admin_auth,
         json={
             "account_name": "小红书本地 MCP 账号",
             "auth_type": "NONE",
@@ -389,7 +392,7 @@ def test_xiaohongshu_package_download_and_manual_confirmation(
 
     configured = client.put(
         "/api/platform-accounts/XIAOHONGSHU",
-        headers=auth,
+        headers=admin_auth,
         json={
             "account_name": "小红书人工账号",
             "auth_type": "NONE",
@@ -398,7 +401,7 @@ def test_xiaohongshu_package_download_and_manual_confirmation(
     )
     assert configured.status_code == 200
     assert configured.json()["data"]["status"] == "MANUAL_ONLY"
-    article_id, variant_id = _variant_for(client, auth, "XIAOHONGSHU")
+    article_id, variant_id = _variant_for(client, operator_auth, "XIAOHONGSHU")
     with SessionLocal() as db:
         variant = db.get(ContentVariant, variant_id)
         assert variant is not None
@@ -417,7 +420,7 @@ def test_xiaohongshu_package_download_and_manual_confirmation(
         db.commit()
     scheduled = client.post(
         "/api/schedules",
-        headers=auth,
+        headers=operator_auth,
         json={
             "article_id": article_id,
             "variant_id": variant_id,
@@ -428,7 +431,7 @@ def test_xiaohongshu_package_download_and_manual_confirmation(
     )
     assert scheduled.status_code == 200, scheduled.text
     schedule_id = scheduled.json()["data"]["id"]
-    published = client.post(f"/api/schedules/{schedule_id}/publish-now", headers=auth)
+    published = client.post(f"/api/schedules/{schedule_id}/publish-now", headers=operator_auth)
     assert published.status_code == 200, published.text
     assert published.json()["data"]["status"] == "WAITING_MANUAL_CONFIRM"
     assert published.json()["data"]["publishPackageJson"]["creatorUrl"].startswith("https://")
@@ -465,7 +468,8 @@ def test_xiaohongshu_mcp_qrcode_is_optional_and_returns_real_image(
 
 
 def test_xiaohongshu_mcp_optional_publish_flow(client, login_as, monkeypatch) -> None:
-    auth = _admin_auth(client, login_as)
+    admin_auth = _admin_auth(client, login_as)
+    operator_auth = _operator_auth(client, login_as)
     monkeypatch.setattr(settings, "experimental_browser_publishing_enabled", True)
 
     async def logged_in() -> tuple[bool, str]:
@@ -486,7 +490,7 @@ def test_xiaohongshu_mcp_optional_publish_flow(client, login_as, monkeypatch) ->
     monkeypatch.setattr(publish_service, "_publish_xiaohongshu", published)
     configured = client.put(
         "/api/platform-accounts/XIAOHONGSHU",
-        headers=auth,
+        headers=admin_auth,
         json={
             "account_name": "本机小红书 MCP",
             "auth_type": "NONE",
@@ -503,7 +507,7 @@ def test_xiaohongshu_mcp_optional_publish_flow(client, login_as, monkeypatch) ->
         account.last_error = "此前未登录的旧错误"
         db.commit()
 
-    tested = client.post("/api/platform-accounts/XIAOHONGSHU/test", headers=auth)
+    tested = client.post("/api/platform-accounts/XIAOHONGSHU/test", headers=admin_auth)
     assert tested.status_code == 200, tested.text
     assert tested.json()["data"]["status"] == "CONNECTED"
     assert tested.json()["data"]["result"]["mode"] == "MCP_PUBLISH"
@@ -513,7 +517,7 @@ def test_xiaohongshu_mcp_optional_publish_flow(client, login_as, monkeypatch) ->
     assert tested.json()["data"]["lastLoginAt"]
     assert tested.json()["data"]["sessionDurationSeconds"] >= 0
 
-    article_id, variant_id = _variant_for(client, auth, "XIAOHONGSHU")
+    article_id, variant_id = _variant_for(client, operator_auth, "XIAOHONGSHU")
     with SessionLocal() as db:
         variant = db.get(ContentVariant, variant_id)
         assert variant is not None
@@ -533,7 +537,7 @@ def test_xiaohongshu_mcp_optional_publish_flow(client, login_as, monkeypatch) ->
 
     scheduled = client.post(
         "/api/schedules",
-        headers=auth,
+        headers=operator_auth,
         json={
             "article_id": article_id,
             "variant_id": variant_id,
@@ -546,7 +550,7 @@ def test_xiaohongshu_mcp_optional_publish_flow(client, login_as, monkeypatch) ->
     assert scheduled.status_code == 200, scheduled.text
     published_response = client.post(
         f"/api/schedules/{scheduled.json()['data']['id']}/publish-now",
-        headers=auth,
+        headers=operator_auth,
     )
     assert published_response.status_code == 200, published_response.text
     data = published_response.json()["data"]
@@ -560,7 +564,7 @@ def test_xiaohongshu_mcp_optional_publish_flow(client, login_as, monkeypatch) ->
     monkeypatch.setattr(platform_accounts_endpoint, "mcp_logout", logged_out)
     logout_response = client.post(
         "/api/platform-accounts/XIAOHONGSHU/logout",
-        headers=auth,
+        headers=admin_auth,
     )
     assert logout_response.status_code == 200, logout_response.text
     logged_out_account = logout_response.json()["data"]
@@ -643,10 +647,11 @@ def test_wechat_diagnostic_requires_admin(client, login_as) -> None:
 
 
 def test_real_publish_is_forbidden_until_official_connection_passes(client, login_as) -> None:
-    auth = _admin_auth(client, login_as)
+    admin_auth = _admin_auth(client, login_as)
+    operator_auth = _operator_auth(client, login_as)
     configured = client.put(
         "/api/platform-accounts/WECHAT_OFFICIAL",
-        headers=auth,
+        headers=admin_auth,
         json={
             "account_name": "尚未验证公众号",
             "auth_type": "APP_SECRET",
@@ -656,10 +661,10 @@ def test_real_publish_is_forbidden_until_official_connection_passes(client, logi
         },
     )
     account_id = configured.json()["data"]["id"]
-    article_id, variant_id = _variant_for(client, auth, "WECHAT_OFFICIAL")
+    article_id, variant_id = _variant_for(client, operator_auth, "WECHAT_OFFICIAL")
     response = client.post(
         "/api/schedules",
-        headers=auth,
+        headers=operator_auth,
         json={
             "article_id": article_id,
             "variant_id": variant_id,

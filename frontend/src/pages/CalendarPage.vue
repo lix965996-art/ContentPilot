@@ -8,19 +8,30 @@ import listPlugin from '@fullcalendar/list'
 import interactionPlugin, { Draggable } from '@fullcalendar/interaction'
 import zhCnLocale from '@fullcalendar/core/locales/zh-cn'
 import { ElMessage } from 'element-plus'
-import { CircleCheck, GripVertical, Plus, TriangleAlert } from 'lucide-vue-next'
+import { CircleCheck, Clock3, GripVertical, Lightbulb, Plus, TriangleAlert } from 'lucide-vue-next'
 import PageHeader from '@/components/PageHeader.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import DetailDrawer from '@/components/DetailDrawer.vue'
 import { workflowApi } from '@/api/workflow'
 import { getApiErrorMessage } from '@/api/client'
+import {
+  accountStatusNames,
+  canUseXApi,
+  defaultPublishMode,
+  formatLocalDateTime,
+  publishModeLabel,
+  publishModeOptions,
+} from '@/composables/usePublishModes'
 import type {
   Article,
   Platform,
   PlatformAccount,
   PublishMode,
+  PublishTimeRecommendation,
   Schedule,
   ScheduleBacklogItem,
+  ScheduleConflict,
+  TimeSource,
   Variant,
 } from '@/types/business'
 import { platformColors, platformNames } from '@/types/business'
@@ -30,7 +41,7 @@ const schedules = ref<Schedule[]>([])
 const backlog = ref<ScheduleBacklogItem[]>([])
 const route = useRoute()
 const auth = useAuthStore()
-const canOperate = computed(() => auth.hasRole(['ADMIN', 'OPERATOR']))
+const canOperate = computed(() => auth.canManageBusiness)
 const platformFilter = ref<Platform | ''>('')
 const backlogQuery = ref('')
 const backlogElement = ref<HTMLElement>()
@@ -41,6 +52,12 @@ const dialog = ref(false)
 const articles = ref<Article[]>([])
 const variants = ref<Variant[]>([])
 const accounts = ref<PlatformAccount[]>([])
+const accountFilter = ref<number | ''>('')
+const recommendation = ref<PublishTimeRecommendation>()
+const recommending = ref(false)
+const conflicts = ref<ScheduleConflict[]>([])
+const timeSource = ref<TimeSource>('CUSTOM')
+const basis = ref<Awaited<ReturnType<typeof workflowApi.scheduleRecommendationBasis>>>()
 const form = ref<{
   article_id?: number
   variant_id?: number
@@ -55,116 +72,7 @@ const availableAccounts = computed(() =>
 const selectedAccount = computed(() =>
   availableAccounts.value.find((item) => item.id === form.value.account_id),
 )
-function canUseXiaohongshuMcp(account?: PlatformAccount): boolean {
-  return Boolean(
-    account?.localPublishingEnabled &&
-    account.availablePublishModes.includes('MCP_PUBLISH') &&
-    account.publishMode === 'MCP_PUBLISH' &&
-    account.status === 'CONNECTED',
-  )
-}
-function canUseXApi(account?: PlatformAccount): boolean {
-  return Boolean(
-    account?.status === 'CONNECTED' &&
-    account.availablePublishModes.includes('REAL_API') &&
-    account.publicPublishEnabled,
-  )
-}
-function defaultPublishMode(platform: Platform, account?: PlatformAccount): PublishMode {
-  if (platform === 'TOUTIAO') return 'BROWSER_PUBLISH'
-  if (platform === 'XIAOHONGSHU') {
-    return canUseXiaohongshuMcp(account) ? 'MCP_PUBLISH' : 'MANUAL_CONFIRM'
-  }
-  if (platform === 'X') return 'REAL_API'
-  if (platform === 'WECHAT_OFFICIAL') {
-    return account?.publishMode === 'BROWSER_DRAFT' ? 'BROWSER_DRAFT' : 'DRAFT_ONLY'
-  }
-  return 'REAL_API'
-}
-const publishModes = computed<Array<{ value: PublishMode; label: string; disabled?: boolean }>>(
-  () => {
-    const account = selectedAccount.value
-    if (form.value.platform === 'XIAOHONGSHU')
-      return [
-        { value: 'MANUAL_CONFIRM', label: '人工发布后确认（默认）' },
-        ...(account?.localPublishingEnabled
-          ? [
-              {
-                value: 'MCP_PUBLISH' as PublishMode,
-                label: '本机自动发布（仅自己可见）',
-                disabled: !canUseXiaohongshuMcp(account),
-              },
-            ]
-          : []),
-      ]
-    if (form.value.platform === 'WECHAT_OFFICIAL')
-      return [
-        ...(account?.availablePublishModes.includes('BROWSER_DRAFT')
-          ? [
-              {
-                value: 'BROWSER_DRAFT' as PublishMode,
-                label: '本机扫码保存到草稿箱',
-                disabled:
-                  account?.status !== 'CONNECTED' || account.publishMode !== 'BROWSER_DRAFT',
-              },
-            ]
-          : []),
-        { value: 'DRAFT_ONLY', label: '自动进入草稿箱', disabled: account?.status !== 'CONNECTED' },
-        {
-          value: 'REAL_API',
-          label: '提交发布',
-          disabled: account?.status !== 'CONNECTED' || account.publishMode !== 'SUBMIT_PUBLISH',
-        },
-      ]
-    if (form.value.platform === 'TOUTIAO')
-      return [
-        {
-          value: 'BROWSER_PUBLISH',
-          label: '本机浏览器发布（真实文章）',
-          disabled:
-            account?.status !== 'CONNECTED' ||
-            account.publishMode !== 'BROWSER_PUBLISH' ||
-            !account.publicPublishEnabled,
-        },
-      ]
-    if (form.value.platform === 'X')
-      return [
-        {
-          value: 'REAL_API',
-          label: 'X 官方 API（真实发布）',
-          disabled: !canUseXApi(account),
-        },
-      ]
-    return [{ value: 'REAL_API', label: '微博官方 API', disabled: account?.status !== 'CONNECTED' }]
-  },
-)
-const publishModeNames: Record<PublishMode, string> = {
-  REAL_API: '官方 API 发布',
-  DRAFT_ONLY: '同步到草稿箱',
-  SUBMIT_PUBLISH: '提交平台发布',
-  MANUAL_CONFIRM: '人工发布确认',
-  CDP_PUBLISH: '浏览器自动发布',
-  MCP_PUBLISH: '本机自动发布',
-  BROWSER_PUBLISH: '本机浏览器发布',
-  BROWSER_DRAFT: '本机浏览器保存草稿',
-  WECHATSYNC_CLI: 'Wechatsync CLI',
-}
-const accountStatusNames: Record<string, string> = {
-  NOT_CONFIGURED: '未配置',
-  CONNECTING: '待授权验证',
-  CONNECTED: '已连接',
-  TOKEN_EXPIRED: '授权已过期',
-  INVALID: '连接无效',
-  DISABLED: '已停用',
-  MANUAL_ONLY: '仅人工交付',
-  READY: '已就绪',
-  LOGIN_REQUIRED: '需要登录',
-}
-function publishModeLabel(platform: Platform, mode: PublishMode): string {
-  if (platform === 'WEIBO' && mode === 'REAL_API') return '微博官方 API'
-  if (platform === 'X' && mode === 'REAL_API') return 'X 官方 API（真实发布）'
-  return publishModeNames[mode] || mode
-}
+const publishModes = computed(() => publishModeOptions(form.value.platform, selectedAccount.value))
 const platformGlyphs: Record<Platform, string> = {
   WEIBO: '微',
   XIAOHONGSHU: '红',
@@ -182,18 +90,59 @@ const filteredBacklog = computed(() =>
           .includes(backlogQuery.value.toLowerCase())),
   ),
 )
+const filterAccounts = computed(() =>
+  accounts.value.filter(
+    (item) => item.id && (!platformFilter.value || item.platform === platformFilter.value),
+  ),
+)
+const visibleSchedules = computed(() =>
+  schedules.value.filter(
+    (x) =>
+      (!platformFilter.value || x.platform === platformFilter.value) &&
+      (!accountFilter.value || x.accountId === accountFilter.value),
+  ),
+)
+const densityAlerts = computed(() => {
+  const groups = new Map<string, Schedule[]>()
+  visibleSchedules.value.forEach((item) => {
+    if (!item.accountId || ['CANCELLED', 'FAILED'].includes(item.status)) return
+    const key = `${item.platform}-${item.accountId}`
+    groups.set(key, [...(groups.get(key) || []), item])
+  })
+  const alerts: Array<{ key: string; label: string; count: number; day: string }> = []
+  groups.forEach((rows, key) => {
+    const byDay = new Map<string, number>()
+    rows.forEach((row) => {
+      const day = row.scheduledAt.slice(0, 10)
+      byDay.set(day, (byDay.get(day) || 0) + 1)
+    })
+    byDay.forEach((count, day) => {
+      if (count < 3) return
+      const sample = rows[0]
+      alerts.push({
+        key: `${key}-${day}`,
+        label: `${platformNames[sample.platform]} · ${sample.accountName || '账号'}`,
+        count,
+        day,
+      })
+    })
+  })
+  return alerts.sort((a, b) => a.day.localeCompare(b.day))
+})
 const events = computed(() =>
-  schedules.value
-    .filter((x) => !platformFilter.value || x.platform === platformFilter.value)
-    .map((x) => ({
+  visibleSchedules.value.map((x) => {
+    // Prefer the platform-adapted variant title so same source article looks distinct.
+    const headline = (x.variantTitle || x.articleTitle || '').trim()
+    return {
       id: String(x.id),
-      title: `${platformGlyphs[x.platform]}  ${x.articleTitle}`,
+      title: `${platformGlyphs[x.platform]} ${platformNames[x.platform]} · ${headline}`,
       start: x.scheduledAt,
       backgroundColor: platformColors[x.platform],
       borderColor: platformColors[x.platform],
       classNames: [`platform-${x.platform.toLowerCase()}`],
       extendedProps: x,
-    })),
+    }
+  }),
 )
 const options = computed(() => ({
   plugins: [dayGridPlugin, timeGridPlugin, listPlugin, interactionPlugin],
@@ -205,6 +154,10 @@ const options = computed(() => ({
     right: 'dayGridMonth,timeGridWeek,timeGridDay,listWeek',
   },
   height: 'auto',
+  // Month cells get dense after seeding; keep three pills visible and collapse the rest.
+  dayMaxEvents: 3,
+  moreLinkText: (n: number) => `还有 ${n} 条`,
+  moreLinkClick: 'popover',
   editable: canOperate.value,
   droppable: canOperate.value,
   eventReceive: (info: any) => {
@@ -215,21 +168,55 @@ const options = computed(() => ({
   },
   eventDrop: async (info: any) => {
     try {
-      await workflowApi.updateSchedule(Number(info.event.id), {
-        scheduled_at: formatLocalDateTime(info.event.start),
+      const target = info.event.extendedProps as Schedule
+      const scheduledAt = formatLocalDateTime(info.event.start)
+      const check = await workflowApi.scheduleConflictCheck({
+        platform: target.platform,
+        scheduled_at: scheduledAt,
+        account_id: target.accountId || undefined,
+        exclude_schedule_id: Number(info.event.id),
       })
+      if (check.hasConflict) {
+        info.revert()
+        ElMessage.warning(check.conflicts[0]?.message || '该时段与已有排期冲突')
+        return
+      }
+      await workflowApi.updateSchedule(Number(info.event.id), { scheduled_at: scheduledAt })
       await load()
-      ElMessage.success('排期时间已更新')
+      if (check.hasDensityWarning)
+        ElMessage.warning(check.conflicts[0]?.message || '同账号发布过密')
+      else ElMessage.success('排期时间已更新')
     } catch (e) {
       info.revert()
       ElMessage.error(getApiErrorMessage(e))
     }
   },
-  eventClick: async (info: any) => {
-    editing.value = await workflowApi.schedule(Number(info.event.id))
-    drawer.value = true
+  eventClick: (info: any) => {
+    void openSchedule(Number(info.event.id))
   },
 }))
+async function openSchedule(id: number) {
+  editing.value = await workflowApi.schedule(id)
+  drawer.value = true
+  basis.value = undefined
+  try {
+    basis.value = await workflowApi.scheduleRecommendationBasis(id)
+  } catch {
+    basis.value = undefined
+  }
+}
+const basisReasons = computed(() => {
+  const snapshot = (basis.value?.snapshot || {}) as { reasons?: Array<{ description?: string }> }
+  return (snapshot.reasons || []).map((item) => item.description).filter(Boolean) as string[]
+})
+const basisEvidence = computed(
+  () =>
+    (basis.value?.slotEvidence || {}) as {
+      score?: number
+      sampleCount?: number
+      components?: Record<string, number>
+    },
+)
 async function load() {
   const [scheduleRows, backlogRows] = await Promise.all([
     workflowApi.schedules(),
@@ -251,10 +238,6 @@ function setupBacklogDrag() {
     }),
   })
 }
-function formatLocalDateTime(value: Date): string {
-  const offset = value.getTimezoneOffset() * 60_000
-  return new Date(value.getTime() - offset).toISOString().slice(0, 19)
-}
 async function init() {
   const [data, accountRows] = await Promise.all([
     workflowApi.articles({ page_size: 100 }),
@@ -263,6 +246,8 @@ async function init() {
   articles.value = data.items
   accounts.value = accountRows
   await load()
+  const focusId = Number(route.query.schedule)
+  if (focusId) await openSchedule(focusId)
   if (route.query.create === '1') {
     openCreate()
     const articleId = Number(route.query.article)
@@ -298,8 +283,70 @@ function choosePlatform() {
   const account = accounts.value.find((item) => item.platform === form.value.platform && item.id)
   form.value.account_id = account?.id || undefined
   form.value.publish_mode = defaultPublishMode(form.value.platform, account)
+  void fetchRecommendation()
+}
+async function fetchRecommendation(autofill = true) {
+  recommendation.value = undefined
+  if (!form.value.article_id) return
+  recommending.value = true
+  try {
+    recommendation.value = await workflowApi.recommend({
+      article_id: form.value.article_id,
+      variant_id: form.value.variant_id,
+      platform: form.value.platform,
+      account_id: form.value.account_id,
+    })
+    if (autofill && recommendation.value.recommendedAt) applyRecommendedTime()
+  } catch (e) {
+    ElMessage.warning(getApiErrorMessage(e))
+  } finally {
+    recommending.value = false
+    await checkConflict()
+  }
+}
+function applyRecommendedTime() {
+  if (!recommendation.value?.recommendedAt) return
+  form.value.scheduled_at = recommendation.value.recommendedAt.slice(0, 16)
+  timeSource.value = 'RECOMMENDED'
+  void checkConflict()
+}
+function applyAlternative(value: string) {
+  form.value.scheduled_at = value.slice(0, 16)
+  timeSource.value = 'ALTERNATIVE'
+  void checkConflict()
+}
+function markCustomTime() {
+  const picked = form.value.scheduled_at
+  const best = recommendation.value?.recommendedAt?.slice(0, 16)
+  const alternatives = (recommendation.value?.alternatives || []).map((item) =>
+    item.recommendedAt.slice(0, 16),
+  )
+  if (picked === best) timeSource.value = 'RECOMMENDED'
+  else if (alternatives.includes(picked)) timeSource.value = 'ALTERNATIVE'
+  else timeSource.value = 'CUSTOM'
+  void checkConflict()
+}
+async function checkConflict() {
+  conflicts.value = []
+  if (!form.value.scheduled_at) return
+  try {
+    const result = await workflowApi.scheduleConflictCheck({
+      platform: form.value.platform,
+      scheduled_at: `${form.value.scheduled_at}:00`,
+      account_id: form.value.account_id,
+    })
+    conflicts.value = result.conflicts
+  } catch {
+    conflicts.value = []
+  }
+}
+function resetAdvisor() {
+  recommendation.value = undefined
+  conflicts.value = []
+  timeSource.value = 'CUSTOM'
 }
 function openCreate() {
+  resetAdvisor()
   form.value = {
     platform: 'WEIBO',
     scheduled_at: formatLocalDateTime(new Date(Date.now() + 3600000)).slice(0, 16),
@@ -308,6 +355,7 @@ function openCreate() {
   dialog.value = true
 }
 async function openBacklog(item: ScheduleBacklogItem, date?: Date) {
+  resetAdvisor()
   form.value = {
     article_id: item.articleId,
     variant_id: item.variantId,
@@ -320,8 +368,12 @@ async function openBacklog(item: ScheduleBacklogItem, date?: Date) {
     publish_mode: defaultPublishMode(item.platform),
   }
   variants.value = await workflowApi.variants(item.articleId)
-  choosePlatform()
+  const account = accounts.value.find((row) => row.platform === form.value.platform && row.id)
+  form.value.account_id = account?.id || undefined
+  form.value.publish_mode = defaultPublishMode(form.value.platform, account)
   dialog.value = true
+  // 拖到具体格子时保留用户选定的时间，仅展示推荐；点击“排期”按钮时自动填充推荐时间
+  await fetchRecommendation(!date)
 }
 async function create() {
   try {
@@ -339,6 +391,9 @@ async function create() {
     await workflowApi.createSchedule({
       ...form.value,
       scheduled_at: `${form.value.scheduled_at}:00`,
+      recommendation_id: recommendation.value?.id,
+      time_source: timeSource.value,
+      content_type: recommendation.value?.contentType,
     })
     dialog.value = false
     await load()
@@ -370,6 +425,24 @@ onBeforeUnmount(() => backlogDraggable?.destroy())
           >
             <i :style="{ background: platformColors[key] }" />{{ name }}
           </button>
+          <el-select
+            v-model="accountFilter"
+            size="small"
+            clearable
+            class="mt-3 w-full"
+            placeholder="全部账号"
+            ><el-option
+              v-for="account in filterAccounts"
+              :key="account.id!"
+              :label="`${platformNames[account.platform]} · ${account.accountName}`"
+              :value="account.id!"
+          /></el-select>
+        </div>
+        <div v-if="densityAlerts.length" class="density-alerts">
+          <b><TriangleAlert :size="13" />发布过密提示</b>
+          <p v-for="item in densityAlerts" :key="item.key">
+            {{ item.day }} · {{ item.label }} 当天已排 {{ item.count }} 条
+          </p>
         </div>
         <div class="backlog-head">
           <div>
@@ -432,6 +505,34 @@ onBeforeUnmount(() => backlogDraggable?.destroy())
             <p class="field-label">发布方式</p>
             <p class="mt-2">{{ publishModeLabel(editing.platform, editing.publishMode) }}</p>
           </div>
+          <div v-if="basis">
+            <p class="field-label">推荐依据</p>
+            <div class="reason-card mt-2 space-y-2">
+              <p>
+                时间来源：{{
+                  basis.timeSource === 'RECOMMENDED'
+                    ? '采用推荐时间'
+                    : basis.timeSource === 'ALTERNATIVE'
+                      ? '采用备选时间'
+                      : '自定义时间'
+                }}
+                <span v-if="basis.contentTypeName"> · 内容类型：{{ basis.contentTypeName }}</span>
+              </p>
+              <p v-if="basis.recommendedAt">
+                推荐时间：{{ new Date(basis.recommendedAt).toLocaleString('zh-CN') }}
+                <span v-if="basis.deviationMinutes !== null">
+                  （偏差 {{ basis.deviationMinutes }} 分钟）</span
+                >
+              </p>
+              <p v-if="basisEvidence.score !== undefined">
+                该时段得分 {{ basisEvidence.score }} · 样本 {{ basisEvidence.sampleCount ?? 0 }} 条
+              </p>
+              <p v-for="(text, index) in basisReasons" :key="index">· {{ text }}</p>
+              <p v-if="!basisReasons.length && !basis.recommendedAt">
+                该排期由人工直接选定时间，未记录推荐快照。
+              </p>
+            </div>
+          </div>
           <div v-if="editing.logs?.length">
             <p class="field-label">执行日志</p>
             <div v-for="(log, index) in editing.logs" :key="index" class="reason-card mt-2">
@@ -461,11 +562,64 @@ onBeforeUnmount(() => backlogDraggable?.destroy())
             v-model="form.scheduled_at"
             type="datetime"
             value-format="YYYY-MM-DDTHH:mm"
-            class="!w-full" /></el-form-item
+            class="!w-full"
+            @change="markCustomTime" /></el-form-item
+        ><el-form-item label="推荐时间">
+          <div class="advisor-box">
+            <p v-if="recommending" class="advisor-loading">
+              <Clock3 :size="13" />正在按活跃度数据计算推荐时间…
+            </p>
+            <template v-else-if="recommendation">
+              <p class="advisor-head">
+                <Lightbulb :size="13" />
+                <b>{{ new Date(recommendation.recommendedAt).toLocaleString('zh-CN') }}</b>
+                <span
+                  >得分 {{ recommendation.score }} · 置信度 {{ recommendation.confidence }} ·
+                  {{ recommendation.contentTypeName }}</span
+                >
+                <button type="button" @click="applyRecommendedTime">使用推荐时间</button>
+              </p>
+              <p class="advisor-alts">
+                <span>备选</span>
+                <button
+                  v-for="item in recommendation.alternatives"
+                  :key="item.recommendedAt"
+                  type="button"
+                  @click="applyAlternative(item.recommendedAt)"
+                >
+                  {{ new Date(item.recommendedAt).toLocaleString('zh-CN', { hour12: false }) }} ·
+                  {{ item.score }}
+                </button>
+              </p>
+              <p v-for="(reason, index) in recommendation.reasons.slice(0, 3)" :key="index">
+                · {{ reason.description }}
+              </p>
+              <p class="advisor-source">
+                数据来源：{{ recommendation.dataSource.baseline }} ·
+                {{ recommendation.dataSource.accountHistory }} ·
+                {{ recommendation.dataSufficiency.message }}
+              </p>
+              <p
+                v-for="(warn, index) in recommendation.warnings"
+                :key="`w${index}`"
+                class="advisor-warn"
+              >
+                <TriangleAlert :size="12" />{{ warn }}
+              </p>
+            </template>
+            <p v-else class="advisor-empty">选择文章与平台后自动给出数据驱动的推荐时间。</p>
+            <p v-for="item in conflicts" :key="item.scheduleId" class="advisor-warn">
+              <TriangleAlert :size="12" />{{ item.message }}
+            </p>
+          </div> </el-form-item
         ><el-form-item
           label="平台账号"
           :required="form.platform !== 'XIAOHONGSHU' || form.publish_mode === 'MCP_PUBLISH'"
-          ><el-select v-model="form.account_id" class="w-full" placeholder="请选择平台账号"
+          ><el-select
+            v-model="form.account_id"
+            class="w-full"
+            placeholder="请选择平台账号"
+            @change="fetchRecommendation(false)"
             ><el-option
               v-for="account in availableAccounts"
               :key="account.id || account.platform"

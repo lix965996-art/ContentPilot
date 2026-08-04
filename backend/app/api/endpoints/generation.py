@@ -323,7 +323,7 @@ async def generate(
     request: Request,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     article = db.get(ContentArticle, payload.article_id)
     if not article:
@@ -386,7 +386,7 @@ def select_deep_candidate(
     payload: DeepCandidateSelectRequest,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     task = db.get(GenerationTask, task_id)
     if not task:
@@ -472,7 +472,7 @@ async def regenerate_deep_platform(
     request: Request,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     previous = db.get(GenerationTask, task_id)
     if not previous:
@@ -520,7 +520,7 @@ async def retry_task_platform(
     request: Request,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     previous = db.get(GenerationTask, task_id)
     if not previous:
@@ -554,7 +554,7 @@ async def regenerate(
     request: Request,
     background_tasks: BackgroundTasks,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     old = db.get(ContentVariant, variant_id)
     if not old:

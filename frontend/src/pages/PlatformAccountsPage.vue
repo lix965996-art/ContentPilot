@@ -21,7 +21,7 @@ import { presentOperationError } from '@/utils/operation-error'
 
 const accounts = ref<PlatformAccount[]>([])
 const auth = useAuthStore()
-const isAdmin = computed(() => auth.hasRole(['ADMIN']))
+const isAdmin = computed(() => auth.canManageSystem)
 const route = useRoute()
 const router = useRouter()
 const loading = ref(false)
@@ -609,21 +609,10 @@ onBeforeUnmount(() => {
   <div>
     <PageHeader
       title="平台账号"
-      :description="
-        isAdmin
-          ? '统一管理团队共享的平台授权与发布能力；所有敏感凭证仅加密保存在服务端。'
-          : '查看团队共享平台账号的连接和发布能力；授权与敏感配置由管理员维护。'
-      "
+      description="配置各平台授权、发布方式与安全开关；仅系统管理员可访问。"
     >
       <el-button :loading="loading" @click="load"><RefreshCw :size="15" />刷新</el-button>
     </PageHeader>
-    <el-alert
-      v-if="!isAdmin"
-      class="mb-4"
-      title="当前为运营者只读视图：你可以检测连接并使用已授权账号发布，但不能查看密钥、扫码授权或解除连接。"
-      type="info"
-      :closable="false"
-    />
 
     <div v-loading="loading" class="account-grid">
       <article

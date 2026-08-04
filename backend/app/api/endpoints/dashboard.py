@@ -20,8 +20,8 @@ def dashboard_summary(
 ) -> dict:
     role_codes = [role.code for role in user.roles]
     role_capabilities = {
-        "ADMIN": ["用户与权限管理", "系统配置", "查看全局统计"],
-        "OPERATOR": ["内容运营", "内容审核", "排期与发布", "数据复盘与实验"],
+        "ADMIN": ["平台账号与授权", "用户与权限", "系统与大模型配置"],
+        "OPERATOR": ["内容运营", "内容审核", "排期与发布", "数据复盘与对比验证"],
         "VIEWER": ["查看内容", "查看排期与报告"],
     }
     capabilities = sorted({item for code in role_codes for item in role_capabilities.get(code, [])})

@@ -148,6 +148,37 @@ class RecommendationRequest(BaseModel):
     variant_id: int | None = None
     platform: Platform
     target_date: date | None = None
+    account_id: int | None = None
+    # Optional override; when omitted the content type is detected from the variant.
+    content_type: str | None = Field(default=None, max_length=50)
+    horizon_days: int = Field(default=3, ge=1, le=14)
+    with_narrative: bool = True
+    # Historical-data lookback window backing the recommendation. Defaults to
+    # the last 90 days; CUSTOM requires both window_start_date and window_end_date.
+    window: Literal["30D", "90D", "ALL", "CUSTOM"] = "90D"
+    window_start_date: date | None = None
+    window_end_date: date | None = None
+
+    @field_validator("window_end_date")
+    @classmethod
+    def validate_window_dates(cls, value: date | None, info):
+        start = info.data.get("window_start_date")
+        if value and start and value < start:
+            raise ValueError("时间范围的结束日期不能早于开始日期")
+        return value
+
+
+class HistoryImportCommitRequest(BaseModel):
+    """Second step of the import wizard: the confirmed field mapping."""
+
+    filename: str = Field(default="", max_length=255)
+    mapping: dict[str, str] = Field(default_factory=dict)
+    default_platform: str = Field(default="", max_length=30)
+    default_source_type: Literal[
+        "ACCOUNT_HISTORY", "PUBLIC_BASELINE", "YOUTUBE_PUBLIC_SAMPLE", "RESEARCH_DATASET"
+    ] = "ACCOUNT_HISTORY"
+    default_content_type: str = Field(default="", max_length=50)
+    source_note: str = Field(default="", max_length=255)
 
 
 PublishModeLiteral = Literal[
@@ -161,6 +192,9 @@ PublishModeLiteral = Literal[
 ]
 
 
+TimeSourceLiteral = Literal["RECOMMENDED", "ALTERNATIVE", "CUSTOM"]
+
+
 class ScheduleCreate(BaseModel):
     article_id: int
     variant_id: int
@@ -168,12 +202,17 @@ class ScheduleCreate(BaseModel):
     platform: Platform
     scheduled_at: datetime
     publish_mode: PublishModeLiteral = "MANUAL_CONFIRM"
+    # Traceability for the recommendation that produced this schedule.
+    recommendation_id: int | None = None
+    time_source: TimeSourceLiteral = "CUSTOM"
+    content_type: str | None = Field(default=None, max_length=50)
 
 
 class ScheduleUpdate(BaseModel):
     scheduled_at: datetime | None = None
     account_id: int | None = None
     publish_mode: PublishModeLiteral | None = None
+    time_source: TimeSourceLiteral | None = None
 
 
 class MetricCreate(BaseModel):
@@ -223,6 +262,14 @@ class ExperimentUpdate(BaseModel):
     treatment_description: str | None = None
     metrics: dict | None = None
     conclusion: str | None = None
+
+
+class ExperimentSampleGroupUpdate(BaseModel):
+    """Manual override of an auto-assigned experiment group; a reason is mandatory
+    so every adjustment away from the data-driven default leaves an audit trail."""
+
+    group_type: Literal["CONTROL", "TREATMENT"]
+    reason: str = Field(min_length=1, max_length=500)
 
 
 class SettingUpdate(BaseModel):

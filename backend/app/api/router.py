@@ -1,6 +1,7 @@
 from fastapi import APIRouter
 
 from app.api.endpoints import (
+    activity_data,
     admin,
     analytics,
     articles,
@@ -28,6 +29,7 @@ api_router.include_router(trends.router)
 api_router.include_router(media.router)
 api_router.include_router(research.router)
 api_router.include_router(platform_accounts.router)
+api_router.include_router(activity_data.router)
 api_router.include_router(recommendations.router)
 api_router.include_router(schedules.router)
 api_router.include_router(analytics.router)

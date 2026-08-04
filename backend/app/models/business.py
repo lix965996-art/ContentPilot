@@ -205,6 +205,72 @@ class AccountActivityStat(Base):
     )
 
 
+class HistoryImportBatch(Base):
+    """One CSV/XLSX upload of historical engagement rows, kept for traceability."""
+
+    __tablename__ = "history_import_batch"
+    id: Mapped[int] = mapped_column(primary_key=True)
+    filename: Mapped[str] = mapped_column(String(255), default="")
+    source_type: Mapped[str] = mapped_column(String(40), default="ACCOUNT_HISTORY", index=True)
+    source_note: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    platform_hint: Mapped[str | None] = mapped_column(String(30), nullable=True)
+    total_rows: Mapped[int] = mapped_column(Integer, default=0)
+    success_count: Mapped[int] = mapped_column(Integer, default=0)
+    duplicate_count: Mapped[int] = mapped_column(Integer, default=0)
+    error_count: Mapped[int] = mapped_column(Integer, default=0)
+    missing_value_count: Mapped[int] = mapped_column(Integer, default=0)
+    field_mapping_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    errors_json: Mapped[list] = mapped_column(JSON, default=list)
+    status: Mapped[str] = mapped_column(String(30), default="COMPLETED")
+    created_by: Mapped[int | None] = mapped_column(
+        ForeignKey("sys_user.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
+
+
+class EngagementHistory(Base):
+    """Post-level historical engagement used as the evidence base for time scoring.
+
+    ``source_type`` separates public baseline samples (for example the YouTube
+    public duration dataset) from a user's own account history so the two are
+    never presented as the same kind of evidence.
+    """
+
+    __tablename__ = "engagement_history"
+    __table_args__ = (UniqueConstraint("row_hash", name="uq_engagement_history_row"),)
+    id: Mapped[int] = mapped_column(primary_key=True)
+    batch_id: Mapped[int | None] = mapped_column(
+        ForeignKey("history_import_batch.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    platform: Mapped[str] = mapped_column(String(30), index=True)
+    account_ref: Mapped[str] = mapped_column(String(120), default="", index=True)
+    account_id: Mapped[int | None] = mapped_column(
+        ForeignKey("platform_account.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    content_type: Mapped[str] = mapped_column(String(50), default="UNKNOWN", index=True)
+    publish_time: Mapped[datetime] = mapped_column(DateTime, index=True)
+    day_of_week: Mapped[int] = mapped_column(Integer, index=True)
+    hour_of_day: Mapped[int] = mapped_column(Integer, index=True)
+    views: Mapped[int] = mapped_column(Integer, default=0)
+    impressions: Mapped[int] = mapped_column(Integer, default=0)
+    likes: Mapped[int] = mapped_column(Integer, default=0)
+    comments: Mapped[int] = mapped_column(Integer, default=0)
+    shares: Mapped[int] = mapped_column(Integer, default=0)
+    favorites: Mapped[int] = mapped_column(Integer, default=0)
+    followers: Mapped[int] = mapped_column(Integer, default=0)
+    engagement_total: Mapped[int] = mapped_column(Integer, default=0)
+    engagement_rate: Mapped[float] = mapped_column(Float, default=0)
+    engagement_score: Mapped[float] = mapped_column(Float, default=0, index=True)
+    metric_detail_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    source_type: Mapped[str] = mapped_column(String(40), default="ACCOUNT_HISTORY", index=True)
+    source_note: Mapped[str | None] = mapped_column(String(255), nullable=True)
+    row_hash: Mapped[str] = mapped_column(String(64))
+    created_by: Mapped[int | None] = mapped_column(
+        ForeignKey("sys_user.id", ondelete="SET NULL"), nullable=True
+    )
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class PublishRecommendation(Base):
     __tablename__ = "publish_recommendation"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -219,6 +285,23 @@ class PublishRecommendation(Base):
     reason_json: Mapped[list] = mapped_column(JSON, default=list)
     alternative_times_json: Mapped[list] = mapped_column(JSON, default=list)
     algorithm_version: Mapped[str] = mapped_column(String(30), default="weighted-v1")
+    account_id: Mapped[int | None] = mapped_column(
+        ForeignKey("platform_account.id", ondelete="SET NULL"), nullable=True
+    )
+    content_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    target_date: Mapped[date | None] = mapped_column(Date, nullable=True)
+    sample_count: Mapped[int] = mapped_column(Integer, default=0)
+    account_sample_count: Mapped[int] = mapped_column(Integer, default=0)
+    baseline_sample_count: Mapped[int] = mapped_column(Integer, default=0)
+    weights_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    data_source_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    warnings_json: Mapped[list] = mapped_column(JSON, default=list)
+    conflicts_json: Mapped[list] = mapped_column(JSON, default=list)
+    narrative: Mapped[str | None] = mapped_column(Text, nullable=True)
+    narrative_provider: Mapped[str] = mapped_column(String(30), default="RULE_BASED")
+    # The time window (30D / 90D / ALL / CUSTOM) actually used to select the
+    # historical samples behind this recommendation, plus its resolved dates.
+    window_json: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
@@ -246,6 +329,14 @@ class PublishSchedule(TimestampMixin, Base):
     error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     idempotency_key: Mapped[str] = mapped_column(String(100), unique=True)
     created_by: Mapped[int] = mapped_column(ForeignKey("sys_user.id"))
+    recommendation_id: Mapped[int | None] = mapped_column(
+        ForeignKey("publish_recommendation.id", ondelete="SET NULL"), nullable=True, index=True
+    )
+    recommended_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # RECOMMENDED / ALTERNATIVE / CUSTOM: how the operator picked ``scheduled_at``.
+    time_source: Mapped[str] = mapped_column(String(30), default="CUSTOM", index=True)
+    content_type: Mapped[str | None] = mapped_column(String(50), nullable=True)
+    recommendation_snapshot_json: Mapped[dict] = mapped_column(JSON, default=dict)
     logs: Mapped[list[PublishLog]] = relationship(
         back_populates="schedule", cascade="all, delete-orphan"
     )
@@ -323,6 +414,10 @@ class ExperimentSample(Base):
     group_type: Mapped[str] = mapped_column(String(30))
     sample_label: Mapped[str] = mapped_column(String(255))
     metric_value_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    # AUTO: derived from the linked schedule's time_source by the grouping rule
+    # below. MANUAL: an operator explicitly overrode the automatic group.
+    assignment_source: Mapped[str] = mapped_column(String(20), default="AUTO")
+    assignment_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
     experiment: Mapped[Experiment] = relationship(back_populates="samples")
 

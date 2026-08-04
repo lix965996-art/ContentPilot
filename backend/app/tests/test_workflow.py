@@ -61,7 +61,10 @@ def test_complete_content_to_publish_flow(client: TestClient, login_as, monkeypa
         },
     )
     assert recommendation.status_code == 200
-    assert recommendation.json()["data"]["algorithmVersion"] == "weighted-v1"
+    recommendation_data = recommendation.json()["data"]
+    assert recommendation_data["algorithmVersion"] == "hybrid-v2"
+    assert recommendation_data["dataSource"]["baseline"]
+    assert len(recommendation_data["alternatives"]) == 2
 
     scheduled_at = (datetime.now() + timedelta(days=3)).isoformat(timespec="seconds")
     accounts = client.get("/api/platform-accounts", headers=auth).json()["data"]

@@ -21,9 +21,9 @@ from app.models.business import (
 from app.models.user import Role, User
 
 ROLE_DEFINITIONS = {
-    "ADMIN": ("管理员", "用户、配置、日志和全局统计管理"),
-    "OPERATOR": ("内容运营者", "内容生产、审核、排期和数据复盘"),
-    "VIEWER": ("查看者", "只读访问内容、排期和报告"),
+    "ADMIN": ("系统管理员", "只管理系统：平台账号、用户、大模型与全局配置；不参与内容运营"),
+    "OPERATOR": ("内容运营者", "内容生产、排期发布、数据导入与对比验证"),
+    "VIEWER": ("查看者", "只读浏览内容、排期、数据与分析结果"),
 }
 
 DEMO_USERS = (

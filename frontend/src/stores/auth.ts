@@ -4,6 +4,14 @@ import { defineStore } from 'pinia'
 import * as authApi from '@/api/auth'
 import { clearTokens, persistTokens, readAccessToken } from '@/api/client'
 import type { LoginPayload, RegisterPayload, RoleCode, User } from '@/types/user'
+import {
+  ROLE_SCOPES,
+  canManageBusiness as checkCanManageBusiness,
+  canManageSystem as checkCanManageSystem,
+  isViewerOnly as checkIsViewerOnly,
+  isSystemAdminOnly as checkIsSystemAdminOnly,
+  pickPrimaryRole,
+} from '@/config/roles'
 
 export const useAuthStore = defineStore('auth', () => {
   const user = ref<User | null>(null)
@@ -12,7 +20,17 @@ export const useAuthStore = defineStore('auth', () => {
 
   const isAuthenticated = computed(() => Boolean(user.value && readAccessToken()))
   const roleCodes = computed(() => user.value?.roles.map((role) => role.code) ?? [])
-  const primaryRoleName = computed(() => user.value?.roles[0]?.name ?? '未分配角色')
+  const primaryRoleCode = computed(() => pickPrimaryRole(roleCodes.value))
+  const primaryRoleName = computed(
+    () =>
+      (primaryRoleCode.value && ROLE_SCOPES[primaryRoleCode.value]?.label) ||
+      user.value?.roles[0]?.name ||
+      '未分配角色',
+  )
+  const canManageSystem = computed(() => checkCanManageSystem(roleCodes.value))
+  const canManageBusiness = computed(() => checkCanManageBusiness(roleCodes.value))
+  const isViewerOnly = computed(() => checkIsViewerOnly(roleCodes.value))
+  const isSystemAdminOnly = computed(() => checkIsSystemAdminOnly(roleCodes.value))
 
   function hasRole(roles: RoleCode[]): boolean {
     return roles.some((role) => roleCodes.value.includes(role))
@@ -80,7 +98,12 @@ export const useAuthStore = defineStore('auth', () => {
     loading,
     isAuthenticated,
     roleCodes,
+    primaryRoleCode,
     primaryRoleName,
+    canManageSystem,
+    canManageBusiness,
+    isViewerOnly,
+    isSystemAdminOnly,
     hasRole,
     signIn,
     signUp,

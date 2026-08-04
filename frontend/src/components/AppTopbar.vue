@@ -12,7 +12,7 @@ const route = useRoute()
 const router = useRouter()
 const auth = useAuthStore()
 const pageTitle = computed(() => String(route.meta.title || '工作台'))
-const canOperate = computed(() => auth.hasRole(['ADMIN', 'OPERATOR']))
+const canOperate = computed(() => auth.canManageBusiness)
 const searchOpen = ref(false)
 const searchQuery = ref('')
 const searchLoading = ref(false)
@@ -138,7 +138,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleShortcut))
           <ChevronDown :size="14" /></button
         ><template #dropdown
           ><el-dropdown-menu
-            ><el-dropdown-item v-if="auth.hasRole(['ADMIN'])" command="settings"
+            ><el-dropdown-item v-if="auth.canManageSystem" command="settings"
               >系统设置</el-dropdown-item
             ><el-dropdown-item divided command="logout"
               ><LogOut :size="14" class="mr-2" />退出登录</el-dropdown-item

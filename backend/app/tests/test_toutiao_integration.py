@@ -60,13 +60,16 @@ async def test_toutiao_publisher_rejects_invalid_title_without_opening_browser()
 
 
 def test_toutiao_account_qr_login_and_safe_metadata(client, login_as, monkeypatch) -> None:
-    auth = _admin_headers(login_as)
-    listed = client.get("/api/platform-accounts", headers=auth)
+    admin_auth = _admin_headers(login_as)
+    operator_auth = {
+        "Authorization": f"Bearer {login_as('operator', 'Operator@123456')['access_token']}"
+    }
+    listed = client.get("/api/platform-accounts", headers=admin_auth)
     assert any(item["platform"] == "TOUTIAO" for item in listed.json()["data"])
 
     saved = client.put(
         "/api/platform-accounts/TOUTIAO",
-        headers=auth,
+        headers=admin_auth,
         json={
             "account_name": "我的头条号",
             "auth_type": "QR_LOGIN",
@@ -88,7 +91,7 @@ def test_toutiao_account_qr_login_and_safe_metadata(client, login_as, monkeypatc
         }
 
     monkeypatch.setattr(platform_accounts_endpoint, "get_login_qrcode", fake_qrcode)
-    qrcode = client.post("/api/platform-accounts/TOUTIAO/login-qrcode?refresh=true", headers=auth)
+    qrcode = client.post("/api/platform-accounts/TOUTIAO/login-qrcode?refresh=true", headers=admin_auth)
     assert qrcode.status_code == 200, qrcode.text
     assert qrcode.json()["data"]["imageDataUrl"].startswith("data:image/png;base64,")
     assert qrcode.json()["data"]["expiresInSeconds"] == 120
@@ -98,7 +101,7 @@ def test_toutiao_account_qr_login_and_safe_metadata(client, login_as, monkeypatc
         return True, "毕业设计头条号"
 
     monkeypatch.setattr(platform_account_service, "toutiao_check_login", fake_check_login)
-    tested = client.post("/api/platform-accounts/TOUTIAO/test", headers=auth)
+    tested = client.post("/api/platform-accounts/TOUTIAO/test", headers=admin_auth)
     assert tested.status_code == 200, tested.text
     data = tested.json()["data"]
     assert data["status"] == "CONNECTED"
@@ -151,7 +154,7 @@ def test_toutiao_account_qr_login_and_safe_metadata(client, login_as, monkeypatc
         )
 
     monkeypatch.setattr(ToutiaoBrowserPublisher, "publish", fake_save_draft)
-    draft = client.post(f"/api/variants/{variant_id}/toutiao-draft", headers=auth)
+    draft = client.post(f"/api/variants/{variant_id}/toutiao-draft", headers=operator_auth)
     assert draft.status_code == 200, draft.text
     draft_data = draft.json()["data"]
     assert draft_data["status"] == "DRAFT_CREATED"

@@ -3,7 +3,7 @@ import ipaddress
 import json
 import uuid
 import zipfile
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlparse
 from zoneinfo import ZoneInfo
@@ -25,12 +25,14 @@ from app.models.business import (
     MediaAsset,
     PlatformAccount,
     PublishLog,
+    PublishRecommendation,
     PublishSchedule,
 )
 from app.models.user import User
 from app.scheduler.runtime import add_schedule_job, remove_schedule_job
 from app.schemas.business import ScheduleCreate, ScheduleUpdate
 from app.schemas.platform_account import ManualConfirmRequest
+from app.services.activity_service import classify_content_type, content_type_name
 from app.services.audit_service import record_audit
 from app.services.platform_account_service import effective_status
 from app.services.publish_service import (
@@ -43,6 +45,10 @@ from app.services.publish_service import (
 from app.services.serializers import model_dict
 
 router = APIRouter(tags=["排期与发布"])
+
+CONFLICT_WINDOW_MINUTES = 30
+DENSITY_WINDOW_MINUTES = 120
+ACTIVE_SCHEDULE_STATUSES = ("PENDING", "RUNNING", "WAITING_MANUAL_CONFIRM")
 
 
 def _local_naive(value: datetime) -> datetime:
@@ -62,13 +68,20 @@ def _public_client_ip(request: Request) -> str:
 
 
 def _ensure_schedule_owner(row: PublishSchedule, user: User) -> None:
-    # ADMIN acts as a platform operator and may manage any user's schedule to
-    # support cross-tenant operations like compensating failures or re-timing
-    # releases. Other roles must own the schedule they want to mutate.
     if row.created_by != user.id:
-        user_role_codes = {role.code for role in user.roles}
-        if "ADMIN" not in user_role_codes:
-            raise AppException(40303, "无权操作其他用户的平台排期", 403)
+        raise AppException(40303, "无权操作其他用户的平台排期", 403)
+
+
+def _recommendation_meta(row: PublishSchedule) -> dict:
+    return {
+        "contentTypeName": content_type_name(row.content_type),
+        "timeDeviationMinutes": (
+            int((row.scheduled_at - row.recommended_at).total_seconds() // 60)
+            if row.recommended_at
+            else None
+        ),
+        "usedRecommendedTime": row.time_source in {"RECOMMENDED", "ALTERNATIVE"},
+    }
 
 
 def _data(db: Session, row: PublishSchedule, include_logs: bool = False) -> dict:
@@ -81,6 +94,7 @@ def _data(db: Session, row: PublishSchedule, include_logs: bool = False) -> dict
             "articleTitle": article.title if article else "",
             "variantTitle": variant.title if variant else "",
             "accountName": account.account_name if account else "",
+            **_recommendation_meta(row),
         }
     )
     if include_logs:
@@ -135,6 +149,7 @@ def list_schedules(
                 "articleTitle": article.title if article else "",
                 "variantTitle": variant.title if variant else "",
                 "accountName": account.account_name if account else "",
+                **_recommendation_meta(row),
             }
         )
         return data
@@ -203,12 +218,74 @@ def schedule_backlog(
     return success_response(request, items)
 
 
+@router.get("/schedules/conflict-check")
+def conflict_check(
+    request: Request,
+    platform: str,
+    scheduled_at: datetime,
+    account_id: int | None = None,
+    exclude_schedule_id: int | None = None,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+) -> dict:
+    """Hard conflicts (same platform, <30 min) and same-account density warnings."""
+    moment = _local_naive(scheduled_at)
+    window = timedelta(minutes=DENSITY_WINDOW_MINUTES)
+    rows = db.scalars(
+        select(PublishSchedule).where(
+            PublishSchedule.platform == platform,
+            PublishSchedule.status.in_(ACTIVE_SCHEDULE_STATUSES),
+            PublishSchedule.scheduled_at >= moment - window,
+            PublishSchedule.scheduled_at <= moment + window,
+        )
+    ).all()
+    conflicts = []
+    for row in rows:
+        if exclude_schedule_id and row.id == exclude_schedule_id:
+            continue
+        minutes = int(abs((row.scheduled_at - moment).total_seconds()) // 60)
+        same_account = bool(account_id and row.account_id == account_id)
+        if minutes < CONFLICT_WINDOW_MINUTES:
+            level = "CONFLICT"
+            message = f"该平台已有排期与所选时间相差 {minutes} 分钟"
+        elif same_account:
+            level = "DENSITY"
+            message = f"同账号 {minutes} 分钟内已有排期，发布可能过密"
+        else:
+            continue
+        conflicts.append(
+            {
+                "scheduleId": row.id,
+                "articleTitle": (
+                    article.title
+                    if (article := db.get(ContentArticle, row.article_id)) is not None
+                    else ""
+                ),
+                "scheduledAt": row.scheduled_at.isoformat(),
+                "minutes": minutes,
+                "sameAccount": same_account,
+                "level": level,
+                "message": message,
+            }
+        )
+    return success_response(
+        request,
+        {
+            "platform": platform,
+            "scheduledAt": moment.isoformat(),
+            "hasConflict": any(item["level"] == "CONFLICT" for item in conflicts),
+            "hasDensityWarning": any(item["level"] == "DENSITY" for item in conflicts),
+            "conflicts": conflicts,
+        },
+    )
+
+
 @router.post("/schedules")
 def create_schedule(
     payload: ScheduleCreate,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     article = db.get(ContentArticle, payload.article_id)
     variant = db.get(ContentVariant, payload.variant_id)
@@ -320,6 +397,38 @@ def create_schedule(
         operation_ip = _public_client_ip(request)
         if operation_ip:
             publish_context["operationIp"] = operation_ip
+    recommendation = (
+        db.get(PublishRecommendation, payload.recommendation_id)
+        if payload.recommendation_id
+        else None
+    )
+    if payload.recommendation_id and not recommendation:
+        raise AppException(40405, "推荐记录不存在", 404)
+    values["content_type"] = (
+        payload.content_type
+        or (recommendation.content_type if recommendation else None)
+        or classify_content_type(variant.title, variant.content_text)
+    )
+    values["recommended_at"] = recommendation.recommended_at if recommendation else None
+    if recommendation:
+        values["recommendation_snapshot_json"] = {
+            "recommendedAt": recommendation.recommended_at.isoformat(),
+            "score": recommendation.score,
+            "confidence": recommendation.confidence,
+            "algorithmVersion": recommendation.algorithm_version,
+            "sampleCount": recommendation.sample_count,
+            "accountSampleCount": recommendation.account_sample_count,
+            "baselineSampleCount": recommendation.baseline_sample_count,
+            "weights": recommendation.weights_json or {},
+            "dataSource": recommendation.data_source_json or {},
+            "reasons": recommendation.reason_json or [],
+            "alternatives": recommendation.alternative_times_json or [],
+            "warnings": recommendation.warnings_json or [],
+            "narrative": recommendation.narrative,
+            "narrativeProvider": recommendation.narrative_provider,
+            "contentType": recommendation.content_type,
+            "contentTypeName": content_type_name(recommendation.content_type),
+        }
     row = PublishSchedule(
         **values,
         status="PENDING",
@@ -355,7 +464,7 @@ def update_schedule(
     payload: ScheduleUpdate,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     row = db.get(PublishSchedule, schedule_id)
     if not row:
@@ -368,6 +477,12 @@ def update_schedule(
         if scheduled_at <= datetime.now():
             raise AppException(40032, "排期时间必须晚于当前时间")
         row.scheduled_at = scheduled_at
+        if payload.time_source is None and row.recommended_at:
+            # Dragging a task on the calendar away from the recommended slot must
+            # be reflected in the adoption statistics.
+            row.time_source = "RECOMMENDED" if scheduled_at == row.recommended_at else "CUSTOM"
+    if payload.time_source:
+        row.time_source = payload.time_source
     if payload.publish_mode:
         row.publish_mode = payload.publish_mode
     if payload.account_id:
@@ -394,7 +509,7 @@ def delete_schedule(
     schedule_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     row = db.get(PublishSchedule, schedule_id)
     if not row:
@@ -414,7 +529,7 @@ def cancel_schedule(
     schedule_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     row = db.get(PublishSchedule, schedule_id)
     if not row:
@@ -434,7 +549,7 @@ async def publish_now(
     schedule_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     existing = db.get(PublishSchedule, schedule_id)
     if not existing:
@@ -453,7 +568,7 @@ async def retry(
     schedule_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     row = db.get(PublishSchedule, schedule_id)
     if row:
@@ -471,7 +586,7 @@ async def manual_confirm(
     payload: ManualConfirmRequest,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     row = db.get(PublishSchedule, schedule_id)
     if row:
@@ -502,7 +617,7 @@ def get_publish_package(
     schedule_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     row = db.get(PublishSchedule, schedule_id)
     if not row or row.created_by != user.id:
@@ -516,7 +631,7 @@ def get_publish_package(
 def download_publish_package(
     schedule_id: int,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> StreamingResponse:
     row = db.get(PublishSchedule, schedule_id)
     if not row or row.created_by != user.id:

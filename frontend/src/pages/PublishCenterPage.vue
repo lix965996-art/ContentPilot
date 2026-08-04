@@ -22,7 +22,7 @@ import { presentOperationError } from '@/utils/operation-error'
 import { useAuthStore } from '@/stores/auth'
 
 const auth = useAuthStore()
-const isAdmin = computed(() => auth.hasRole(['ADMIN']))
+const isAdmin = computed(() => auth.canManageSystem)
 const rows = ref<Schedule[]>([])
 const loading = ref(false)
 const detail = ref<Schedule>()

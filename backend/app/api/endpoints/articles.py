@@ -3,7 +3,7 @@ from collections.abc import Callable
 from datetime import datetime
 
 from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
-from sqlalchemy import func, or_, select
+from sqlalchemy import case, func, or_, select
 from sqlalchemy.orm import Session
 
 from app.api.deps import get_current_user, require_roles
@@ -39,11 +39,40 @@ from app.services.wechat_formatting import (
 router = APIRouter(tags=["内容管理"])
 
 
-def _article_data(article: ContentArticle, variant_count: int = 0) -> dict:
+def _article_data(
+    article: ContentArticle,
+    variant_count: int = 0,
+    cover_thumbnail_url: str | None = None,
+) -> dict:
     data = model_dict(article, camel=True)
     data["keywords"] = data.pop("keywordsJson", [])
     data["variantCount"] = variant_count
+    if cover_thumbnail_url:
+        data["coverThumbnailUrl"] = cover_thumbnail_url
     return data
+
+
+def _cover_thumbnails(db: Session, article_ids: list[int]) -> dict[int, str]:
+    if not article_ids:
+        return {}
+    assets = db.scalars(
+        select(MediaAsset)
+        .where(
+            MediaAsset.article_id.in_(article_ids),
+            MediaAsset.selected.is_(True),
+        )
+        .order_by(
+            MediaAsset.article_id,
+            case((MediaAsset.usage_type == "COVER", 0), else_=1),
+            MediaAsset.created_at.desc(),
+        )
+    ).all()
+    covers: dict[int, str] = {}
+    for asset in assets:
+        if asset.article_id is None or asset.article_id in covers:
+            continue
+        covers[asset.article_id] = asset.thumbnail_url or asset.image_url
+    return covers
 
 
 @router.get("/articles")
@@ -74,14 +103,22 @@ def list_articles(
         .outerjoin(ContentVariant)
         .where(*filters)
         .group_by(ContentArticle.id)
-        .order_by(ContentArticle.updated_at.desc())
+        # ``updated_at`` has only second-level precision on SQLite, so ties are
+        # broken by id to keep pagination and "most recent" ordering stable
+        # when several articles are updated within the same second.
+        .order_by(ContentArticle.updated_at.desc(), ContentArticle.id.desc())
         .offset((page - 1) * page_size)
         .limit(page_size)
     ).all()
+    article_ids = [article.id for article, _ in rows]
+    cover_map = _cover_thumbnails(db, article_ids)
     return success_response(
         request,
         {
-            "items": [_article_data(article, count) for article, count in rows],
+            "items": [
+                _article_data(article, count, cover_map.get(article.id))
+                for article, count in rows
+            ],
             "total": total,
             "page": page,
             "pageSize": page_size,
@@ -94,7 +131,7 @@ def create_article(
     payload: ArticleCreate,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     article = ContentArticle(
         title=payload.title.strip(),
@@ -122,7 +159,7 @@ async def import_article(
     request: Request,
     file: UploadFile = File(...),
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     if not file.filename or not file.filename.lower().endswith((".txt", ".md", ".markdown")):
         raise AppException(40011, "只支持 TXT 或 Markdown 文件")
@@ -177,7 +214,7 @@ def update_article(
     payload: ArticleUpdate,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     article = db.get(ContentArticle, article_id)
     if not article:
@@ -197,7 +234,7 @@ def delete_article(
     article_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     article = db.get(ContentArticle, article_id)
     if not article:
@@ -215,7 +252,7 @@ def archive_article(
     article_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     article = db.get(ContentArticle, article_id)
     if not article:
@@ -247,7 +284,7 @@ def update_variant(
     payload: VariantUpdate,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     variant = db.get(ContentVariant, variant_id)
     if not variant:
@@ -340,7 +377,7 @@ def format_wechat_variant(
     payload: WechatFormatRequest,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     variant = db.get(ContentVariant, variant_id)
     if not variant:
@@ -449,7 +486,7 @@ async def save_wechat_variant_to_draft(
     variant_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     """Save the current edited WeChat variant to the real account draft box now."""
     return await _save_variant_to_draft(
@@ -472,7 +509,7 @@ async def save_toutiao_variant_to_draft(
     variant_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     """Save the current edited Toutiao variant to the real account draft box now."""
     return await _save_variant_to_draft(
@@ -493,7 +530,7 @@ def approve_variant(
     variant_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     variant = db.get(ContentVariant, variant_id)
     if not variant:
@@ -512,7 +549,7 @@ def reject_variant(
     variant_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     variant = db.get(ContentVariant, variant_id)
     if not variant:
@@ -528,7 +565,7 @@ def delete_variant(
     variant_id: int,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     variant = db.get(ContentVariant, variant_id)
     if not variant:

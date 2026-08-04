@@ -39,3 +39,6 @@ cookies.json
 xhs_*_img.png
 test_xhs_*.png
 .local-private/
+
+# External public dataset, downloaded manually (see sample-data/history/README.md)
+sample-data/history/YouTubeDurationData/

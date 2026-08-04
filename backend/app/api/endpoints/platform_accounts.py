@@ -103,7 +103,7 @@ def _pkce_challenge(verifier: str) -> str:
 def list_accounts(
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("ADMIN", "OPERATOR", "VIEWER")),
 ) -> dict:
     accounts = {row.platform: row for row in db.scalars(select(PlatformAccount)).all()}
     return success_response(
@@ -181,7 +181,7 @@ async def test_connection(
     platform: Platform,
     request: Request,
     db: Session = Depends(get_db),
-    user: User = Depends(require_roles("ADMIN", "OPERATOR")),
+    user: User = Depends(require_roles("ADMIN")),
 ) -> dict:
     account = get_platform_account(db, platform)
     if not account:
