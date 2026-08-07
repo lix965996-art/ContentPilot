@@ -18,8 +18,8 @@ from app.core.config import settings
 from app.core.exceptions import AppException
 from app.models.business import ContentArticle, ContentVariant
 from app.prompts.profiles import (
-    CONTENT_BRIEF_PROMPT,
     COHERENCE_REVIEW_PROMPT,
+    CONTENT_BRIEF_PROMPT,
     DEEP_REVIEW_PROMPT,
     KEYWORD_PROMPT,
     PLATFORM_PROFILES,

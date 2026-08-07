@@ -34,6 +34,11 @@ CANONICAL_FIELDS: list[dict[str, Any]] = [
     {"field": "platform", "label": "平台", "required": True, "type": "text"},
     {"field": "account_id", "label": "账号标识", "required": False, "type": "text"},
     {"field": "content_type", "label": "内容类型", "required": False, "type": "text"},
+    # Text columns are optional but feed the semantic similarity retrieval used
+    # by the cross-platform scheduling pipeline.
+    {"field": "title", "label": "内容标题", "required": False, "type": "text"},
+    {"field": "summary", "label": "内容摘要", "required": False, "type": "text"},
+    {"field": "tags", "label": "标签", "required": False, "type": "text"},
     {"field": "publish_time", "label": "发布时间", "required": True, "type": "datetime"},
     {"field": "views", "label": "浏览量", "required": False, "type": "number"},
     {"field": "impressions", "label": "曝光量", "required": False, "type": "number"},
@@ -72,6 +77,9 @@ FIELD_ALIASES: dict[str, tuple[str, ...]] = {
         "type",
         "topic",
     ),
+    "title": ("title", "标题", "内容标题", "post_title", "headline", "name", "video_title"),
+    "summary": ("summary", "摘要", "简介", "description", "desc", "abstract", "content"),
+    "tags": ("tags", "标签", "hashtags", "keywords", "话题", "topics"),
     "publish_time": (
         "publish_time",
         "publishtime",
@@ -255,12 +263,19 @@ def parse_rows(
             if duplicate_in_file:
                 duplicate_rows += 1
             seen.add(digest)
+            text_fields = {
+                field: str(record.get(mapping.get(field, ""), "") or "").strip()[:500]
+                for field in ("title", "summary", "tags")
+            }
             parsed.append(
                 {
                     "row": index,
                     "platform": platform,
                     "accountRef": account_ref,
                     "contentType": content_type,
+                    "title": text_fields["title"],
+                    "summary": text_fields["summary"],
+                    "tags": text_fields["tags"],
                     "publishTime": publish_time,
                     "dayOfWeek": publish_time.weekday(),
                     "hourOfDay": publish_time.hour,
@@ -441,6 +456,9 @@ def commit_import(
                     "favoriteRate": item["favoriteRate"],
                     "metricBasis": item["metricBasis"],
                     "reach": item["reach"],
+                    "title": item.get("title", ""),
+                    "summary": item.get("summary", ""),
+                    "tags": item.get("tags", ""),
                 },
                 source_type=item["sourceType"],
                 source_note=(source_note or SOURCE_TYPE_LABELS.get(item["sourceType"], ""))[:255],

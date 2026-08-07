@@ -400,6 +400,235 @@ export interface PublishTimeRecommendation {
   narrativeProvider?: string
   window?: TimeWindowInfo
   curve: ActivityCurvePoint[]
+  // Semantic scheduling pipeline (semantic-cpsat-v1). Absent when the request
+  // ran with optimize=false or the pipeline degraded to hybrid-v2.
+  profile?: ContentScheduleProfile
+  profileSource?: 'LLM' | 'FALLBACK'
+  similarHistory?: SimilarHistoryItem[]
+  similarHistoryCount?: number
+  retrievalProvider?: string
+  embeddingModel?: string
+  activityEstimate?: ActivityEstimateSummary
+  optimization?: OptimizationDetail
+  review?: SchedulePlanReview | null
+  solverStatus?: string
+  stageStatus?: Record<string, string>
+  originalBestTime?: string | null
+  optimizationAdjusted?: boolean
+  adjustmentReason?: string
+  activityScore?: number | null
+  dataConfidence?: number | null
+}
+
+export type ScheduleUrgency = 'IMMEDIATE' | 'TIMELY' | 'NORMAL' | 'EVERGREEN'
+export type ScheduleReadingMode = 'FRAGMENT' | 'IMMERSIVE' | 'REFERENCE'
+export type ScheduleCognitiveLoad = 'LOW' | 'MEDIUM' | 'HIGH'
+export type CrossPlatformStrategy = 'SIMULTANEOUS' | 'STAGGERED' | 'WATERFALL'
+
+export interface ContentScheduleProfile {
+  topic: string
+  content_type: string
+  contentTypeName?: string
+  target_audience: string
+  reading_mode: ScheduleReadingMode
+  estimated_reading_minutes: number
+  urgency: ScheduleUrgency
+  freshness_hours: number
+  cognitive_load: ScheduleCognitiveLoad
+  platform_priority: string[]
+  cross_platform_strategy: CrossPlatformStrategy
+  minimum_cross_platform_gap_minutes: number
+  reason_evidence: string[]
+}
+
+export interface SimilarHistoryItem {
+  refType: 'HISTORY' | 'ARTICLE'
+  historicalContentId: number
+  title?: string | null
+  contentType?: string | null
+  publishTime?: string | null
+  platform?: string | null
+  embeddingModel?: string
+  vectorSimilarity: number
+  // Null when the LLM re-ranker did not score this candidate; the score is
+  // never fabricated from the vector similarity alone.
+  llmRelevance: number | null
+  combinedScore: number
+  selected: boolean
+  selectionReason: string
+  // True when the row was borrowed from a public dataset imported under a
+  // different platform, used only while this platform is still in cold start.
+  crossPlatform?: boolean
+  excerpt?: string
+}
+
+export interface ActivityPriorLevel {
+  level: string
+  label: string
+  slotCount: number
+  mean: number
+}
+
+export interface ActivityEstimateSummary {
+  estimatorVersion?: string
+  confidence?: 'HIGH' | 'MEDIUM' | 'LOW'
+  primaryLevel?: string
+  primaryLevelLabel?: string
+  priorChain?: ActivityPriorLevel[]
+  levelSampleCounts?: Record<string, number>
+  levelMeans?: Record<string, number>
+  decayDays?: number
+  priorStrength?: number
+  coveredSlots?: number
+  similarSampleCount?: number
+  accountSampleCount?: number
+  platformSampleCount?: number
+  baselineSampleCount?: number
+  crossPlatformSampleCount?: number
+  effectiveSampleCount?: number
+  hourlyCurve?: Array<{
+    hour: number
+    score: number
+    effectiveSampleCount: number
+    dataConfidence?: number
+  }>
+}
+
+export interface HardConstraintCheck {
+  code: string
+  platform: string
+  satisfied: boolean
+  description: string
+}
+
+export interface SoftObjectiveBreakdown {
+  weights?: Record<string, number>
+  strategy?: CrossPlatformStrategy
+  minimumGapMinutes?: number
+  platformPriority?: string[]
+  simultaneousPairs?: number
+  objectives?: Array<{ code: string; name: string }>
+}
+
+export interface CandidateSlot {
+  platform: Platform
+  candidateTime: string
+  activityScore: number
+  semanticHistoryScore: number
+  contentSceneFit: number
+  dataConfidence: number
+  existingScheduleConflict: boolean
+  frequencyPenalty: number
+  candidateStatus: string
+  rejectReason?: string
+}
+
+export interface OptimizationDetail {
+  pipelineVersion?: string
+  optimizerVersion?: string
+  solverStatus?: string
+  solveDurationMs?: number
+  objectiveValue?: number
+  hardConstraints?: HardConstraintCheck[]
+  softObjectiveBreakdown?: SoftObjectiveBreakdown
+  resolvedAfterReview?: boolean
+  candidates?: CandidateSlot[]
+  selectedTime?: string | null
+  originalBestTime?: string | null
+  optimizationAdjusted?: boolean
+  adjustmentReason?: string
+  activityScore?: number | null
+  semanticHistoryScore?: number | null
+  contentSceneFit?: number | null
+  dataConfidence?: number | null
+  locked?: boolean
+  candidateStatus?: string
+}
+
+export interface SchedulePlanReview {
+  verdict: 'APPROVE' | 'REQUEST_RESOLVE' | 'MANUAL_REVIEW'
+  summary: string
+  risks: string[]
+  resolve_request?: {
+    minimum_cross_platform_gap_minutes?: number | null
+    platform_order?: string[]
+    note?: string
+  } | null
+  provider?: string
+  reviewVersion?: string
+  resolveApplied?: boolean
+  resolveRounds?: number
+}
+
+export interface SchedulePlanSummary {
+  pipelineVersion: string
+  profile: ContentScheduleProfile
+  profileSource: 'LLM' | 'FALLBACK'
+  solverStatus: string
+  solveDurationMs?: number
+  objectiveValue?: number
+  hardConstraints: HardConstraintCheck[]
+  softObjectiveBreakdown: SoftObjectiveBreakdown
+  review?: SchedulePlanReview | null
+  stageStatus?: Record<string, string>
+  optimizationApplied: boolean
+}
+
+export interface BatchRecommendationItemResult {
+  platform: Platform
+  success: boolean
+  message?: string
+  code?: number
+  data?: PublishTimeRecommendation
+}
+
+export interface BatchRecommendationResponse {
+  articleId: number
+  contentType?: string
+  contentTypeName?: string
+  items: BatchRecommendationItemResult[]
+  successCount: number
+  failureCount: number
+  overlapGroups: Platform[][]
+  hasOverlap: boolean
+  // Null when optimize=false or no platform could be jointly scheduled.
+  plan?: SchedulePlanSummary | null
+}
+
+export interface BatchScheduleItemResult {
+  platform: Platform
+  success: boolean
+  scheduleId?: number
+  scheduledAt?: string
+  message?: string
+  code?: number
+  skipped?: boolean
+}
+
+export interface BatchScheduleResponse {
+  batchKey: string
+  items: BatchScheduleItemResult[]
+  createdScheduleIds: number[]
+  successCount: number
+  failureCount: number
+}
+
+export interface RecommendationPlanRow {
+  platform: Platform
+  accountId: number
+  accountName: string
+  variantId: number
+  recommendation?: PublishTimeRecommendation
+  errorMessage?: string
+  skipped: boolean
+  selectedAt: string
+  timeSource: TimeSource
+  recommendedAt: string
+  customAt: string
+  conflictLevel: 'NONE' | 'CONFLICT' | 'DENSITY'
+  conflictMessage: string
+  // Operator lock: the next joint solve must keep this exact time (H8).
+  locked?: boolean
 }
 
 export interface ActivityBucket {

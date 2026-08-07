@@ -3517,6 +3517,10 @@ body,
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+.fc .fc-event.schedule-highlight {
+  box-shadow: 0 0 0 2px #2563eb;
+  background: #eff6ff !important;
+}
 .publish-tabs {
   margin-bottom: 10px;
 }

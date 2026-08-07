@@ -30,7 +30,7 @@ from app.models.business import (
 )
 from app.models.user import User
 from app.scheduler.runtime import add_schedule_job, remove_schedule_job
-from app.schemas.business import ScheduleCreate, ScheduleUpdate
+from app.schemas.business import ScheduleBatchRequest, ScheduleCreate, ScheduleUpdate
 from app.schemas.platform_account import ManualConfirmRequest
 from app.services.activity_service import classify_content_type, content_type_name
 from app.services.audit_service import record_audit
@@ -135,9 +135,30 @@ def list_schedules(
     article_ids = {row.article_id for row in items}
     variant_ids = {row.variant_id for row in items}
     account_ids = {row.account_id for row in items if row.account_id}
-    articles = {a.id: a for a in db.scalars(select(ContentArticle).where(ContentArticle.id.in_(article_ids)))} if article_ids else {}
-    variants = {v.id: v for v in db.scalars(select(ContentVariant).where(ContentVariant.id.in_(variant_ids)))} if variant_ids else {}
-    accounts = {a.id: a for a in db.scalars(select(PlatformAccount).where(PlatformAccount.id.in_(account_ids)))} if account_ids else {}
+    articles = (
+        {
+            a.id: a
+            for a in db.scalars(select(ContentArticle).where(ContentArticle.id.in_(article_ids)))
+        }
+        if article_ids
+        else {}
+    )
+    variants = (
+        {
+            v.id: v
+            for v in db.scalars(select(ContentVariant).where(ContentVariant.id.in_(variant_ids)))
+        }
+        if variant_ids
+        else {}
+    )
+    accounts = (
+        {
+            a.id: a
+            for a in db.scalars(select(PlatformAccount).where(PlatformAccount.id.in_(account_ids)))
+        }
+        if account_ids
+        else {}
+    )
 
     def serialize(row: PublishSchedule) -> dict:
         data = model_dict(row, camel=True)
@@ -280,21 +301,29 @@ def conflict_check(
     )
 
 
-@router.post("/schedules")
-def create_schedule(
-    payload: ScheduleCreate,
+def _create_schedule_row(
+    db: Session,
     request: Request,
-    db: Session = Depends(get_db),
-    user: User = Depends(require_roles("OPERATOR")),
-) -> dict:
+    user: User,
+    payload: ScheduleCreate,
+    *,
+    idempotency_key: str | None = None,
+    recommended_at_override: datetime | None = None,
+    defer_live_connection: bool = False,
+) -> PublishSchedule:
+    """Create a publish_schedule row.
+
+    When ``defer_live_connection`` is True (batch cross-platform planning),
+    structural publish-mode checks still apply, but live login / OAuth /
+    public-publish gates are deferred to publish execution time. Single-create
+    keeps the strict default.
+    """
     article = db.get(ContentArticle, payload.article_id)
     variant = db.get(ContentVariant, payload.variant_id)
     if not article or not variant or variant.article_id != article.id:
         raise AppException(40031, "文章与平台版本不匹配")
     if variant.platform != payload.platform:
         raise AppException(40033, "内容版本与目标平台不匹配")
-    # Manual Xiaohongshu delivery may omit an account. Real local MCP
-    # Publishing must use the system-shared account for the selected platform.
     account = None
     if payload.account_id:
         account = db.scalar(
@@ -309,23 +338,28 @@ def create_schedule(
             raise AppException(40073, "平台账号与目标平台不匹配")
     elif payload.platform != "XIAOHONGSHU" or payload.publish_mode == "MCP_PUBLISH":
         raise AppException(40072, "创建排期时必须选择平台账号")
-    if payload.platform == "X" and not x_public_publish_enabled(account):
+    if (
+        payload.platform == "X"
+        and not defer_live_connection
+        and not x_public_publish_enabled(account)
+    ):
         raise AppException(40080, "X 公开发布安全开关未开启，请由管理员确认后启用")
     if payload.platform == "TOUTIAO":
         if payload.publish_mode != "BROWSER_PUBLISH":
             raise AppException(40081, "今日头条仅支持本机浏览器发布")
         if not account or account.publish_mode != "BROWSER_PUBLISH":
             raise AppException(40075, "今日头条账号未启用本机浏览器发布")
-        if effective_status(account) != "CONNECTED":
-            raise AppException(40075, "今日头条账号尚未扫码登录或登录已失效")
-        if not toutiao_public_publish_enabled(account):
-            raise AppException(40083, "今日头条真实发布开关未开启，请由管理员确认后启用")
+        if not defer_live_connection:
+            if effective_status(account) != "CONNECTED":
+                raise AppException(40075, "今日头条账号尚未扫码登录或登录已失效")
+            if not toutiao_public_publish_enabled(account):
+                raise AppException(40083, "今日头条真实发布开关未开启，请由管理员确认后启用")
     if payload.platform == "WECHAT_OFFICIAL" and payload.publish_mode == "BROWSER_DRAFT":
         if not settings.wechat_browser_publishing_enabled:
             raise AppException(40084, "微信公众号本机扫码草稿功能已关闭")
         if not account or account.publish_mode != "BROWSER_DRAFT":
             raise AppException(40075, "微信公众号账号未启用本机扫码草稿模式")
-        if effective_status(account) != "CONNECTED":
+        if not defer_live_connection and effective_status(account) != "CONNECTED":
             raise AppException(40075, "微信公众号后台尚未扫码登录或登录已失效")
     if payload.publish_mode in {"REAL_API", "DRAFT_ONLY"}:
         allowed_account_modes = (
@@ -337,29 +371,32 @@ def create_schedule(
         )
         if account.publish_mode not in allowed_account_modes:
             raise AppException(40075, "账号配置未启用所选真实发布方式")
-        status = effective_status(account)
-        x_can_refresh = bool(
-            payload.platform == "X"
-            and status == "TOKEN_EXPIRED"
-            and account.refresh_token_encrypted
-        )
-        if status != "CONNECTED" and not x_can_refresh:
-            raise AppException(40075, "真实发布前必须先通过平台账号连接测试")
-        required = (
-            "DRAFT_CREATE"
-            if payload.publish_mode == "DRAFT_ONLY"
-            else (
-                "TEXT_PUBLISH" if payload.platform in TEXT_REAL_API_PLATFORMS else "SUBMIT_PUBLISH"
+        if not defer_live_connection:
+            status = effective_status(account)
+            x_can_refresh = bool(
+                payload.platform == "X"
+                and status == "TOKEN_EXPIRED"
+                and account.refresh_token_encrypted
             )
-        )
-        if required not in set(account.capabilities_json or []):
-            raise AppException(40076, f"平台账号缺少发布能力：{required}")
-        if (
-            payload.platform == "WECHAT_OFFICIAL"
-            and payload.publish_mode == "REAL_API"
-            and not decrypt_json(account.credentials_encrypted).get("allow_submit_publish")
-        ):
-            raise AppException(40076, "公众号配置未明确允许提交发布")
+            if status != "CONNECTED" and not x_can_refresh:
+                raise AppException(40075, "真实发布前必须先通过平台账号连接测试")
+            required = (
+                "DRAFT_CREATE"
+                if payload.publish_mode == "DRAFT_ONLY"
+                else (
+                    "TEXT_PUBLISH"
+                    if payload.platform in TEXT_REAL_API_PLATFORMS
+                    else "SUBMIT_PUBLISH"
+                )
+            )
+            if required not in set(account.capabilities_json or []):
+                raise AppException(40076, f"平台账号缺少发布能力：{required}")
+            if (
+                payload.platform == "WECHAT_OFFICIAL"
+                and payload.publish_mode == "REAL_API"
+                and not decrypt_json(account.credentials_encrypted).get("allow_submit_publish")
+            ):
+                raise AppException(40076, "公众号配置未明确允许提交发布")
     xhs_modes = {"MANUAL_CONFIRM", "MCP_PUBLISH"}
     if payload.platform == "XIAOHONGSHU" and payload.publish_mode not in xhs_modes:
         raise AppException(40077, "小红书仅支持人工确认或本地 xiaohongshu-mcp 发布")
@@ -372,7 +409,7 @@ def create_schedule(
     if payload.platform == "XIAOHONGSHU" and payload.publish_mode == "MCP_PUBLISH":
         if not account or account.publish_mode != "MCP_PUBLISH":
             raise AppException(40075, "小红书账号未启用本地 MCP 发布")
-        if effective_status(account) != "CONNECTED":
+        if not defer_live_connection and effective_status(account) != "CONNECTED":
             raise AppException(40075, "小红书本地 MCP 尚未登录或连接检测未通过")
     if payload.platform != "XIAOHONGSHU" and payload.publish_mode == "MANUAL_CONFIRM":
         raise AppException(40077, "人工交付目前仅用于小红书")
@@ -409,7 +446,11 @@ def create_schedule(
         or (recommendation.content_type if recommendation else None)
         or classify_content_type(variant.title, variant.content_text)
     )
-    values["recommended_at"] = recommendation.recommended_at if recommendation else None
+    values["recommended_at"] = (
+        _local_naive(recommended_at_override)
+        if recommended_at_override
+        else (recommendation.recommended_at if recommendation else None)
+    )
     if recommendation:
         values["recommendation_snapshot_json"] = {
             "recommendedAt": recommendation.recommended_at.isoformat(),
@@ -433,16 +474,113 @@ def create_schedule(
         **values,
         status="PENDING",
         publish_package_json=publish_context,
-        idempotency_key=str(uuid.uuid4()),
+        idempotency_key=idempotency_key or str(uuid.uuid4()),
         created_by=user.id,
     )
     db.add(row)
     db.flush()
     record_audit(db, request, user, "CREATE", "SCHEDULING", "SCHEDULE", row.id)
+    return row
+
+
+@router.post("/schedules")
+def create_schedule(
+    payload: ScheduleCreate,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("OPERATOR")),
+) -> dict:
+    row = _create_schedule_row(db, request, user, payload)
     db.commit()
     db.refresh(row)
     add_schedule_job(row.id, row.scheduled_at)
     return success_response(request, _data(db, row), "排期已创建")
+
+
+@router.post("/schedules/batch")
+def create_schedules_batch(
+    payload: ScheduleBatchRequest,
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("OPERATOR")),
+) -> dict:
+    batch_key = payload.idempotency_key or str(uuid.uuid4())
+    results: list[dict] = []
+    created_rows: list[PublishSchedule] = []
+    for item in payload.items:
+        idempotency_key = f"{batch_key}:{item.platform}:{item.variant_id}"
+        existing = db.scalar(
+            select(PublishSchedule).where(PublishSchedule.idempotency_key == idempotency_key)
+        )
+        if existing:
+            results.append(
+                {
+                    "platform": item.platform,
+                    "success": True,
+                    "scheduleId": existing.id,
+                    "message": "已存在相同幂等键的排期，跳过重复创建",
+                    "skipped": True,
+                }
+            )
+            continue
+        try:
+            schedule_payload = ScheduleCreate(
+                article_id=payload.article_id,
+                variant_id=item.variant_id,
+                account_id=item.account_id,
+                platform=item.platform,
+                scheduled_at=item.scheduled_at,
+                publish_mode=item.publish_mode,
+                recommendation_id=item.recommendation_id,
+                time_source=item.time_source,
+                content_type=payload.content_type,
+            )
+            row = _create_schedule_row(
+                db,
+                request,
+                user,
+                schedule_payload,
+                idempotency_key=idempotency_key,
+                recommended_at_override=item.recommended_at,
+                defer_live_connection=True,
+            )
+            created_rows.append(row)
+            results.append(
+                {
+                    "platform": item.platform,
+                    "success": True,
+                    "scheduleId": row.id,
+                    "scheduledAt": row.scheduled_at.isoformat(),
+                }
+            )
+        except AppException as exc:
+            results.append(
+                {
+                    "platform": item.platform,
+                    "success": False,
+                    "message": exc.message,
+                    "code": exc.code,
+                }
+            )
+    if created_rows:
+        db.commit()
+        for row in created_rows:
+            db.refresh(row)
+            add_schedule_job(row.id, row.scheduled_at)
+    else:
+        db.rollback()
+    created_ids = [row.id for row in created_rows]
+    return success_response(
+        request,
+        {
+            "batchKey": batch_key,
+            "items": results,
+            "createdScheduleIds": created_ids,
+            "successCount": sum(1 for item in results if item.get("success")),
+            "failureCount": sum(1 for item in results if not item.get("success")),
+        },
+        "批量排期处理完成",
+    )
 
 
 @router.get("/schedules/{schedule_id}")
@@ -515,7 +653,13 @@ def delete_schedule(
     if not row:
         raise AppException(40407, "排期任务不存在", 404)
     _ensure_schedule_owner(row, user)
-    if row.status in {"PUBLISHING", "PUBLISHED", "DRAFT_CREATED", "PUBLISH_SUBMITTED", "MANUAL_PUBLISHED"}:
+    if row.status in {
+        "PUBLISHING",
+        "PUBLISHED",
+        "DRAFT_CREATED",
+        "PUBLISH_SUBMITTED",
+        "MANUAL_PUBLISHED",
+    }:
         raise AppException(40903, "已执行任务不能删除", 409)
     remove_schedule_job(row.id)
     record_audit(db, request, user, "DELETE", "SCHEDULING", "SCHEDULE", row.id)
@@ -535,7 +679,13 @@ def cancel_schedule(
     if not row:
         raise AppException(40407, "排期任务不存在", 404)
     _ensure_schedule_owner(row, user)
-    if row.status in {"PUBLISHING", "PUBLISHED", "DRAFT_CREATED", "PUBLISH_SUBMITTED", "MANUAL_PUBLISHED"}:
+    if row.status in {
+        "PUBLISHING",
+        "PUBLISHED",
+        "DRAFT_CREATED",
+        "PUBLISH_SUBMITTED",
+        "MANUAL_PUBLISHED",
+    }:
         raise AppException(40903, "已发布任务不能取消", 409)
     row.status = "CANCELLED"
     remove_schedule_job(row.id)

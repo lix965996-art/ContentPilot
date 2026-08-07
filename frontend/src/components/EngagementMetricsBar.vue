@@ -47,7 +47,9 @@ function formatNum(value: number | null | undefined) {
         ><MessageCircle :size="13" />评论 {{ formatNum(metricValue('comments') as number) }}</span
       >
       <span><Bookmark :size="13" />收藏 {{ formatNum(metricValue('collects') as number) }}</span>
-      <span v-if="!compact"><Share2 :size="13" />转发 {{ formatNum(metricValue('shares') as number) }}</span>
+      <span v-if="!compact"
+        ><Share2 :size="13" />转发 {{ formatNum(metricValue('shares') as number) }}</span
+      >
       <span v-if="metricValue('engagementRate') != null" class="metrics-rate">
         互动率 {{ metricValue('engagementRate') }}%
       </span>

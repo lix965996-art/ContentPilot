@@ -155,11 +155,7 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleShortcut))
     <div v-loading="searchLoading" class="command-results">
       <section v-if="matchedNavigation.length">
         <p>页面</p>
-        <button
-          v-for="item in matchedNavigation"
-          :key="item.name"
-          @click="navigate(item.name)"
-        >
+        <button v-for="item in matchedNavigation" :key="item.name" @click="navigate(item.name)">
           <Search :size="15" /><span>{{ item.label }}</span>
         </button>
       </section>

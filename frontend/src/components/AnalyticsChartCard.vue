@@ -16,10 +16,7 @@ defineProps<{
 <template>
   <article
     class="analytics-chart-card"
-    :class="[
-      hero ? 'is-hero' : '',
-      accent ? `accent-${accent}` : 'accent-brand',
-    ]"
+    :class="[hero ? 'is-hero' : '', accent ? `accent-${accent}` : 'accent-brand']"
   >
     <header class="analytics-chart-header">
       <div>

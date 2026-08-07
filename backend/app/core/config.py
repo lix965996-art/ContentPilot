@@ -37,6 +37,23 @@ class Settings(BaseSettings):
     llm_api_key: str = ""
     llm_model: str = ""
     llm_timeout_seconds: int = 60
+    # Semantic scheduling pipeline (LLM profile + FAISS retrieval + CP-SAT).
+    embedding_model: str = ""
+    embedding_fallback_dimensions: int = 256
+    activity_decay_days: int = 90
+    schedule_min_account_gap_minutes: int = 60
+    # Hours of day (local) during which auto-scheduling is disallowed by default.
+    schedule_forbidden_hours: str = "1,2,3,4,5"
+
+    @property
+    def schedule_forbidden_hour_list(self) -> list[int]:
+        hours = []
+        for part in self.schedule_forbidden_hours.split(","):
+            part = part.strip()
+            if part.isdigit() and 0 <= int(part) <= 23:
+                hours.append(int(part))
+        return hours
+
     unsplash_access_key: str = ""
     media_fallback_enabled: bool = False
     publish_mode: str = "manual"

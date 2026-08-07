@@ -108,7 +108,9 @@ function interactionSum(record: {
   collects: number | null
   shares: number | null
 }) {
-  return (record.likes ?? 0) + (record.comments ?? 0) + (record.collects ?? 0) + (record.shares ?? 0)
+  return (
+    (record.likes ?? 0) + (record.comments ?? 0) + (record.collects ?? 0) + (record.shares ?? 0)
+  )
 }
 
 function fieldStatus(value: number | null | undefined, anomaly = false): FieldStatus {
@@ -182,7 +184,8 @@ export function evaluatePublishReviewRecord(input: {
   ].filter(Boolean).length
   const completeness = Math.round((filledFields / 6) * 100)
 
-  const isRecommendedGroup = input.timeSource === 'RECOMMENDED' || input.timeSource === 'ALTERNATIVE'
+  const isRecommendedGroup =
+    input.timeSource === 'RECOMMENDED' || input.timeSource === 'ALTERNATIVE'
   const isRealValid =
     source.key !== 'SIMULATED' && source.participates && rateStatus === 'ok' && !anomalyReason
 

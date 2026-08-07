@@ -10,8 +10,7 @@ import {
 } from '@/config/echartsTheme'
 
 type AnalysisSource =
-  | ComputedRef<ActivityAnalysis | undefined>
-  | { value: ActivityAnalysis | undefined }
+  ComputedRef<ActivityAnalysis | undefined> | { value: ActivityAnalysis | undefined }
 
 function rows(source: AnalysisSource) {
   return source.value
@@ -177,9 +176,7 @@ export function buildHourlyAreaOption(source: AnalysisSource) {
           symbol: 'pin',
           symbolSize: 42,
           label: { fontSize: 10, color: '#fff' },
-          data: [
-            { type: 'max', name: '峰值', itemStyle: { color: CHART_COLORS.accent } },
-          ],
+          data: [{ type: 'max', name: '峰值', itemStyle: { color: CHART_COLORS.accent } }],
         },
         data: hourly.map((item) => item.score),
       },

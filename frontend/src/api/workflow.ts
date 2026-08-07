@@ -5,6 +5,8 @@ import type {
   ActivityCurvePoint,
   Article,
   ArticleEngagementSummary,
+  BatchRecommendationResponse,
+  BatchScheduleResponse,
   GenerationTask,
   HistoryImportBatch,
   HistoryImportPreview,
@@ -18,6 +20,7 @@ import type {
   LlmUsage,
   Platform,
   PlatformAccount,
+  PublishMode,
   PublishPackage,
   Schedule,
   Variant,
@@ -216,6 +219,28 @@ export const workflowApi = {
       apiClient.post('/recommendations/publish-time', data, { timeout: 120_000 }),
     )
   },
+  recommendBatch(data: {
+    article_id: number
+    targets: Array<{
+      platform: Platform
+      account_id: number
+      variant_id?: number
+      // Operator-locked time: CP-SAT must keep it exactly as given.
+      locked_at?: string
+    }>
+    content_type?: string
+    target_date?: string
+    horizon_days?: number
+    window?: '30D' | '90D' | 'ALL' | 'CUSTOM'
+    window_start_date?: string
+    window_end_date?: string
+    // false → skip the semantic pipeline and keep the hybrid-v2 result only.
+    optimize?: boolean
+  }) {
+    return unwrap<BatchRecommendationResponse>(
+      apiClient.post('/recommendations/publish-time/batch', data, { timeout: 180_000 }),
+    )
+  },
   activityAnalysis(params: Record<string, unknown> = {}) {
     return unwrap<ActivityAnalysis>(apiClient.get('/activity/analysis', { params }))
   },
@@ -320,6 +345,23 @@ export const workflowApi = {
   },
   createSchedule(data: Record<string, unknown>) {
     return unwrap<Schedule>(apiClient.post('/schedules', data))
+  },
+  createSchedulesBatch(data: {
+    article_id: number
+    content_type?: string
+    idempotency_key?: string
+    items: Array<{
+      platform: Platform
+      variant_id: number
+      account_id: number
+      scheduled_at: string
+      recommendation_id: number
+      time_source: TimeSource
+      recommended_at?: string
+      publish_mode?: PublishMode
+    }>
+  }) {
+    return unwrap<BatchScheduleResponse>(apiClient.post('/schedules/batch', data))
   },
   updateSchedule(id: number, data: Record<string, unknown>) {
     return unwrap<Schedule>(apiClient.put(`/schedules/${id}`, data))

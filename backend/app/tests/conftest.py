@@ -1,5 +1,6 @@
 import json
 import os
+import re
 from collections.abc import Generator
 from pathlib import Path
 
@@ -47,7 +48,47 @@ def intercept_llm_transport(monkeypatch):
 
     async def fake_chat(_runtime, system_prompt, messages, **_kwargs):
         prompt = messages[-1]["content"]
-        if "只做分类" in system_prompt:
+        if "社交媒体内容排期分析师" in system_prompt:
+            payload = {
+                "topic": "内容运营工作流",
+                "content_type": "KNOWLEDGE",
+                "target_audience": "校园新媒体团队",
+                "reading_mode": "IMMERSIVE",
+                "estimated_reading_minutes": 6,
+                "urgency": "NORMAL",
+                "freshness_hours": 96,
+                "cognitive_load": "MEDIUM",
+                "platform_priority": [
+                    "WEIBO",
+                    "XIAOHONGSHU",
+                    "WECHAT_OFFICIAL",
+                    "TOUTIAO",
+                ],
+                "cross_platform_strategy": "STAGGERED",
+                "minimum_cross_platform_gap_minutes": 45,
+                "reason_evidence": ["正文属于方法论科普", "适合完整阅读的时段"],
+            }
+        elif "内容相似度评审员" in system_prompt:
+            # Score every candidate the retriever offered, highest first.
+            ids = re.findall(r'"candidate_id":\s*(\d+)', prompt)
+            payload = {
+                "items": [
+                    {
+                        "candidate_id": int(item),
+                        "relevance": max(10, 95 - index * 5),
+                        "reason": "主题与受众接近",
+                    }
+                    for index, item in enumerate(ids)
+                ]
+            }
+        elif "跨平台发布排期的审查员" in system_prompt:
+            payload = {
+                "verdict": "APPROVE",
+                "summary": "跨平台时间分布合理，硬约束全部满足。",
+                "risks": [],
+                "resolve_request": None,
+            }
+        elif "只做分类" in system_prompt:
             payload = {
                 "content_type": "KNOWLEDGE",
                 "topic": "内容运营",

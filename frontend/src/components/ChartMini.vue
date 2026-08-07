@@ -15,7 +15,11 @@ function render() {
 }
 
 onMounted(() => nextTick(render))
-watch(() => props.option, () => nextTick(render), { deep: true })
+watch(
+  () => props.option,
+  () => nextTick(render),
+  { deep: true },
+)
 useResizeObserver(el, () => chart?.resize())
 onBeforeUnmount(() => chart?.dispose())
 </script>

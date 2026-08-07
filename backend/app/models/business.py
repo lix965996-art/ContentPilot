@@ -271,6 +271,30 @@ class EngagementHistory(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class ContentEmbedding(Base):
+    """Semantic vector for a historical content item (system article or imported history row).
+
+    Vectors live in MySQL as JSON; the FAISS index is rebuilt in-process from
+    these rows, so MySQL stays the single source of truth.
+    """
+
+    __tablename__ = "content_embedding"
+    __table_args__ = (
+        UniqueConstraint("ref_type", "content_id", "embedding_version", name="uq_content_embed"),
+    )
+    id: Mapped[int] = mapped_column(primary_key=True)
+    # ARTICLE → content_article.id, HISTORY → engagement_history.id
+    ref_type: Mapped[str] = mapped_column(String(20), index=True)
+    content_id: Mapped[int] = mapped_column(Integer, index=True)
+    platform: Mapped[str | None] = mapped_column(String(30), nullable=True, index=True)
+    account_id: Mapped[int | None] = mapped_column(Integer, nullable=True, index=True)
+    embedding_model: Mapped[str] = mapped_column(String(100))
+    embedding_version: Mapped[str] = mapped_column(String(30), default="v1")
+    vector_json: Mapped[list] = mapped_column(JSON, default=list)
+    text_hash: Mapped[str] = mapped_column(String(64), default="")
+    embedding_created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 class PublishRecommendation(Base):
     __tablename__ = "publish_recommendation"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -302,6 +326,14 @@ class PublishRecommendation(Base):
     # The time window (30D / 90D / ALL / CUSTOM) actually used to select the
     # historical samples behind this recommendation, plus its resolved dates.
     window_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Semantic scheduling pipeline artifacts (LLM profile / FAISS retrieval /
+    # activity estimation / CP-SAT optimization / LLM plan review).
+    profile_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    profile_source: Mapped[str] = mapped_column(String(20), default="")
+    similar_history_json: Mapped[list] = mapped_column(JSON, default=list)
+    activity_estimate_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    optimization_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    review_json: Mapped[dict] = mapped_column(JSON, default=dict)
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 

@@ -168,6 +168,37 @@ class RecommendationRequest(BaseModel):
         return value
 
 
+class RecommendationBatchTarget(BaseModel):
+    platform: Platform
+    account_id: int
+    variant_id: int | None = None
+    # A time the operator locked on the plan table; the optimizer must keep it.
+    locked_at: datetime | None = None
+
+
+class RecommendationBatchRequest(BaseModel):
+    article_id: int
+    targets: list[RecommendationBatchTarget] = Field(min_length=1, max_length=10)
+    content_type: str | None = Field(default=None, max_length=50)
+    target_date: date | None = None
+    horizon_days: int = Field(default=3, ge=1, le=14)
+    with_narrative: bool = False
+    # Run the semantic pipeline (LLM profile → FAISS retrieval → weighted
+    # activity → CP-SAT → LLM review). Disable to force the hybrid-v2 path.
+    optimize: bool = True
+    window: Literal["30D", "90D", "ALL", "CUSTOM"] = "90D"
+    window_start_date: date | None = None
+    window_end_date: date | None = None
+
+    @field_validator("window_end_date")
+    @classmethod
+    def validate_window_dates(cls, value: date | None, info):
+        start = info.data.get("window_start_date")
+        if value and start and value < start:
+            raise ValueError("时间范围的结束日期不能早于开始日期")
+        return value
+
+
 class HistoryImportCommitRequest(BaseModel):
     """Second step of the import wizard: the confirmed field mapping."""
 
@@ -206,6 +237,24 @@ class ScheduleCreate(BaseModel):
     recommendation_id: int | None = None
     time_source: TimeSourceLiteral = "CUSTOM"
     content_type: str | None = Field(default=None, max_length=50)
+
+
+class ScheduleBatchItem(BaseModel):
+    platform: Platform
+    variant_id: int
+    account_id: int
+    scheduled_at: datetime
+    recommendation_id: int
+    time_source: TimeSourceLiteral = "RECOMMENDED"
+    recommended_at: datetime | None = None
+    publish_mode: PublishModeLiteral = "MANUAL_CONFIRM"
+
+
+class ScheduleBatchRequest(BaseModel):
+    article_id: int
+    content_type: str | None = Field(default=None, max_length=50)
+    idempotency_key: str | None = Field(default=None, max_length=80)
+    items: list[ScheduleBatchItem] = Field(min_length=1, max_length=10)
 
 
 class ScheduleUpdate(BaseModel):

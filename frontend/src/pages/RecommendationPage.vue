@@ -2,32 +2,25 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { UploadRequestOptions } from 'element-plus'
-import {
-  CalendarPlus,
-  Clock3,
-  Database,
-  Download,
-  Gauge,
-  Lightbulb,
-  Sparkles,
-  TriangleAlert,
-  Upload,
-} from 'lucide-vue-next'
+import { Database, Download, Gauge, Sparkles, TriangleAlert, Upload } from 'lucide-vue-next'
 import PageHeader from '@/components/PageHeader.vue'
 import ChartPanel from '@/components/ChartPanel.vue'
+import RecommendationTargetForm from '@/components/recommendation/RecommendationTargetForm.vue'
+import RecommendationResultTable from '@/components/recommendation/RecommendationResultTable.vue'
+import RecommendationDetailDrawer from '@/components/recommendation/RecommendationDetailDrawer.vue'
+import ContentScheduleProfilePanel from '@/components/recommendation/ContentScheduleProfilePanel.vue'
+import BatchScheduleConfirm from '@/components/recommendation/BatchScheduleConfirm.vue'
+import { RECOMMEND_PLATFORMS, useBatchRecommendation } from '@/composables/useBatchRecommendation'
 import { workflowApi } from '@/api/workflow'
 import { getApiErrorMessage } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
 import type {
   ActivityAnalysis,
-  Article,
   HistoryImportBatch,
   HistoryImportPreview,
   Platform,
-  PlatformAccount,
-  PublishTimeRecommendation,
+  RecommendationPlanRow,
   TimeWindow,
-  Variant,
 } from '@/types/business'
 import { analysisPlatformNames, platformNames } from '@/types/business'
 
@@ -40,141 +33,14 @@ const timeWindowOptions: Array<{ value: TimeWindow; label: string }> = [
 
 const auth = useAuthStore()
 const canOperate = computed(() => auth.canManageBusiness)
-const tab = ref<'recommend' | 'activity' | 'history'>('activity')
+const tab = ref<'recommend' | 'activity' | 'history'>(canOperate.value ? 'recommend' : 'activity')
+const batch = useBatchRecommendation()
+const detailRow = ref<RecommendationPlanRow>()
+const detailOpen = ref(false)
+const confirmOpen = ref(false)
+const staggerMinutes = ref(15)
 
-/* ---------- 发布时间推荐（原有能力） ---------- */
-const articles = ref<Article[]>([])
-const articleId = ref<number>()
-const variants = ref<Variant[]>([])
-const accounts = ref<PlatformAccount[]>([])
-const platform = ref<Platform>('WEIBO')
-const accountId = ref<number>()
-const recommendWindow = ref<TimeWindow>('90D')
-const recommendStartDate = ref('')
-const recommendEndDate = ref('')
-const result = ref<PublishTimeRecommendation>()
-const loading = ref(false)
-const calcStep = ref(0)
-const calcPercent = ref(0)
-let calcTimer: ReturnType<typeof setInterval> | undefined
-
-const CALC_STEPS = [
-  '读取内容与平台版本',
-  '判定内容类型',
-  '加载活跃度样本与时段规则',
-  '按权重打分并选出最佳时段',
-]
-
-function stopCalcProgress(final = false) {
-  if (calcTimer) {
-    clearInterval(calcTimer)
-    calcTimer = undefined
-  }
-  if (final) {
-    calcStep.value = CALC_STEPS.length
-    calcPercent.value = 100
-  }
-}
-
-function startCalcProgress() {
-  stopCalcProgress()
-  calcStep.value = 0
-  calcPercent.value = 8
-  calcTimer = setInterval(() => {
-    if (calcStep.value < CALC_STEPS.length - 1) {
-      calcStep.value += 1
-    }
-    calcPercent.value = Math.min(92, calcPercent.value + 12 + Math.floor(Math.random() * 8))
-  }, 420)
-}
-
-const variant = computed(() => variants.value.find((x) => x.platform === platform.value))
-const platformAccounts = computed(() =>
-  accounts.value.filter((item) => item.platform === platform.value && item.id),
-)
-const confidenceLabels: Record<string, string> = { HIGH: '高', MEDIUM: '中', LOW: '低' }
-const isColdStart = computed(
-  () => !!result.value && (result.value.accountSampleCount || 0) === 0,
-)
-const option = computed(() => ({
-  grid: { left: 40, right: 18, top: 30, bottom: 30 },
-  tooltip: { trigger: 'axis' },
-  legend: { top: 0, textStyle: { fontSize: 10 } },
-  xAxis: {
-    type: 'category',
-    data: (result.value?.curve || []).map((x) => x.time),
-    axisLabel: { interval: 2 },
-  },
-  yAxis: { type: 'value', min: 0, max: 100 },
-  series: [
-    {
-      name: '公开基线',
-      type: 'line',
-      smooth: true,
-      symbol: 'none',
-      areaStyle: { color: 'rgba(0,122,255,.06)' },
-      lineStyle: { color: '#007aff', width: 2 },
-      data: (result.value?.curve || []).map((x) => x.platformPrior),
-    },
-    {
-      name: '账号历史',
-      type: 'line',
-      smooth: true,
-      symbol: 'none',
-      lineStyle: { color: '#f59e0b', width: 2, type: 'dashed' },
-      data: (result.value?.curve || []).map((x) => x.accountHistory),
-    },
-  ],
-}))
-
-async function loadArticles() {
-  const [data, accountRows] = await Promise.all([
-    workflowApi.articles({ page_size: 100 }),
-    workflowApi.platformAccounts(),
-  ])
-  articles.value = data.items
-  accounts.value = accountRows
-  articleId.value = data.items[0]?.id
-  await loadVariants()
-}
-async function loadVariants() {
-  if (!articleId.value) return
-  variants.value = await workflowApi.variants(articleId.value)
-  result.value = undefined
-}
-async function calculate() {
-  if (!articleId.value || !variant.value)
-    return ElMessage.warning('该文章还没有当前平台版本，请先生成平台版本')
-  if (recommendWindow.value === 'CUSTOM' && (!recommendStartDate.value || !recommendEndDate.value)) {
-    return ElMessage.warning('自定义时间范围需要填写开始和结束日期')
-  }
-  loading.value = true
-  result.value = undefined
-  startCalcProgress()
-  try {
-    result.value = await workflowApi.recommend({
-      article_id: articleId.value,
-      variant_id: variant.value.id,
-      platform: platform.value,
-      account_id: accountId.value,
-      window: recommendWindow.value,
-      window_start_date:
-        recommendWindow.value === 'CUSTOM' ? recommendStartDate.value : undefined,
-      window_end_date: recommendWindow.value === 'CUSTOM' ? recommendEndDate.value : undefined,
-    })
-    stopCalcProgress(true)
-    ElMessage.success('推荐时间已计算')
-  } catch (e) {
-    stopCalcProgress()
-    calcPercent.value = 0
-    calcStep.value = 0
-    ElMessage.error(getApiErrorMessage(e))
-  } finally {
-    loading.value = false
-  }
-}
-
-/* ---------- 活跃度分析 ---------- */
+/* ---------- 活跃度分析 / 历史数据（保留原能力） ---------- */
 const analysis = ref<ActivityAnalysis>()
 const analysisLoading = ref(false)
 const analysisFilter = ref<{
@@ -195,7 +61,7 @@ const analysisFilter = ref<{
 })
 const contentTypes = ref<Array<{ value: string; label: string }>>([])
 const analysisAccounts = computed(() =>
-  accounts.value.filter(
+  batch.accounts.value.filter(
     (item) =>
       item.id &&
       (!analysisFilter.value.platform || item.platform === analysisFilter.value.platform),
@@ -398,231 +264,208 @@ async function removeBatch(row: HistoryImportBatch) {
   }
 }
 
-onBeforeUnmount(() => stopCalcProgress())
+onBeforeUnmount(() => batch.stopCalcProgress())
 
 onMounted(async () => {
-  await loadArticles()
-  contentTypes.value = await workflowApi.activityContentTypes()
+  await batch.loadArticles()
+  contentTypes.value = batch.contentTypes.value
   await Promise.all([loadAnalysis(), loadBatches()])
 })
+
+function onPlatformsChange(platforms: Platform[]) {
+  batch.selectedPlatforms.value = platforms
+  batch.syncAccountDefaults()
+}
+
+function openDetail(row: RecommendationPlanRow) {
+  detailRow.value = row
+  detailOpen.value = true
+}
+
+async function confirmBatchSchedule() {
+  await batch.createBatchSchedules()
+  confirmOpen.value = false
+}
 </script>
 <template>
   <div>
     <PageHeader
       title="发布时间推荐"
-      description="活跃度分析与时间推荐中心：导入历史数据 → 统计活跃时段 → 计算推荐发布时间。"
-      ><el-button v-if="tab === 'recommend'" type="primary" :loading="loading" @click="calculate"
-        ><Gauge :size="16" class="mr-2" />计算推荐时间</el-button
-      ><el-button v-else-if="tab === 'activity'" :loading="analysisLoading" @click="loadAnalysis"
-        ><Sparkles :size="16" class="mr-2" />刷新分析</el-button
-      ><el-button v-else @click="workflowApi.downloadHistoryTemplate()"
-        ><Download :size="16" class="mr-2" />下载导入模板</el-button
-      ></PageHeader
+      description="跨平台排期中心：一次计算多平台推荐时间，确认后批量写入日历排期。"
     >
+      <el-button v-if="tab === 'activity'" :loading="analysisLoading" @click="loadAnalysis">
+        <Sparkles :size="16" class="mr-2" />刷新分析
+      </el-button>
+      <el-button v-else-if="tab === 'history'" @click="workflowApi.downloadHistoryTemplate()">
+        <Download :size="16" class="mr-2" />下载导入模板
+      </el-button>
+    </PageHeader>
     <el-tabs v-model="tab" class="recommendation-tabs">
-      <el-tab-pane v-if="canOperate" label="发布时间推荐" name="recommend" />
+      <el-tab-pane v-if="canOperate" label="跨平台排期" name="recommend" />
       <el-tab-pane label="活跃度分析" name="activity" />
       <el-tab-pane v-if="canOperate" label="历史数据" name="history" />
     </el-tabs>
 
     <template v-if="tab === 'recommend'">
-      <section class="recommendation-toolbar">
-        <label class="field-label"
-          >内容<el-select v-model="articleId" filterable class="mt-2 w-full" @change="loadVariants"
-            ><el-option
-              v-for="item in articles"
-              :key="item.id"
-              :label="item.title"
-              :value="item.id" /></el-select></label
-        ><label class="field-label"
-          >平台<el-segmented
-            v-model="platform"
-            :options="Object.entries(platformNames).map(([value, label]) => ({ value, label }))"
-            class="mt-2 w-full"
-            @change="accountId = undefined" /></label
-        ><label class="field-label"
-          >账号（可选）<el-select
-            v-model="accountId"
-            clearable
-            class="mt-2 w-full"
-            placeholder="按账号历史修正"
-            ><el-option
-              v-for="account in platformAccounts"
-              :key="account.id!"
-              :label="account.accountName"
-              :value="account.id!" /></el-select
-        ></label
-        ><label class="field-label"
-          >历史数据范围<el-select v-model="recommendWindow" class="mt-2 w-full"
-            ><el-option
-              v-for="item in timeWindowOptions"
-              :key="item.value"
-              :label="item.label"
-              :value="item.value" /></el-select></label
-        ><template v-if="recommendWindow === 'CUSTOM'"
-          ><label class="field-label"
-            >开始日期<el-date-picker
-              v-model="recommendStartDate"
-              type="date"
-              value-format="YYYY-MM-DD"
-              class="mt-2 w-full" /></label
-          ><label class="field-label"
-            >结束日期<el-date-picker
-              v-model="recommendEndDate"
-              type="date"
-              value-format="YYYY-MM-DD"
-              class="mt-2 w-full" /></label
-        ></template>
+      <RecommendationTargetForm
+        :articles="batch.articles.value"
+        :article-id="batch.articleId.value"
+        :selected-platforms="batch.selectedPlatforms.value"
+        :content-type="batch.contentType.value"
+        :content-types="batch.contentTypes.value"
+        :recommend-window="batch.recommendWindow.value"
+        :recommend-start-date="batch.recommendStartDate.value"
+        :recommend-end-date="batch.recommendEndDate.value"
+        :can-calculate="batch.canCalculate.value"
+        :calculate-hint="batch.calculateHint.value"
+        :loading="batch.loading.value"
+        :platform-options="RECOMMEND_PLATFORMS"
+        :time-window-options="timeWindowOptions"
+        :account-by-platform="batch.accountByPlatform"
+        :accounts-for="batch.accountsFor"
+        @update:article-id="batch.articleId.value = $event"
+        @update:selected-platforms="onPlatformsChange"
+        @update:content-type="batch.contentType.value = $event"
+        @update:recommend-window="batch.recommendWindow.value = $event"
+        @update:recommend-start-date="batch.recommendStartDate.value = $event"
+        @update:recommend-end-date="batch.recommendEndDate.value = $event"
+        @update:account="(platform, accountId) => (batch.accountByPlatform[platform] = accountId)"
+        @article-change="batch.loadVariants()"
+        @calculate="batch.calculateBatch()"
+      />
+
+      <section class="pipeline-switch mt-3">
+        <el-switch v-model="batch.optimizeEnabled.value" size="small" />
+        <div>
+          <strong
+            >语义联合排期（LLM 画像 + 相似历史检索 + 活跃度估计 + OR-Tools 求解 + LLM 审查）</strong
+          >
+          <span>
+            关闭后只使用 hybrid-v2 单平台时段评分；OR-Tools 或 LLM
+            不可用时系统也会自动回退到该结果。
+          </span>
+        </div>
       </section>
-      <template v-if="loading"
-        ><section class="recommend-progress">
-          <div class="recommend-progress-head">
-            <strong>正在计算推荐时间</strong>
-            <span>{{ calcPercent }}%</span>
-          </div>
-          <div class="recommend-progress-bar">
-            <i :style="{ width: `${calcPercent}%` }" />
-          </div>
-          <ol>
-            <li
-              v-for="(step, index) in CALC_STEPS"
-              :key="step"
-              :class="{
-                done: index < calcStep || calcPercent >= 100,
-                current: index === calcStep && calcPercent < 100,
-              }"
+
+      <section v-if="batch.loading.value" class="recommend-progress mt-3">
+        <div class="recommend-progress-head">
+          <strong>正在计算跨平台推荐</strong>
+          <span>{{ batch.calcPercent.value }}%</span>
+        </div>
+        <p class="recommend-progress-note">
+          开启语义联合排期时通常需要 1～2 分钟，请勿关闭页面；完成后结果会出现在下方表格。
+        </p>
+        <div class="recommend-progress-bar">
+          <i :style="{ width: `${batch.calcPercent.value}%` }" />
+        </div>
+        <ol>
+          <li
+            v-for="(step, index) in batch.CALC_STEPS"
+            :key="step"
+            :class="{
+              done: index < batch.calcStep.value || batch.calcPercent.value >= 100,
+              current: index === batch.calcStep.value && batch.calcPercent.value < 100,
+            }"
+          >
+            <em>{{
+              index < batch.calcStep.value || batch.calcPercent.value >= 100 ? '✓' : index + 1
+            }}</em>
+            <span>{{ step }}</span>
+          </li>
+        </ol>
+      </section>
+
+      <template v-else-if="batch.planRows.value.length">
+        <ContentScheduleProfilePanel
+          v-if="batch.plan.value"
+          class="mt-3"
+          :profile="batch.plan.value.profile"
+          :profile-source="batch.plan.value.profileSource"
+          :plan="batch.plan.value"
+        />
+
+        <div v-if="batch.batchResult.value?.hasOverlap" class="overlap-banner mt-3">
+          <p>
+            多个平台推荐时间重合：
+            {{
+              batch.batchResult.value?.overlapGroups
+                .map((group) => group.map((p) => platformNames[p]).join('、'))
+                .join('；')
+            }}
+          </p>
+          <div class="overlap-actions">
+            <el-select v-model="staggerMinutes" class="!w-28" size="small">
+              <el-option label="错开 15 分钟" :value="15" />
+              <el-option label="错开 30 分钟" :value="30" />
+            </el-select>
+            <el-button size="small" @click="batch.staggerOverlaps(staggerMinutes)"
+              >一键错开</el-button
             >
-              <em>{{ index < calcStep || calcPercent >= 100 ? '✓' : index + 1 }}</em>
-              <span>{{ step }}</span>
-            </li>
-          </ol>
-        </section></template
-      >
-      <template v-else-if="result"
-        ><section class="recommendation-layout">
-          <article class="recommendation-curve">
-            <header>
-              <h2>24 小时活跃曲线</h2>
-              <span>{{
-                new Date().toLocaleDateString('zh-CN', { month: 'long', day: 'numeric' })
-              }}</span>
-            </header>
-            <ChartPanel :option="option" height="360px" />
-            <p class="curve-note">
-              {{ result.dataSource.baseline }} · {{ result.dataSource.accountHistory }} ·
-              {{ result.dataSufficiency.message }}
-              <template v-if="result.window">
-                · 分析范围：{{ result.window.label }}
-                <template v-if="result.window.startDate"
-                  >（{{ result.window.startDate }} ~ {{ result.window.endDate }}）</template
-                >
-              </template>
-            </p>
-          </article>
-          <aside class="recommendation-result">
-            <p>最佳时间</p>
-            <div class="best-time">
-              <span class="icon-tile"><Clock3 :size="21" /></span>
-              <div>
-                <strong>
-                  {{
-                    new Date(result.recommendedAt).toLocaleString('zh-CN', {
-                      month: '2-digit',
-                      day: '2-digit',
-                      hour: '2-digit',
-                      minute: '2-digit',
-                    })
-                  }}
-                </strong>
-                <span
-                  >推荐得分 {{ result.score }} · 置信度
-                  {{ confidenceLabels[result.confidence] || result.confidence }} ·
-                  {{ result.contentTypeName }}</span
-                >
-              </div>
-            </div>
-            <div v-if="isColdStart" class="cold-start-card">
-              <p>
-                当前是<strong>冷启动推荐</strong>：账号历史为 0，公开导入样本也为 0。今晚
-                {{
-                  new Date(result.recommendedAt).toLocaleTimeString('zh-CN', {
-                    hour: '2-digit',
-                    minute: '2-digit',
-                  })
-                }}
-                主要依据
-                <strong>平台人工时段规则</strong>（{{ result.dataSource.priorRuleCount }} 条）+
-                内容类型 + 读者作息，不是根据你账号的真实历史算出来的。
-              </p>
-              <p>要提高可信度：切到「历史数据」导入该平台账号历史，或把时间范围改为「全部时间」。</p>
-            </div>
-            <p v-if="result.narrative" class="advisor-narrative">
-              <Sparkles :size="14" />{{ result.narrative }}
-              <small>{{ result.narrativeProvider === 'LLM' ? '大模型整理' : '规则生成' }}</small>
-            </p>
-            <div v-if="result.warnings.length" class="advisor-warnings">
-              <p v-for="item in result.warnings" :key="item">
-                <TriangleAlert :size="13" />{{ item }}
-              </p>
-            </div>
-            <div v-if="result.window && !result.window.sufficient" class="advisor-warnings">
-              <p><TriangleAlert :size="13" />{{ result.window.message }}</p>
-            </div>
-            <div class="recommendation-reasons">
-              <h3>推荐理由</h3>
-              <div v-for="reason in result.reasons" :key="reason.type" class="reason-card">
-                <Lightbulb :size="16" />
-                <div>
-                  <p>{{ reason.description }}</p>
-                  <small>贡献 {{ reason.contribution }} 分</small>
-                </div>
-              </div>
-            </div>
-            <div class="alternative-times">
-              <p>备选时间</p>
-              <div>
-                <span
-                  v-for="item in result.alternatives"
-                  :key="item.recommendedAt"
-                  class="meta-chip"
-                  >{{
-                    new Date(item.recommendedAt).toLocaleString('zh-CN', {
-                      month: '2-digit',
-                      day: '2-digit',
-                      hour: '2-digit',
-                      minute: '2-digit',
-                    })
-                  }}
-                  · {{ item.score }}</span
-                >
-              </div>
-            </div>
-            <div class="alternative-times">
-              <p>样本与来源</p>
-              <div>
-                <span class="meta-chip">账号历史 {{ result.accountSampleCount }} 条</span>
-                <span class="meta-chip">公开导入样本 {{ result.baselineSampleCount }} 条</span>
-                <span class="meta-chip"
-                  >人工时段规则 {{ result.dataSource.priorRuleCount }} 条</span
-                >
-                <span
-                  v-for="item in result.dataSource.sourceTypes"
-                  :key="item.sourceType"
-                  class="meta-chip"
-                  >{{ item.label }} · {{ item.count }}</span
-                >
-              </div>
-              <p v-if="isColdStart" class="source-hint">
-                「公开导入样本 0」不等于没有依据：曲线和得分仍可来自人工维护的平台时段规则。
-              </p>
-            </div>
-          </aside>
-        </section></template
-      >
-      <div v-else class="empty-state recommendation-empty">
-        <CalendarPlus :size="24" />
-        <p>选择内容，计算发布时间</p>
-      </div>
+          </div>
+        </div>
+
+        <RecommendationResultTable
+          class="mt-3"
+          :rows="batch.planRows.value"
+          :confidence-labels="batch.confidenceLabels"
+          @best="batch.applyBestTime"
+          @alternative="batch.applyAlternative"
+          @custom="batch.applyCustomTime"
+          @skip="batch.toggleSkip"
+          @lock="batch.toggleLock"
+          @detail="openDetail"
+        />
+
+        <div class="batch-actions mt-3">
+          <el-button
+            type="primary"
+            :disabled="!batch.canSchedule.value"
+            @click="confirmOpen = true"
+          >
+            一键生成跨平台排期
+          </el-button>
+          <span v-if="!batch.canSchedule.value" class="form-hint"
+            >请至少保留一个平台并确认排期时间</span
+          >
+        </div>
+      </template>
+
+      <section v-else-if="batch.lastError.value" class="calc-error mt-3">
+        <TriangleAlert :size="18" />
+        <div>
+          <strong>计算未产出结果</strong>
+          <p>{{ batch.lastError.value }}</p>
+          <p class="calc-error-hint">
+            开启语义联合排期时通常需要 1～2 分钟（含 LLM 与 OR-Tools）。也可先关闭上方开关，只用
+            hybrid-v2 快速出结果。
+          </p>
+        </div>
+        <el-button type="primary" @click="batch.calculateBatch()">重新计算</el-button>
+      </section>
+
+      <section v-else class="guide-steps mt-3">
+        <h3>三步完成跨平台排期</h3>
+        <ol>
+          <li><strong>1. 选择内容</strong><span>从内容库挑选待排期文章</span></li>
+          <li><strong>2. 选择平台和账号</strong><span>多选目标平台，并为每个平台指定账号</span></li>
+          <li>
+            <strong>3. 计算推荐并生成排期</strong
+            ><span>结果会出现在下方表格；点「详情」可看画像、相似历史与调整原因</span>
+          </li>
+        </ol>
+      </section>
+
+      <RecommendationDetailDrawer
+        v-model="detailOpen"
+        :row="detailRow"
+        :confidence-labels="batch.confidenceLabels"
+      />
+      <BatchScheduleConfirm
+        v-model="confirmOpen"
+        :rows="batch.activePlanRows.value"
+        :scheduling="batch.scheduling.value"
+        @confirm="confirmBatchSchedule"
+      />
     </template>
 
     <template v-else-if="tab === 'activity'">
@@ -671,10 +514,12 @@ onMounted(async () => {
             ><el-option label="全部数据" value="ALL" /><el-option
               label="仅账号历史"
               value="ACCOUNT" /><el-option label="仅公开基线" value="BASELINE"
-          /></el-select>
-        </label
+          /></el-select> </label
         ><label class="field-label"
-          >时间范围<el-select v-model="analysisFilter.window" class="mt-2 w-full" @change="loadAnalysis"
+          >时间范围<el-select
+            v-model="analysisFilter.window"
+            class="mt-2 w-full"
+            @change="loadAnalysis"
             ><el-option
               v-for="item in timeWindowOptions"
               :key="item.value"
@@ -708,71 +553,72 @@ onMounted(async () => {
           >
         </section>
         <template v-if="analysis.sampleCount">
-        <section class="activity-metrics">
-          <article>
-            <span>样本总数</span><b>{{ analysis.sampleCount }}</b>
-          </article>
-          <article>
-            <span>账号历史</span><b>{{ analysis.accountSampleCount }}</b>
-          </article>
-          <article>
-            <span>公开基线</span><b>{{ analysis.baselineSampleCount }}</b>
-          </article>
-          <article>
-            <span>数据完整度</span><b>{{ analysis.completeness.score }}%</b>
-          </article>
-        </section>
-        <section class="activity-grid">
-          <article class="panel-card">
-            <header><h3>星期活跃度</h3></header>
-            <ChartPanel :option="weekdayOption" height="230px" />
-          </article>
-          <article class="panel-card">
-            <header><h3>24 小时活跃度</h3></header>
-            <ChartPanel :option="hourlyOption" height="230px" />
-          </article>
-        </section>
-        <section class="panel-card">
-          <header><h3>星期 × 小时分布</h3></header>
-          <ChartPanel :option="heatmapOption" height="300px" />
-        </section>
-        <section class="activity-grid">
-          <article class="panel-card">
-            <header><h3>最佳时段 Top 8</h3></header>
-            <ul class="slot-list">
-              <li v-for="item in analysis.topSlots" :key="`${item.dayOfWeek}-${item.hour}`">
-                <b>{{ item.dayName }} {{ item.time }}</b>
-                <span>得分 {{ item.score }} · 样本 {{ item.sampleCount }}</span>
-              </li>
-            </ul>
-          </article>
-          <article class="panel-card">
-            <header><h3>内容类型最佳时段</h3></header>
-            <ul class="slot-list">
-              <li v-for="item in analysis.contentTypes" :key="item.contentType">
-                <b>{{ item.contentTypeName }}</b>
-                <span>
-                  {{
-                    item.bestSlots.map((slot) => `${slot.dayName} ${slot.time}`).join(' / ') || '—'
-                  }}
-                  · 样本 {{ item.sampleCount }}
-                </span>
-              </li>
-            </ul>
-          </article>
-        </section>
-        <section class="panel-card">
-          <header><h3>数据完整度</h3></header>
-          <div class="completeness-grid">
-            <div v-for="item in analysis.completeness.fields" :key="item.field">
-              <span>{{ item.label }}</span>
-              <i><em :style="{ width: `${item.percent}%` }" /></i>
-              <b>{{ item.percent }}%</b>
+          <section class="activity-metrics">
+            <article>
+              <span>样本总数</span><b>{{ analysis.sampleCount }}</b>
+            </article>
+            <article>
+              <span>账号历史</span><b>{{ analysis.accountSampleCount }}</b>
+            </article>
+            <article>
+              <span>公开基线</span><b>{{ analysis.baselineSampleCount }}</b>
+            </article>
+            <article>
+              <span>数据完整度</span><b>{{ analysis.completeness.score }}%</b>
+            </article>
+          </section>
+          <section class="activity-grid">
+            <article class="panel-card">
+              <header><h3>星期活跃度</h3></header>
+              <ChartPanel :option="weekdayOption" height="230px" />
+            </article>
+            <article class="panel-card">
+              <header><h3>24 小时活跃度</h3></header>
+              <ChartPanel :option="hourlyOption" height="230px" />
+            </article>
+          </section>
+          <section class="panel-card">
+            <header><h3>星期 × 小时分布</h3></header>
+            <ChartPanel :option="heatmapOption" height="300px" />
+          </section>
+          <section class="activity-grid">
+            <article class="panel-card">
+              <header><h3>最佳时段 Top 8</h3></header>
+              <ul class="slot-list">
+                <li v-for="item in analysis.topSlots" :key="`${item.dayOfWeek}-${item.hour}`">
+                  <b>{{ item.dayName }} {{ item.time }}</b>
+                  <span>得分 {{ item.score }} · 样本 {{ item.sampleCount }}</span>
+                </li>
+              </ul>
+            </article>
+            <article class="panel-card">
+              <header><h3>内容类型最佳时段</h3></header>
+              <ul class="slot-list">
+                <li v-for="item in analysis.contentTypes" :key="item.contentType">
+                  <b>{{ item.contentTypeName }}</b>
+                  <span>
+                    {{
+                      item.bestSlots.map((slot) => `${slot.dayName} ${slot.time}`).join(' / ') ||
+                      '—'
+                    }}
+                    · 样本 {{ item.sampleCount }}
+                  </span>
+                </li>
+              </ul>
+            </article>
+          </section>
+          <section class="panel-card">
+            <header><h3>数据完整度</h3></header>
+            <div class="completeness-grid">
+              <div v-for="item in analysis.completeness.fields" :key="item.field">
+                <span>{{ item.label }}</span>
+                <i><em :style="{ width: `${item.percent}%` }" /></i>
+                <b>{{ item.percent }}%</b>
+              </div>
             </div>
-          </div>
-          <p class="panel-note">{{ analysis.scoreFormula }}</p>
-          <p class="panel-note">{{ analysis.notice }}</p>
-        </section>
+            <p class="panel-note">{{ analysis.scoreFormula }}</p>
+            <p class="panel-note">{{ analysis.notice }}</p>
+          </section>
         </template>
         <div v-else class="empty-state recommendation-empty">
           <Database :size="24" />
@@ -939,3 +785,116 @@ onMounted(async () => {
     </template>
   </div>
 </template>
+
+<style scoped>
+.guide-steps {
+  border: 1px dashed var(--sf-line, #e5e7eb);
+  border-radius: 10px;
+  background: #fafbfc;
+  padding: 16px 18px;
+}
+.guide-steps h3 {
+  margin: 0 0 10px;
+  font-size: 14px;
+  font-weight: 600;
+}
+.guide-steps ol {
+  margin: 0;
+  padding-left: 0;
+  list-style: none;
+  display: grid;
+  gap: 10px;
+}
+.guide-steps li strong {
+  display: block;
+  color: var(--sf-ink, #172033);
+  font-size: 13px;
+}
+.guide-steps li span {
+  color: var(--sf-muted, #667085);
+  font-size: 12px;
+}
+.pipeline-switch {
+  display: flex;
+  align-items: flex-start;
+  gap: 10px;
+  border: 1px solid var(--sf-line, #e5e7eb);
+  border-radius: 10px;
+  background: #fff;
+  padding: 10px 12px;
+}
+.pipeline-switch strong {
+  display: block;
+  color: var(--sf-ink, #172033);
+  font-size: 12px;
+  font-weight: 600;
+}
+.pipeline-switch span {
+  display: block;
+  margin-top: 2px;
+  color: var(--sf-muted, #667085);
+  font-size: 12px;
+  line-height: 1.6;
+}
+.calc-error {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  border: 1px solid #fecdca;
+  border-radius: 10px;
+  background: #fef3f2;
+  padding: 14px 16px;
+  color: #b42318;
+}
+.calc-error strong {
+  display: block;
+  font-size: 13px;
+}
+.calc-error p {
+  margin: 4px 0 0;
+  font-size: 12px;
+  line-height: 1.6;
+}
+.calc-error-hint {
+  color: #912018 !important;
+}
+.calc-error .el-button {
+  margin-left: auto;
+  flex-shrink: 0;
+}
+.recommend-progress-note {
+  margin: 0 0 10px;
+  color: var(--sf-muted, #667085);
+  font-size: 12px;
+  line-height: 1.5;
+}
+.overlap-banner {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  border: 1px solid #fedf89;
+  border-radius: 8px;
+  background: #fffaeb;
+  padding: 10px 12px;
+}
+.overlap-banner p {
+  margin: 0;
+  color: #b54708;
+  font-size: 12px;
+}
+.overlap-actions {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.batch-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.form-hint {
+  color: #b54708;
+  font-size: 12px;
+}
+</style>

@@ -21,6 +21,7 @@ from app.models.business import (
     PublishRecommendation,
     PublishSchedule,
 )
+from app.services.activity_prior_service import PLATFORM_HOUR_PEAKS, default_prior_score
 from app.services.activity_service import (
     ACCOUNT_SOURCE_TYPES,
     BASELINE_SOURCE_TYPES,
@@ -38,13 +39,7 @@ from app.services.activity_service import (
 ALGORITHM_VERSION = "hybrid-v2"
 LEGACY_ALGORITHM_VERSION = "weighted-v1"
 
-DEFAULT_PEAKS = {
-    "WEIBO": {8: 78, 12: 82, 18: 88, 20: 96, 21: 91},
-    "X": {8: 80, 12: 86, 17: 82, 20: 94, 22: 88},
-    "XIAOHONGSHU": {9: 74, 12: 80, 19: 90, 20: 98, 21: 94, 22: 86},
-    "WECHAT_OFFICIAL": {7: 83, 8: 90, 12: 76, 18: 82, 20: 88},
-    "TOUTIAO": {7: 76, 8: 82, 12: 88, 18: 92, 20: 86, 22: 78},
-}
+DEFAULT_PEAKS = PLATFORM_HOUR_PEAKS
 
 SLOT_MINUTES = (0, 30)
 # Sample count at which the account history reaches half of its maximum weight.
@@ -67,11 +62,7 @@ def prior_score(db: Session, platform: str, weekday: int, hour: int) -> float:
             ActivityPrior.enabled.is_(True),
         )
     )
-    return float(
-        value
-        if value is not None
-        else DEFAULT_PEAKS.get(platform, {}).get(hour, 42 + (hour % 6) * 3)
-    )
+    return float(value if value is not None else default_prior_score(platform, weekday, hour))
 
 
 def _slot_lookup(rows: list) -> tuple[dict[tuple[int, int], dict], float]:

@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, nextTick, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, nextTick, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 import FullCalendar from '@fullcalendar/vue3'
 import dayGridPlugin from '@fullcalendar/daygrid'
@@ -40,6 +40,7 @@ import { useAuthStore } from '@/stores/auth'
 const schedules = ref<Schedule[]>([])
 const backlog = ref<ScheduleBacklogItem[]>([])
 const route = useRoute()
+const highlightIds = ref<number[]>([])
 const auth = useAuthStore()
 const canOperate = computed(() => auth.canManageBusiness)
 const platformFilter = ref<Platform | ''>('')
@@ -139,7 +140,10 @@ const events = computed(() =>
       start: x.scheduledAt,
       backgroundColor: platformColors[x.platform],
       borderColor: platformColors[x.platform],
-      classNames: [`platform-${x.platform.toLowerCase()}`],
+      classNames: [
+        `platform-${x.platform.toLowerCase()}`,
+        ...(highlightIds.value.includes(x.id) ? ['schedule-highlight'] : []),
+      ],
       extendedProps: x,
     }
   }),
@@ -246,6 +250,10 @@ async function init() {
   articles.value = data.items
   accounts.value = accountRows
   await load()
+  highlightIds.value = String(route.query.highlight || '')
+    .split(',')
+    .map((value) => Number(value))
+    .filter(Boolean)
   const focusId = Number(route.query.schedule)
   if (focusId) await openSchedule(focusId)
   if (route.query.create === '1') {
@@ -403,6 +411,15 @@ async function create() {
   }
 }
 onMounted(init)
+watch(
+  () => route.query.highlight,
+  (value) => {
+    highlightIds.value = String(value || '')
+      .split(',')
+      .map((item) => Number(item))
+      .filter(Boolean)
+  },
+)
 onBeforeUnmount(() => backlogDraggable?.destroy())
 </script>
 <template>

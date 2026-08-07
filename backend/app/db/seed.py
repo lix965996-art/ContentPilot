@@ -19,6 +19,11 @@ from app.models.business import (
     SystemSetting,
 )
 from app.models.user import Role, User
+from app.services.activity_prior_service import (
+    SEED_SOURCE_DESCRIPTION,
+    prior_platforms,
+    prior_rules,
+)
 
 ROLE_DEFINITIONS = {
     "ADMIN": ("系统管理员", "只管理系统：平台账号、用户、大模型与全局配置；不参与内容运营"),
@@ -167,6 +172,35 @@ ARTICLE_SEEDS = [
 ]
 
 
+def seed_activity_priors(db: Session) -> None:
+    """Fill the 7x24 rule table for every supported platform, idempotently.
+
+    Rows an operator has edited keep a different ``source_description``, so they
+    are never overwritten; untouched seed rows are refreshed to the current curve
+    to let existing databases pick up prior changes without a data migration.
+    """
+    existing = {
+        (row.platform, row.day_of_week, row.hour_of_day): row
+        for row in db.scalars(select(ActivityPrior)).all()
+    }
+    for platform in prior_platforms():
+        for weekday, hour, score in prior_rules(platform):
+            row = existing.get((platform, weekday, hour))
+            if row is None:
+                db.add(
+                    ActivityPrior(
+                        platform=platform,
+                        day_of_week=weekday,
+                        hour_of_day=hour,
+                        base_score=score,
+                        source_description=SEED_SOURCE_DESCRIPTION,
+                    )
+                )
+            elif row.source_description == SEED_SOURCE_DESCRIPTION:
+                row.base_score = score
+    db.commit()
+
+
 def seed_demo_business_data(db: Session, roles: dict[str, Role]) -> None:
     operator = db.scalar(select(User).where(User.username == "operator"))
     if not operator:
@@ -245,25 +279,7 @@ def seed_demo_business_data(db: Session, roles: dict[str, Role]) -> None:
             )
     db.commit()
 
-    if (db.scalar(select(func.count()).select_from(ActivityPrior)) or 0) == 0:
-        peaks = {
-            "WEIBO": {8: 78, 12: 82, 18: 88, 20: 96, 21: 91},
-            "XIAOHONGSHU": {9: 74, 12: 80, 19: 90, 20: 98, 21: 94, 22: 86},
-            "WECHAT_OFFICIAL": {7: 83, 8: 90, 12: 76, 18: 82, 20: 88},
-        }
-        # 48 half-hour business slots represented as 24 hourly rules for each platform.
-        for platform in peaks:
-            for hour in range(24):
-                db.add(
-                    ActivityPrior(
-                        platform=platform,
-                        day_of_week=0,
-                        hour_of_day=hour,
-                        base_score=peaks[platform].get(hour, 42 + (hour % 6) * 3),
-                        source_description="公开活跃时段经验规则（SIMULATED）",
-                    )
-                )
-        db.commit()
+    seed_activity_priors(db)
 
     variants = db.scalars(select(ContentVariant).order_by(ContentVariant.id).limit(20)).all()
     accounts = {row.platform: row for row in db.scalars(select(PlatformAccount)).all()}

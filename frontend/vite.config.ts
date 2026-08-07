@@ -20,6 +20,9 @@ export default defineConfig(({ mode }) => {
         '/api': {
           target: env.CONTENTPILOT_API_TARGET || 'http://127.0.0.1:8000',
           changeOrigin: true,
+          // Semantic batch recommend (LLM + FAISS + OR-Tools) regularly takes 60–120s.
+          timeout: 180_000,
+          proxyTimeout: 180_000,
         },
       },
     },

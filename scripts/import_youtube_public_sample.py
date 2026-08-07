@@ -47,9 +47,15 @@ SOURCE_FILES = (
     },
 )
 
+DESCRIPTOR_COLUMN = "content_descriptor"
+
 YOUTUBE_MAPPING = {
     "account_id": "video_id",
     "content_type": "category_term",
+    # The dataset ships no titles, so the semantic text is derived from the
+    # columns that actually describe the content (see build_descriptor).
+    "tags": "category_term",
+    "summary": DESCRIPTOR_COLUMN,
     "publish_time": "publishedAt",
     "views": "viewCount",
     "likes": "likeCount",
@@ -58,6 +64,58 @@ YOUTUBE_MAPPING = {
     "followers": "numSubscriber",
     "favorites": "favoriteCount",
 }
+
+# Duration bands in seconds, paired with the reading/watching scene they imply.
+DURATION_BANDS = (
+    (90, "极短视频 快速浏览 short clip quick browse"),
+    (360, "短视频 碎片时间 short form casual"),
+    (900, "中等长度 通勤观看 mid length commute"),
+    (2400, "长视频 专注观看 long form focused"),
+)
+LONGEST_BAND = "超长视频 深度观看 extended deep watch"
+
+SENTIMENT_BANDS = (
+    (-0.3, "负面情绪 争议讨论 negative controversial"),
+    (0.3, "中性叙述 信息为主 neutral informational"),
+)
+POSITIVE_BAND = "正面情绪 轻松愉快 positive upbeat"
+
+
+def _to_float(value: object) -> float | None:
+    try:
+        return float(str(value).strip())
+    except (TypeError, ValueError):
+        return None
+
+
+def build_descriptor(record: dict) -> str:
+    """Derive a short content descriptor from the dataset's own columns.
+
+    The YouTube sample has no title or description, only a category plus
+    measured attributes. Rather than leave every row in a category with an
+    identical vector, the descriptor folds in watching scene (duration) and
+    comment sentiment, both of which are real columns in the source file.
+    """
+    parts = [str(record.get("category_term") or "").strip()]
+
+    duration = _to_float(record.get("duration"))
+    if duration is not None:
+        parts.append(
+            next(
+                (label for limit, label in DURATION_BANDS if duration <= limit),
+                LONGEST_BAND,
+            )
+        )
+
+    sentiment = _to_float(record.get("compound"))
+    if sentiment is not None:
+        parts.append(
+            next(
+                (label for limit, label in SENTIMENT_BANDS if sentiment <= limit),
+                POSITIVE_BAND,
+            )
+        )
+    return " ".join(part for part in parts if part)
 
 EXPERIMENT_NAME = "公开样本发布时间历史回测实验"
 
@@ -70,6 +128,9 @@ def count_csv_rows(path: Path) -> int:
 def import_file(db, path: Path, source_note: str, operator_id: int | None) -> dict:
     raw = path.read_bytes()
     headers, records = read_table(raw, path.name)
+    for record in records:
+        record[DESCRIPTOR_COLUMN] = build_descriptor(record)
+    headers = [*headers, DESCRIPTOR_COLUMN]
     batch = commit_import(
         db,
         filename=path.name,

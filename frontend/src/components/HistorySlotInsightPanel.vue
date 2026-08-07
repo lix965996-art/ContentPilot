@@ -85,9 +85,7 @@ const primaryRecommendation = computed(() => {
 })
 
 const alternativeSlots = computed(() =>
-  (props.analysis?.topSlots || [])
-    .slice(1, 4)
-    .map((item, index) => toRankedSlot(item, index + 2)),
+  (props.analysis?.topSlots || []).slice(1, 4).map((item, index) => toRankedSlot(item, index + 2)),
 )
 
 const accountShare = computed(() => {
@@ -230,7 +228,7 @@ const hourlyBarOption = computed(() => {
   const { rows, topHours } = dayHourRows.value
   const slot = activeSlot.value
   const highlightHour =
-    slot && slot.dayOfWeek === selectedDayOfWeek.value ? slot.hour : topHours[0] ?? -1
+    slot && slot.dayOfWeek === selectedDayOfWeek.value ? slot.hour : (topHours[0] ?? -1)
 
   return {
     grid: { left: 40, right: 8, top: 28, bottom: 24 },
@@ -512,7 +510,9 @@ watch(
   font-weight: 500;
   padding: 10px 0;
   cursor: pointer;
-  transition: background 0.15s ease, color 0.15s ease;
+  transition:
+    background 0.15s ease,
+    color 0.15s ease;
 }
 
 .slot-weekdays button:hover {

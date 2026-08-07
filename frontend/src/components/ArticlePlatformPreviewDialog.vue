@@ -113,8 +113,9 @@ const previewHtml = computed(() => buildPreviewHtml(draft.value.content_text))
 const weiboPreviewTitle = computed(() =>
   buildWeiboPreviewTitle(draft.value.title, draft.value.content_text),
 )
-const weiboStatusLength = computed(() =>
-  buildWeiboPreviewText(draft.value.title, draft.value.content_text, draft.value.hashtags).length,
+const weiboStatusLength = computed(
+  () =>
+    buildWeiboPreviewText(draft.value.title, draft.value.content_text, draft.value.hashtags).length,
 )
 const xStatusLength = computed(() => {
   const topics = draft.value.hashtags
@@ -122,9 +123,7 @@ const xStatusLength = computed(() => {
     .filter(Boolean)
     .map((topic) => `#${topic}`)
     .join(' ')
-  return xWeightedLength(
-    [draft.value.content_text.trim(), topics].filter(Boolean).join('\n\n'),
-  )
+  return xWeightedLength([draft.value.content_text.trim(), topics].filter(Boolean).join('\n\n'))
 })
 
 function accountLabel(platform: Platform) {
@@ -218,7 +217,8 @@ watch(
 )
 
 watch(
-  () => [activePlatform.value, currentVariant.value?.id, currentVariant.value?.contentText] as const,
+  () =>
+    [activePlatform.value, currentVariant.value?.id, currentVariant.value?.contentText] as const,
   () => void refreshWechatPreview(),
 )
 </script>

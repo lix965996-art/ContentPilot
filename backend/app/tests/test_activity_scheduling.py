@@ -60,9 +60,7 @@ def upload(client: TestClient, auth: dict, path: str, payload: bytes, **form: st
     )
 
 
-def test_history_import_preview_validates_and_deduplicates(
-    client: TestClient, login_as
-) -> None:
+def test_history_import_preview_validates_and_deduplicates(client: TestClient, login_as) -> None:
     auth = headers(login_as("operator", "Operator@123456")["access_token"])
     payload = build_history_csv(platform="X", account="preview-account")
     broken = payload + b"X,preview-account,NEWS,not-a-date,1,1,1,1,1,1,1,ACCOUNT_HISTORY\n"
@@ -255,3 +253,146 @@ def test_viewer_cannot_import_history(client: TestClient, login_as) -> None:
     auth = headers(login_as("viewer", "Viewer@123456")["access_token"])
     response = upload(client, auth, "/api/activity/history/import", build_history_csv())
     assert response.status_code == 403
+
+
+def test_batch_recommendation_and_schedule(client: TestClient, login_as) -> None:
+    auth = headers(login_as("operator", "Operator@123456")["access_token"])
+    admin_auth = headers(login_as("admin", "Admin@123456")["access_token"])
+    toutiao = client.put(
+        "/api/platform-accounts/TOUTIAO",
+        headers=admin_auth,
+        json={
+            "account_name": "批量排期头条号",
+            "auth_type": "QR_LOGIN",
+            "publish_mode": "BROWSER_PUBLISH",
+        },
+    )
+    assert toutiao.status_code == 200, toutiao.text
+    for platform in ("WEIBO", "XIAOHONGSHU", "WECHAT_OFFICIAL", "TOUTIAO"):
+        upload(
+            client,
+            auth,
+            "/api/activity/history/import",
+            build_history_csv(platform=platform, account=f"{platform.lower()}-batch"),
+        )
+
+    accounts = {
+        row["platform"]: row["id"]
+        for row in client.get("/api/platform-accounts", headers=auth).json()["data"]
+        if row.get("id")
+    }
+    assert "TOUTIAO" in accounts
+    article = client.post(
+        "/api/articles",
+        headers=auth,
+        json={
+            "title": "跨平台批量推荐排期",
+            "source_text": "这是一篇用于验证跨平台批量推荐与批量排期链路的原创文章，内容足够长。",
+            "keywords": ["排期"],
+        },
+    ).json()["data"]
+    task = client.post(
+        "/api/generation/content",
+        headers=auth,
+        json={
+            "article_id": article["id"],
+            "platforms": ["WEIBO", "XIAOHONGSHU", "WECHAT_OFFICIAL", "TOUTIAO"],
+        },
+    ).json()["data"]
+    task_variants = client.get(f"/api/generation/tasks/{task['taskId']}", headers=auth).json()[
+        "data"
+    ]["variants"]
+    variant_by_platform = {item["platform"]: item for item in task_variants}
+
+    batch = client.post(
+        "/api/recommendations/publish-time/batch",
+        headers=auth,
+        json={
+            "article_id": article["id"],
+            "window": "90D",
+            "targets": [
+                {
+                    "platform": platform,
+                    "account_id": accounts[platform],
+                    "variant_id": variant_by_platform[platform]["id"],
+                }
+                for platform in ("WEIBO", "XIAOHONGSHU", "WECHAT_OFFICIAL", "TOUTIAO")
+            ],
+        },
+    )
+    assert batch.status_code == 200
+    batch_data = batch.json()["data"]
+    assert batch_data["successCount"] == 4
+    assert batch_data["failureCount"] == 0
+    assert len(batch_data["items"]) == 4
+    for item in batch_data["items"]:
+        assert item["success"] is True
+        assert item["data"]["recommendedAt"]
+        assert len(item["data"]["alternatives"]) == 2
+
+    # Batch planning defers live OAuth/login checks; use each platform's real publish mode.
+    mode_by_platform = {
+        "WEIBO": "REAL_API",
+        "XIAOHONGSHU": "MANUAL_CONFIRM",
+        "WECHAT_OFFICIAL": "DRAFT_ONLY",
+        "TOUTIAO": "BROWSER_PUBLISH",
+    }
+    schedule_batch = client.post(
+        "/api/schedules/batch",
+        headers=auth,
+        json={
+            "article_id": article["id"],
+            "idempotency_key": f"batch-test-{article['id']}",
+            "items": [
+                {
+                    "platform": item["platform"],
+                    "variant_id": variant_by_platform[item["platform"]]["id"],
+                    "account_id": accounts[item["platform"]],
+                    "scheduled_at": item["data"]["recommendedAt"],
+                    "recommended_at": item["data"]["recommendedAt"],
+                    "recommendation_id": item["data"]["id"],
+                    "time_source": "RECOMMENDED",
+                    "publish_mode": mode_by_platform[item["platform"]],
+                }
+                for item in batch_data["items"]
+            ],
+        },
+    )
+    assert schedule_batch.status_code == 200
+    schedule_data = schedule_batch.json()["data"]
+    assert schedule_data["successCount"] == 4, schedule_data
+    assert len(schedule_data["createdScheduleIds"]) == 4
+    assert all(item["success"] for item in schedule_data["items"])
+
+
+def test_activity_prior_covers_every_weekday_and_hour(client: TestClient, login_as) -> None:
+    """The rule table must be a real 7x24 grid, not one weekday copied around."""
+    auth = headers(login_as("admin", "Admin@123456")["access_token"])
+    rows = client.get("/api/activity/platform-priors?platform=WEIBO", headers=auth)
+    assert rows.status_code == 200, rows.text
+    slots = {(row["dayOfWeek"], row["hourOfDay"]) for row in rows.json()["data"]}
+    assert slots == {(weekday, hour) for weekday in range(7) for hour in range(24)}
+
+
+def test_activity_prior_differs_across_the_week() -> None:
+    from app.services.activity_prior_service import default_prior_score
+
+    # Lifestyle discovery peaks at the weekend, work-hour reading collapses.
+    assert default_prior_score("XIAOHONGSHU", 5, 20) > default_prior_score("XIAOHONGSHU", 0, 20)
+    assert default_prior_score("WECHAT_OFFICIAL", 5, 8) < default_prior_score(
+        "WECHAT_OFFICIAL", 0, 8
+    )
+    # The weekday commute peak shifts an hour later once nobody commutes.
+    assert default_prior_score("WECHAT_OFFICIAL", 5, 9) > default_prior_score(
+        "WECHAT_OFFICIAL", 5, 7
+    )
+
+
+def test_off_peak_prior_follows_a_diurnal_curve() -> None:
+    """Hours without a named peak still have to rank sensibly against each other."""
+    from app.services.activity_prior_service import default_prior_score
+
+    deep_night = default_prior_score("WEIBO", 2, 3)
+    mid_afternoon = default_prior_score("WEIBO", 2, 15)
+    early_evening = default_prior_score("WEIBO", 2, 19)
+    assert deep_night < mid_afternoon < early_evening

@@ -29,6 +29,10 @@ from app.services.analytics_service import (
     summarize,
 )
 from app.services.audit_service import record_audit
+from app.services.engagement_feedback_service import (
+    sync_published_feedback,
+    sync_schedule_feedback,
+)
 from app.services.recommendation_service import explain_slot
 
 router = APIRouter(tags=["数据复盘"])
@@ -105,6 +109,9 @@ def manual(
     record_audit(
         db, request, user, "CREATE", "ANALYTICS", "METRIC", row.id, {"source": row.data_source}
     )
+    # Close the loop immediately: a measured publish becomes evidence for the
+    # next recommendation without any extra operator step.
+    feedback = sync_schedule_feedback(db, row.schedule_id)
     db.commit()
     return success_response(
         request,
@@ -112,6 +119,7 @@ def manual(
             "id": row.id,
             "engagementTotal": row.engagement_total,
             "engagementRate": row.engagement_rate,
+            "feedbackHistoryId": feedback.id if feedback else None,
         },
         "互动数据已保存",
     )
@@ -145,6 +153,7 @@ async def import_metrics(
     if missing:
         raise AppException(40044, "导入字段不完整", 422, {"missingFields": missing})
     success, errors = 0, []
+    touched_schedules: set[int] = set()
     for index, item in enumerate(records, start=2):
         try:
             basis = str(item.get("metric_basis") or DEFAULT_METRIC_BASIS).upper()
@@ -167,9 +176,11 @@ async def import_metrics(
             with db.begin_nested():
                 db.add(_save_metric(db, payload))
                 db.flush()
+            touched_schedules.add(payload.schedule_id)
             success += 1
         except Exception as exc:
             errors.append({"row": index, "message": str(exc)[:200]})
+    fed_back = sum(1 for item in touched_schedules if sync_schedule_feedback(db, item) is not None)
     record_audit(
         db,
         request,
@@ -181,9 +192,27 @@ async def import_metrics(
     db.commit()
     return success_response(
         request,
-        {"successCount": success, "errorCount": len(errors), "errors": errors},
+        {
+            "successCount": success,
+            "errorCount": len(errors),
+            "errors": errors,
+            "feedbackRowCount": fed_back,
+        },
         "数据导入完成",
     )
+
+
+@router.post("/analytics/feedback/sync")
+def sync_feedback(
+    request: Request,
+    db: Session = Depends(get_db),
+    user: User = Depends(require_roles("OPERATOR")),
+) -> dict:
+    """Backfill history from every published schedule that already has metrics."""
+    result = sync_published_feedback(db)
+    record_audit(db, request, user, "SYNC", "ANALYTICS", detail=result)
+    db.commit()
+    return success_response(request, result, "发布效果已回流到历史数据")
 
 
 @router.get("/analytics/overview")
