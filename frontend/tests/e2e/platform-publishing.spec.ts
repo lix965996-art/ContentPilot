@@ -119,12 +119,16 @@ test('real platform modes never report a simulated connection or publish result'
   expect(byPlatform.XIAOHONGSHU.status).toBe('MANUAL_ONLY')
   expect(byPlatform.X.status).toBe('CONNECTING')
 
-  const articlesResponse = await request.get(`${api}/articles?page_size=100`, { headers })
+  const articlesResponse = await request.get(`${api}/articles?page_size=100`, {
+    headers: operatorHeaders,
+  })
   const articles = (await articlesResponse.json()).data.items
   let articleId = 0
   let variants: Array<{ platform: string; id: number }> = []
   for (const article of articles) {
-    const response = await request.get(`${api}/articles/${article.id}/variants`, { headers })
+    const response = await request.get(`${api}/articles/${article.id}/variants`, {
+      headers: operatorHeaders,
+    })
     const rows = (await response.json()).data
     const rowPlatforms = new Set(rows.map((item: { platform: string }) => item.platform))
     if (['WEIBO', 'XIAOHONGSHU', 'WECHAT_OFFICIAL'].every((item) => rowPlatforms.has(item))) {
@@ -143,7 +147,7 @@ test('real platform modes never report a simulated connection or publish result'
     ['WECHAT_OFFICIAL', 'DRAFT_ONLY'],
   ] as const) {
     const rejected = await request.post(`${api}/schedules`, {
-      headers,
+      headers: operatorHeaders,
       data: {
         article_id: articleId,
         variant_id: variantByPlatform[platform],
@@ -160,7 +164,7 @@ test('real platform modes never report a simulated connection or publish result'
   const normalizedXhsVariant = await request.put(
     `${api}/variants/${variantByPlatform.XIAOHONGSHU}`,
     {
-      headers,
+      headers: operatorHeaders,
       data: {
         title: '小红书发布流程测试',
         content_text: '这是一篇用于验证真实发布边界的测试正文。',
@@ -171,7 +175,7 @@ test('real platform modes never report a simulated connection or publish result'
   expect(normalizedXhsVariant.ok(), await normalizedXhsVariant.text()).toBeTruthy()
 
   const cover = await request.post(`${api}/media/select`, {
-    headers,
+    headers: operatorHeaders,
     data: {
       article_id: articleId,
       variant_id: variantByPlatform.XIAOHONGSHU,
@@ -186,7 +190,7 @@ test('real platform modes never report a simulated connection or publish result'
   expect(cover.ok(), await cover.text()).toBeTruthy()
 
   const manualSchedule = await request.post(`${api}/schedules`, {
-    headers,
+    headers: operatorHeaders,
     data: {
       article_id: articleId,
       variant_id: variantByPlatform.XIAOHONGSHU,
@@ -198,11 +202,13 @@ test('real platform modes never report a simulated connection or publish result'
   })
   expect(manualSchedule.ok()).toBeTruthy()
   const scheduleId = (await manualSchedule.json()).data.id
-  const published = await request.post(`${api}/schedules/${scheduleId}/publish-now`, { headers })
+  const published = await request.post(`${api}/schedules/${scheduleId}/publish-now`, {
+    headers: operatorHeaders,
+  })
   expect(published.ok(), await published.text()).toBeTruthy()
   expect((await published.json()).data.status).toBe('WAITING_MANUAL_CONFIRM')
   const packageResponse = await request.get(`${api}/schedules/${scheduleId}/publish-package`, {
-    headers,
+    headers: operatorHeaders,
   })
   expect((await packageResponse.json()).data.creatorUrl).toContain('creator.xiaohongshu.com')
 
@@ -222,7 +228,9 @@ test('real platform modes never report a simulated connection or publish result'
   await expect(page.getByTestId('start-x-oauth')).toBeVisible()
   await expect(page.getByText(/默认安全模式/)).toBeVisible()
 
-  const deletedSchedule = await request.delete(`${api}/schedules/${scheduleId}`, { headers })
+  const deletedSchedule = await request.delete(`${api}/schedules/${scheduleId}`, {
+    headers: operatorHeaders,
+  })
   expect(deletedSchedule.ok()).toBeTruthy()
   for (const platform of ['WECHAT_OFFICIAL', 'WEIBO', 'XIAOHONGSHU', 'X']) {
     await request.delete(`${api}/platform-accounts/${platform}`, { headers })

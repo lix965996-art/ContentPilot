@@ -88,7 +88,8 @@ const router = createRouter({
           path: 'runs',
           name: 'runs',
           component: () => import('@/pages/RunCenterPage.vue'),
-          meta: { roles: ['OPERATOR'], title: '运行中心' },
+          // 页面内“查看技术详情（仅管理员）”依赖 ADMIN 可直达本页排障
+          meta: { roles: ['ADMIN', 'OPERATOR'], title: '运行中心' },
         },
         {
           path: 'platform-accounts',

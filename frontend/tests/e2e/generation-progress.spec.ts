@@ -390,7 +390,9 @@ test('deep creation workbench exposes artifacts and lets the user override AI se
     },
   )
 
-  await page.goto('/studio?mode=deep')
+  // 文章列表现在按更新时间倒序，默认选中的不再一定是 1 号文章，
+  // 而本用例的 latest-deep-task mock 只针对 1 号文章，因此显式指定。
+  await page.goto('/studio?article=1&mode=deep')
   await expect(page.getByTestId('deep-creation-workbench')).toBeVisible()
   await page.getByRole('button', { name: '查看过程' }).click()
   await expect(page.getByTestId('deep-creation-workbench')).toContainText('素材研究简报')

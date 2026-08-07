@@ -8,6 +8,14 @@ async function loginAsAdmin(page: import('@playwright/test').Page) {
   await expect(page).toHaveURL('/')
 }
 
+async function loginAsOperator(page: import('@playwright/test').Page) {
+  await page.goto('/login')
+  await page.getByTestId('username-input').fill('operator')
+  await page.getByTestId('password-input').fill('Operator@123456')
+  await page.getByTestId('login-button').click()
+  await expect(page).toHaveURL('/')
+}
+
 test('WeChat account offers local QR draft mode without hiding the official API mode', async ({
   page,
 }) => {
@@ -26,7 +34,7 @@ test('WeChat account offers local QR draft mode without hiding the official API 
 })
 
 test('WeChat studio variant exposes one-click save-to-draft', async ({ page }) => {
-  await loginAsAdmin(page)
+  await loginAsOperator(page)
   await page.goto('/studio')
   await page.locator('.preview-tabs button').filter({ hasText: '公众号' }).click()
 

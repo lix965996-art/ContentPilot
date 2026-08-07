@@ -12,9 +12,9 @@ async function login(page: import('@playwright/test').Page, username: string, pa
 
 test('administrator can login and open the dashboard', async ({ page }) => {
   await login(page, 'admin', 'Admin@123456')
-  await expect(page.getByText('待处理')).toBeVisible()
-  await expect(page.getByText('最近内容')).toBeVisible()
-  await expect(page.getByText('今日排期')).toBeVisible()
+  await expect(page.getByText('平台已连接')).toBeVisible()
+  await expect(page.getByText('待处理连接')).toBeVisible()
+  await expect(page.getByText('各平台连接状态')).toBeVisible()
 })
 
 test('visitor can register an operator account and enter the workspace', async ({ page }) => {
@@ -40,10 +40,9 @@ test('operator can open the real content workflow pages', async ({ page }) => {
   await expect(page.getByRole('heading', { name: '创作' })).toBeVisible()
   await page.getByRole('link', { name: '日历' }).click()
   await expect(page.locator('.fc')).toBeVisible()
-  await page.getByRole('link', { name: '平台账号' }).click()
-  await expect(page.getByText(/当前为运营者只读视图/)).toBeVisible()
-  await expect(page.getByRole('button', { name: /编辑配置/ })).toHaveCount(0)
-  await expect(page.getByRole('button', { name: /退出登录/ })).toHaveCount(0)
+  await expect(page.getByRole('link', { name: '平台账号' })).toHaveCount(0)
+  await page.goto('/platform-accounts')
+  await expect(page.getByText('当前账号无权访问')).toBeVisible()
 })
 
 test('operator is denied by the administrator API', async ({ request }) => {
@@ -63,14 +62,14 @@ test('viewer only sees navigation entries allowed by RBAC', async ({ page }) => 
 
   await expect(page.getByRole('link', { name: '工作台' })).toBeVisible()
   await expect(page.getByRole('link', { name: '内容库' })).toBeVisible()
+  await expect(page.getByRole('link', { name: '发布时间' })).toBeVisible()
   await expect(page.getByRole('link', { name: '日历' })).toBeVisible()
   await expect(page.getByRole('link', { name: '数据' })).toBeVisible()
+  await expect(page.getByRole('link', { name: '对比验证' })).toBeVisible()
 
   await expect(page.getByRole('link', { name: '创作' })).toHaveCount(0)
   await expect(page.getByRole('link', { name: '媒体' })).toHaveCount(0)
-  await expect(page.getByRole('link', { name: '发布时间' })).toHaveCount(0)
-  await expect(page.getByRole('link', { name: '发布' })).toHaveCount(0)
-  await expect(page.getByRole('link', { name: '实验' })).toHaveCount(0)
+  await expect(page.getByRole('link', { name: '发布', exact: true })).toHaveCount(0)
   await expect(page.getByRole('link', { name: '设置' })).toHaveCount(0)
   await expect(page.getByRole('button', { name: /新建内容/ })).toHaveCount(0)
 

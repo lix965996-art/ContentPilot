@@ -115,7 +115,7 @@ test('viewer sees read-only actions instead of operations that return 403', asyn
   await page.goto('/articles')
   await page.locator('.content-summary').first().click()
   const articleDialog = page.getByRole('dialog')
-  await expect(articleDialog.getByText('查看原文', { exact: true })).toBeVisible()
+  await expect(articleDialog.getByText(/平台预览/)).toBeVisible()
   await expect(articleDialog.getByRole('button', { name: '保存内容' })).toHaveCount(0)
   await articleDialog.getByRole('button', { name: '关闭', exact: true }).click()
 
