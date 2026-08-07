@@ -13,9 +13,10 @@ from __future__ import annotations
 import asyncio
 import base64
 import os
+from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Coroutine
+from typing import Any
 
 from playwright.async_api import BrowserContext, Page, Playwright, async_playwright
 
@@ -227,12 +228,17 @@ class BrowserSessionManager:
                     )
                     await session.page.wait_for_timeout(1_500)
                     image = await self._qr_data_url(session.page)
+                if image:
+                    message = f"请使用{self._platform_label}管理员或运营者扫码，并在手机端确认登录"
+                else:
+                    message = (
+                        f"{self._platform_label}登录页已打开，但没有识别到二维码；"
+                        "页面可能已更新，请重试。"
+                    )
                 return {
                     "connected": False,
                     "image_data_url": image,
-                    "message": f"请使用{self._platform_label}管理员或运营者扫码，并在手机端确认登录"
-                    if image
-                    else f"{self._platform_label}登录页已打开，但没有识别到二维码；页面可能已更新，请重试。",
+                    "message": message,
                 }
             except Exception as exc:
                 return {
@@ -266,9 +272,7 @@ class BrowserSessionManager:
                 logged = await self._logged_in(session.page)
                 name = await self._account_name(session.page) if logged else ""
                 await self._close(session)
-                return logged, name or (
-                    f"{self._platform_label}账号" if logged else "需要扫码登录"
-                )
+                return logged, name or (f"{self._platform_label}账号" if logged else "需要扫码登录")
             except Exception as exc:
                 return False, f"无法检测{self._platform_label}本机登录：{str(exc)[:300]}"
 

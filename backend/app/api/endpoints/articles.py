@@ -116,8 +116,7 @@ def list_articles(
         request,
         {
             "items": [
-                _article_data(article, count, cover_map.get(article.id))
-                for article, count in rows
+                _article_data(article, count, cover_map.get(article.id)) for article, count in rows
             ],
             "total": total,
             "page": page,
@@ -423,9 +422,7 @@ async def _save_variant_to_draft(
     if not account:
         raise AppException(40411, account_missing_message, 404)
 
-    publish_mode = (
-        publish_mode_resolver(account) if publish_mode_resolver else "BROWSER_DRAFT"
-    )
+    publish_mode = publish_mode_resolver(account) if publish_mode_resolver else "BROWSER_DRAFT"
     if pre_publish:
         pre_publish(variant, account)
 

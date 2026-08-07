@@ -22,9 +22,7 @@ def _reconcile_stale_tasks() -> None:
     """Mark generation tasks stuck in RUNNING as FAILED after a server restart."""
     with SessionLocal() as db:
         stale = (
-            db.execute(
-                select(GenerationTask).where(GenerationTask.status == "RUNNING")
-            )
+            db.execute(select(GenerationTask).where(GenerationTask.status == "RUNNING"))
             .scalars()
             .all()
         )

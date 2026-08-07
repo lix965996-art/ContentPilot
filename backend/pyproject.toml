@@ -10,5 +10,10 @@ line-length = 100
 select = ["E", "F", "I", "B", "UP"]
 ignore = ["B008"]
 
+[tool.ruff.lint.per-file-ignores]
+# prompt 模板中的长行是三引号字符串内的 LLM 示例文案（好稿/差稿对照），
+# 断行会改变实际发送给模型的 prompt 内容，故豁免行长检查。
+"app/prompts/profiles.py" = ["E501"]
+
 [tool.ruff.format]
 quote-style = "double"

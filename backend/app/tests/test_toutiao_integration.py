@@ -91,7 +91,9 @@ def test_toutiao_account_qr_login_and_safe_metadata(client, login_as, monkeypatc
         }
 
     monkeypatch.setattr(platform_accounts_endpoint, "get_login_qrcode", fake_qrcode)
-    qrcode = client.post("/api/platform-accounts/TOUTIAO/login-qrcode?refresh=true", headers=admin_auth)
+    qrcode = client.post(
+        "/api/platform-accounts/TOUTIAO/login-qrcode?refresh=true", headers=admin_auth
+    )
     assert qrcode.status_code == 200, qrcode.text
     assert qrcode.json()["data"]["imageDataUrl"].startswith("data:image/png;base64,")
     assert qrcode.json()["data"]["expiresInSeconds"] == 120

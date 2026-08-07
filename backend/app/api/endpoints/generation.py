@@ -199,7 +199,12 @@ async def _run_generation_task(task_id: str) -> None:
                             runtime=runtime,
                         )
                     return await generate_variant_data(
-                        task_db, article, platform, options, status_callback=callback, runtime=runtime
+                        task_db,
+                        article,
+                        platform,
+                        options,
+                        status_callback=callback,
+                        runtime=runtime,
                     )
                 finally:
                     task_db.close()
