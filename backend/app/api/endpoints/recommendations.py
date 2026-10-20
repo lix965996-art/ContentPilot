@@ -381,6 +381,7 @@ async def _apply_semantic_optimization(
         row.review_json = review or {}
 
         optimization_payload = {
+            "learning": (result.get("learning") or {}).get(platform),
             "pipelineVersion": result["pipelineVersion"],
             "optimizerVersion": optimization.get("optimizerVersion"),
             "solverStatus": optimization.get("solverStatus"),

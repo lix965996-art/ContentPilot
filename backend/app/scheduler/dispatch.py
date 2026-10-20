@@ -31,6 +31,42 @@ from app.services.task_dispatch_service import (
 logger = logging.getLogger(__name__)
 
 _generation_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="generation-dispatch")
+_metric_executor = ThreadPoolExecutor(max_workers=2, thread_name_prefix="metric-collection")
+
+
+def _run_metric_in_thread(task_id: str) -> None:
+    from app.services.engagement_collection_service import collect_task
+
+    with SessionLocal() as db:
+        asyncio.run(collect_task(db, task_id))
+
+
+def _dispatch_metric(db: Session, row: TaskDispatch, now: datetime) -> None:
+    if row.run_at > now:
+        return
+    from datetime import timedelta
+
+    from app.models.learning import MetricCollectionTask
+    from app.publishers.metrics import utc_now
+
+    task = db.get(MetricCollectionTask, row.task_id)
+    if task is None or task.status != "PENDING":
+        _complete(db, row, "DONE" if task else "CANCELLED")
+        return
+    row.status = "CLAIMED"
+    task.claim_expires_at = utc_now() + timedelta(minutes=5)
+    db.commit()
+    try:
+        _metric_executor.submit(_run_metric_in_thread, row.task_id)
+    except Exception:
+        row.status = "PENDING"
+        task.claim_expires_at = None
+        if _fail_attempt(db, row, "采集执行器暂不可用"):
+            task = db.get(MetricCollectionTask, row.task_id)
+            if task is not None and task.status == "PENDING":
+                task.status = "FAILED"
+                task.last_error = "DISPATCH_EXHAUSTED"
+                db.commit()
 
 
 def _complete(db: Session, row: TaskDispatch, status: str = "DONE") -> None:
@@ -159,6 +195,13 @@ def dispatch_pending() -> None:
     """Scan and dispatch pending intents. Safe to run repeatedly."""
     now = business_now()
     with SessionLocal() as db:
+        from app.services.engagement_collection_service import (
+            TASK_TYPE_METRIC,
+            recover_collection_tasks,
+        )
+
+        recover_collection_tasks(db)
+        db.commit()
         rows = db.scalars(
             select(TaskDispatch)
             .where(TaskDispatch.status == "PENDING")
@@ -171,6 +214,8 @@ def dispatch_pending() -> None:
                     _dispatch_schedule(db, row, now)
                 elif row.task_type == TASK_TYPE_GENERATION:
                     _dispatch_generation(db, row)
+                elif row.task_type == TASK_TYPE_METRIC:
+                    _dispatch_metric(db, row, now)
                 else:
                     _complete(db, row, "CANCELLED")
             except Exception as exc:  # pragma: no cover - defensive per-row isolation

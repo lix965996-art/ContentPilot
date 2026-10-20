@@ -253,7 +253,13 @@ class BlueskyPublisher(OfficialPublisher):
             )
 
     def _published(
-        self, data: dict[str, Any], did: str, rkey: str, *, replay: bool = False
+        self,
+        data: dict[str, Any],
+        did: str,
+        rkey: str,
+        *,
+        replay: bool = False,
+        published_at: str | None = None,
     ) -> PublishResult:
         uri = str(data.get("uri") or "")
         parts = uri.removeprefix("at://").split("/")
@@ -273,7 +279,12 @@ class BlueskyPublisher(OfficialPublisher):
             "PUBLISHED",
             uri,
             url,
-            detail={"real": True, "cid": str(data.get("cid") or ""), "idempotent_replay": replay},
+            detail={
+                "real": True,
+                "cid": str(data.get("cid") or ""),
+                "idempotent_replay": replay,
+                "publishedAtUTC": published_at,
+            },
         )
 
     async def _existing(
@@ -299,7 +310,9 @@ class BlueskyPublisher(OfficialPublisher):
                     "此任务已发布过不同内容，不能覆盖或重复发布",
                     action="请核对个人主页；如需发布新内容，请创建新的排期任务。",
                 )
-            return self._published(data, did, rkey, replay=True)
+            return self._published(
+                data, did, rkey, replay=True, published_at=value.get("createdAt")
+            )
         if response.status_code == 400:
             if _json(response).get("error") == "RecordNotFound":
                 return None
@@ -391,7 +404,7 @@ class BlueskyPublisher(OfficialPublisher):
                     action="请核对个人主页后重试同一任务，系统会使用同一帖子标识避免重复。",
                 )
             if response.is_success:
-                return self._published(_json(response), did, rkey)
+                return self._published(_json(response), did, rkey, published_at=record["createdAt"])
             if response.status_code >= 500 or response.status_code in {400, 409}:
                 recovered = await self._existing(did, rkey, text, embeds)
                 if recovered:
@@ -421,6 +434,51 @@ class BlueskyPublisher(OfficialPublisher):
             return {"status": "UNKNOWN", "error": self._api_failure(response).error_code}
         except (_SessionFailure, httpx.HTTPError, ValueError):
             return {"status": "UNKNOWN", "error": "STATUS_UNAVAILABLE"}
+
+    async def read_metrics(self, post_id: str):
+        from app.publishers.metrics import (
+            MetricReadResult,
+            counter,
+            parse_utc,
+            response_failure,
+        )
+
+        config = decrypt_json(self.account.credentials_encrypted)
+        owner = str(config.get("bluesky_did") or "")
+        if not owner or not post_id.startswith(f"at://{owner}/{COLLECTION}/"):
+            return MetricReadResult("FAILED", error_code="POST_IDENTITY_MISMATCH")
+        try:
+            response = await self._request(
+                "GET", "app.bsky.feed.getPosts", params={"uris": [post_id]}
+            )
+            if not response.is_success:
+                return response_failure(response)
+            posts = _json(response).get("posts", [])
+            if not isinstance(posts, list) or not posts:
+                return MetricReadResult("FAILED", http_status=404, error_code="POST_UNAVAILABLE")
+            post = posts[0]
+            if post.get("uri") != post_id or (post.get("author") or {}).get("did") != owner:
+                return MetricReadResult("FAILED", error_code="POST_IDENTITY_MISMATCH")
+            return MetricReadResult(
+                "SUCCEEDED",
+                http_status=200,
+                published_at=parse_utc((post.get("record") or {}).get("createdAt")),
+                counts={
+                    key: counter(post.get(field))
+                    for key, field in (
+                        ("likes", "likeCount"),
+                        ("replies", "replyCount"),
+                        ("reposts", "repostCount"),
+                        ("quotes", "quoteCount"),
+                    )
+                },
+            )
+        except _SessionFailure:
+            return MetricReadResult("FAILED", error_code="AUTH_REQUIRED")
+        except httpx.HTTPError:
+            return MetricReadResult("FAILED", error_code="NETWORK_ERROR", retryable=True)
+        except (ValueError, TypeError, AttributeError, IndexError):
+            return MetricReadResult("FAILED", error_code="INVALID_RESPONSE")
 
     async def disconnect(self) -> PublishResult:
         refresh_token = decrypt_secret(self.account.refresh_token_encrypted)

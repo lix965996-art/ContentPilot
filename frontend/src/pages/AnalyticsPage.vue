@@ -5,6 +5,7 @@ import { ElMessage } from 'element-plus'
 import type { UploadRequestOptions } from 'element-plus'
 import { Download, FileSpreadsheet, Plus, Upload } from 'lucide-vue-next'
 import PageHeader from '@/components/PageHeader.vue'
+import EngagementLearningPanel from '@/components/EngagementLearningPanel.vue'
 import HistorySlotInsightPanel from '@/components/HistorySlotInsightPanel.vue'
 import PublishReviewPanel from '@/components/PublishReviewPanel.vue'
 import DecisionChainPanel from '@/components/DecisionChainPanel.vue'
@@ -194,6 +195,7 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
         </el-button>
       </el-upload>
     </PageHeader>
+    <EngagementLearningPanel />
     <div class="mt-4 flex flex-wrap items-center gap-3">
       <span class="text-sm text-muted">发布数据范围</span>
       <el-select v-model="dataScope" class="!w-44" aria-label="发布数据范围" @change="load">

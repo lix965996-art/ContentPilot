@@ -1,3 +1,8 @@
+from app.models.learning import (
+    EngagementObservation,
+    MetricCollectionTask,
+    PublishedContentSnapshot,
+)
 from app.models.user import Role, User, user_roles
 
 __all__ = ["Role", "User", "user_roles"]
@@ -24,6 +29,9 @@ from app.models.business import (
 )
 
 __all__ = [
+    "EngagementObservation",
+    "MetricCollectionTask",
+    "PublishedContentSnapshot",
     "AccountActivityStat",
     "ActivityPrior",
     "AuditLog",

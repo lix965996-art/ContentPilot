@@ -25,6 +25,7 @@ from app.services import (
     activity_estimation_service,
     content_embedding_service,
     content_schedule_profile_service,
+    ml_prediction_service,
     schedule_optimization_service,
     schedule_plan_review_service,
     semantic_history_retrieval_service,
@@ -143,6 +144,7 @@ async def run_pipeline(
 
     retrieval_by_platform: dict[str, dict] = {}
     activity_by_platform: dict[str, dict] = {}
+    learning_by_platform: dict[str, dict] = {}
     candidates_by_platform: dict[str, list[schedule_optimization_service.Candidate]] = {}
     solver_targets: list[schedule_optimization_service.PlatformTarget] = []
 
@@ -194,6 +196,10 @@ async def run_pipeline(
         )
         activity_by_platform[platform] = estimate
         semantic_scores = _semantic_slot_scores(estimate, bool(similarity))
+        learned_scores, learning = ml_prediction_service.candidate_scores(
+            db, platform=platform, account_id=item.get("account_id"), variant=variant, now=now
+        )
+        learning_by_platform[platform] = learning
 
         target = schedule_optimization_service.PlatformTarget(
             platform=platform,
@@ -214,8 +220,8 @@ async def run_pipeline(
         candidates_by_platform[platform] = schedule_optimization_service.build_candidates(
             target,
             context,
-            activity_slot_score=lambda weekday, hour, _e=estimate: (
-                activity_estimation_service.slot_score(_e, weekday, hour)
+            activity_slot_score=lambda weekday, hour, _e=estimate, _ml=learned_scores: (
+                _ml.get((weekday, hour), activity_estimation_service.slot_score(_e, weekday, hour))
             ),
             semantic_slot_score=lambda weekday, hour, _s=semantic_scores: _s.get(
                 (weekday, hour), 0.0
@@ -238,6 +244,7 @@ async def run_pipeline(
             "profileSource": profile_source,
             "retrieval": retrieval_by_platform,
             "activity": activity_by_platform,
+            "learning": learning_by_platform,
             "candidates": {},
             "optimization": {
                 "solverStatus": "NO_TARGET",
@@ -312,6 +319,7 @@ async def run_pipeline(
         "profileSource": profile_source,
         "retrieval": retrieval_by_platform,
         "activity": activity_by_platform,
+        "learning": learning_by_platform,
         "candidates": {
             platform: [candidate.as_dict() for candidate in items]
             for platform, items in candidates_by_platform.items()

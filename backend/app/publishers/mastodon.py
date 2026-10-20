@@ -167,7 +167,13 @@ class MastodonPublisher(OfficialPublisher):
                 "INVALID_RECEIPT", "Mastodon 未返回有效的公开帖子回执，请先核对个人主页"
             )
         return PublishResult(
-            True, self.platform, self.mode, "PUBLISHED", status_id, url, detail={"real": True}
+            True,
+            self.platform,
+            self.mode,
+            "PUBLISHED",
+            status_id,
+            url,
+            detail={"real": True, "publishedAtUTC": data.get("created_at")},
         )
 
     async def _read_receipt(self, status_id: str, account_id: str) -> PublishResult:
@@ -395,6 +401,44 @@ class MastodonPublisher(OfficialPublisher):
             }
         except (httpx.HTTPError, ValueError, OSError):
             return {"status": "UNKNOWN", "error": "STATUS_UNAVAILABLE"}
+
+    async def read_metrics(self, post_id: str):
+        from app.publishers.metrics import (
+            MetricReadResult,
+            counter,
+            parse_utc,
+            response_failure,
+        )
+
+        config = decrypt_json(self.account.credentials_encrypted)
+        owner = str(config.get("mastodon_account_id") or "")
+        if not owner or not re.fullmatch(r"[0-9]+", post_id):
+            return MetricReadResult("FAILED", error_code="POST_IDENTITY_MISMATCH")
+        try:
+            response = await self._request("GET", f"/api/v1/statuses/{post_id}")
+            if not response.is_success:
+                return response_failure(response)
+            post = _json(response)
+            if post.get("id") != post_id or (post.get("account") or {}).get("id") != owner:
+                return MetricReadResult("FAILED", error_code="POST_IDENTITY_MISMATCH")
+            return MetricReadResult(
+                "SUCCEEDED",
+                http_status=200,
+                published_at=parse_utc(post.get("created_at")),
+                counts={
+                    key: counter(post.get(field))
+                    for key, field in (
+                        ("likes", "favourites_count"),
+                        ("replies", "replies_count"),
+                        ("reposts", "reblogs_count"),
+                        ("quotes", "quotes_count"),
+                    )
+                },
+            )
+        except httpx.HTTPError:
+            return MetricReadResult("FAILED", error_code="NETWORK_ERROR", retryable=True)
+        except (ValueError, TypeError, AttributeError, OSError):
+            return MetricReadResult("FAILED", error_code="INVALID_RESPONSE")
 
     async def disconnect(self) -> PublishResult:
         config = decrypt_json(self.account.credentials_encrypted)

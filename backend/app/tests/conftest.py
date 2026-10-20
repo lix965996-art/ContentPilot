@@ -62,6 +62,14 @@ def client(database: None) -> Generator[TestClient, None, None]:
 
 
 @pytest.fixture(autouse=True)
+def isolate_metric_background_transport(monkeypatch):
+    """Collection behavior is tested directly; generic API tests never read live social APIs."""
+    from app.scheduler import dispatch
+
+    monkeypatch.setattr(dispatch, "_run_metric_in_thread", lambda _task_id: None)
+
+
+@pytest.fixture(autouse=True)
 def intercept_llm_transport(monkeypatch):
     """Intercept the external LLM transport; product code still uses the real provider path."""
 

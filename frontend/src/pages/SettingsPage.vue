@@ -14,6 +14,7 @@ import {
   Unplug,
 } from 'lucide-vue-next'
 import PageHeader from '@/components/PageHeader.vue'
+import EngagementLearningPanel from '@/components/EngagementLearningPanel.vue'
 import StatusBadge from '@/components/StatusBadge.vue'
 import UserAvatar from '@/components/UserAvatar.vue'
 import { workflowApi } from '@/api/workflow'
@@ -170,6 +171,9 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
   <div>
     <PageHeader title="设置" />
     <el-tabs v-model="tab" class="settings-tabs">
+      <el-tab-pane label="互动学习" name="learning" lazy>
+        <EngagementLearningPanel manage-models />
+      </el-tab-pane>
       <el-tab-pane label="模型服务" name="model">
         <div class="model-service-layout">
           <section class="model-config-panel">

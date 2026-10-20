@@ -538,6 +538,7 @@ export interface CandidateSlot {
 }
 
 export interface OptimizationDetail {
+  learning?: import('@/types/learning').LearningPrediction | null
   pipelineVersion?: string
   optimizerVersion?: string
   solverStatus?: string

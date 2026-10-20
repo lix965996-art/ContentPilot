@@ -171,17 +171,45 @@ WECHATSYNC_CLI_ENABLED=false
 
 派发扫描周期由 `DISPATCH_POLL_SECONDS`（默认 15 秒）控制，单个派发意图最多尝试 `DISPATCH_MAX_ATTEMPTS`（默认 10）次。派发失败会记录在 `task_dispatch.last_error`，业务任务本身不会被删除。
 
+## 互动采集与机器学习
+
+Bluesky/Mastodon新发布成功后，后台自动采集1、24、72小时互动，只有24小时至24小时15分钟的完整观测用于同一训练目标。登录后的“数据”页可以刷新、查看失败原因和手动采集；手动采集不会发送帖子。管理员在“设置→互动学习”管理达到验证门槛的平台模型。没有自有成熟样本时维持统计推荐，并可独立运行公开研究实验。
+
+在项目根目录使用以下命令：
+
+```powershell
+# 可选训练依赖，与普通运行环境分离锁定；运行已有统计功能不需要安装。
+backend\.venv\Scripts\python.exe -m pip install -r backend/requirements-ml.lock.txt
+
+# 只读检查真实数据来源和窗口。
+backend\.venv\Scripts\python.exe scripts/audit_ml_data.py
+
+# 不需要自己的发帖数据：获取固定提交、校验SHA-256并运行公开YouTube对照实验。
+backend\.venv\Scripts\python.exe scripts/train_engagement_model.py --youtube
+
+# 将来有真实成熟观测后，按平台冻结导出；也可改为MASTODON。
+backend\.venv\Scripts\python.exe scripts/export_ml_dataset.py --platform BLUESKY
+# 使用上一步实际输出的目录，不要把占位路径直接执行。
+backend\.venv\Scripts\python.exe scripts/train_engagement_model.py --dataset var/datasets/ml/<datasetId>
+```
+
+下载与模型训练均在本机进行；出站访问沿用`OUTBOUND_HTTP_PROXY`。CSV、JSONL、模型及运行JSON统一位于被Git忽略的`var/datasets`、`var/models`、`var/reports/ml`，不会混在源码根目录。同一数据/训练版本/种子禁止覆盖已冻结的模型，重复执行会明确报已存在；需要独立复现时用`--models var/models-reproduction`指定独立输出目录。
+
+YouTube目标为观看时长比例，缺少原帖正文、账号与确切采集时点，属于回顾性研究，不是Bluesky/Mastodon24小时互动模型。该模型不可启用到两个发布平台。平台模型仍需本平台真实样本、时点可见特征、足够支持、滚动验证、独立测试优势与区间支持；管理员也不能绕过这些门槛。模型文件只接受项目生成的原生CatBoost/LightGBM格式和JSON清单，不支持上传pickle/joblib。
+
+后台采集仅调度主实例执行；数据库任务领取有五分钟租约，429按Retry-After和退避重试，最多六次；执行器提交遵循原派发上限。数据库恢复会重新武装缺失/中断任务，不自动重发帖子。观察窗口已错过会明确被排除，不能把稍后的手动读取冒充24小时数据。
+
 ## 排障与验证
 
-| 现象                        | 检查步骤                                                             |
-| --------------------------- | -------------------------------------------------------------------- |
-| 无法识别 `contentpilot.ps1` | 进入项目根，确认后缀为 `.ps1`，用 Tab 补全                           |
-| 脚本执行被禁止              | 当前 PowerShell 窗口设置 `Set-ExecutionPolicy -Scope Process Bypass` |
-| 端口占用或启动失败          | 先 `status`，再查看 `logs`；确认占用者后处理                         |
-| 数据库连接失败              | 检查 `backend/.env`、服务与凭证；按所选数据库执行迁移                |
-| 模型生成失败                | 检查服务商、模型和服务错误，按任务终态处理                           |
-| 登录或平台连接失败          | 分开检查本地会话、官方授权、权限和账号开关                           |
-| 上传图无法访问              | 检查运行目录配置与文件、`/uploads` 映射、反向代理                    |
+| 现象                        | 检查步骤                                                                                                                                                    |
+| --------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| 无法识别 `contentpilot.ps1` | 进入项目根，确认后缀为 `.ps1`，用 Tab 补全                                                                                                                  |
+| 脚本执行被禁止              | 当前 PowerShell 窗口设置 `Set-ExecutionPolicy -Scope Process Bypass`                                                                                        |
+| 端口占用或启动失败          | 先 `status`，再查看 `logs`；确认占用者后处理                                                                                                                |
+| 数据库连接失败              | 检查 `backend/.env`、服务与凭证；按所选数据库执行迁移                                                                                                       |
+| 模型生成失败                | 检查服务商、模型和服务错误，按任务终态处理                                                                                                                  |
+| 登录或平台连接失败          | 分开检查本地会话、官方授权、权限和账号开关                                                                                                                  |
+| 上传图无法访问              | 检查运行目录配置与文件、`/uploads` 映射、反向代理                                                                                                           |
 | Mastodon 连接超时           | 确认服务器网址可达；无法直连时在 `backend/.env` 设置 `OUTBOUND_HTTP_PROXY` 并重启后端；Docker 部署需填容器可达地址（如 `http://host.docker.internal:7892`） |
 
 检查入口为 `.\contentpilot.ps1 test`。浏览器测试使用隔离服务/数据，不能用现有页面截图或只断言页面宽度替代业务验证。部署与演示验收重点是实际保存内容、任务终态、错误、幂等以及重启后的状态；已知边界见 [ROADMAP](ROADMAP.md)。

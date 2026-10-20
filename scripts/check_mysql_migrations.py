@@ -16,6 +16,15 @@ def main(url: str) -> None:
     inspector = inspect(engine)
     tables = set(inspector.get_table_names())
     assert "task_dispatch" in tables, "task_dispatch table is missing"
+    assert {
+        "metric_collection_task",
+        "published_content_snapshot",
+        "engagement_observation",
+    } <= tables
+    observation_columns = {c["name"]: c for c in inspector.get_columns("engagement_observation")}
+    assert all(
+        observation_columns[name]["type"].fsp == 6 for name in ("observed_at", "published_at")
+    )
     assert {"llm_usage_entry", "llm_budget_month"} <= tables, "usage ledger tables are missing"
     assert "refresh_session" not in tables, "unexpected refresh_session table"
     variant_columns = {column["name"] for column in inspector.get_columns("content_variant")}
@@ -27,8 +36,7 @@ def main(url: str) -> None:
     with engine.connect() as connection:
         version = connection.execute(text("SELECT version_num FROM alembic_version")).scalar()
         users = [
-            row[0]
-            for row in connection.execute(text("SELECT username FROM sys_user ORDER BY id"))
+            row[0] for row in connection.execute(text("SELECT username FROM sys_user ORDER BY id"))
         ]
     print("alembic_version:", version)
     print("users:", users)

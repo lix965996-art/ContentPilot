@@ -443,6 +443,16 @@ async def execute_publish(
     ).all()
     image_urls = [asset.image_url for asset in assets]
 
+    from app.services.engagement_collection_service import (
+        capture_publication,
+        content_features,
+        freeze_attempt_features,
+    )
+
+    sent_features = freeze_attempt_features(
+        db, schedule, content_features(variant, len(image_urls), schedule, account)
+    )
+
     result: PublishResult | None = None
     log_step = "PUBLISH"
 
@@ -532,6 +542,7 @@ async def execute_publish(
 
         if result:
             _apply_result(schedule, result)
+            capture_publication(db, schedule, sent_features)
         else:
             _clear_retryable_failure(schedule)
             schedule.status = "FAILED"
@@ -622,6 +633,13 @@ def _apply_result(schedule: PublishSchedule, result: PublishResult) -> None:
     schedule.publish_package_json = publish_package
     if result.status in ("PUBLISHED", "DRAFT_CREATED", "PUBLISH_SUBMITTED"):
         schedule.actual_publish_at = business_now()
+        if result.status == "PUBLISHED" and schedule.platform in {"BLUESKY", "MASTODON"}:
+            from app.publishers.metrics import parse_utc
+            from app.services.engagement_collection_service import utc_to_business
+
+            platform_time = parse_utc((result.detail or {}).get("publishedAtUTC"))
+            if platform_time:
+                schedule.actual_publish_at = utc_to_business(platform_time)
     elif not result.success:
         schedule.retry_count += 1
     schedule.error_message = result.error_message or None

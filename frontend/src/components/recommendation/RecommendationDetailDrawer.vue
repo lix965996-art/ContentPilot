@@ -27,6 +27,16 @@ const highlightHour = computed(() => {
   return at ? new Date(at).getHours() : undefined
 })
 const activity = computed(() => recommendation.value?.activityEstimate)
+const learning = computed(() => recommendation.value?.optimization?.learning)
+const learningReasons: Record<string, string> = {
+  NO_VALIDATED_MODEL: '暂无通过评估的平台模型，使用统计推荐',
+  COLD_ACCOUNT: '该账号不在模型验证范围，使用统计推荐',
+  ACCOUNT_NOT_CONNECTED: '账号尚未连接，使用统计推荐',
+  PLATFORM_UNSUPPORTED: '该平台使用统计推荐',
+  MODEL_UNAVAILABLE: '模型不可用，已回退统计推荐',
+  INFERENCE_BUDGET_EXCEEDED: '预测耗时超过预算，已回退统计推荐',
+  MODEL_NOT_AVAILABLE_ASOF_DECISION: '模型训练时间晚于决策时间，已回退统计推荐',
+}
 const similarHistory = computed(() => recommendation.value?.similarHistory || [])
 const historyOpen = ref(false)
 
@@ -75,6 +85,30 @@ function formatTime(value: string) {
       <p v-else-if="recommendation.reasons[0]" class="detail-narrative">
         {{ recommendation.reasons[0].description }}
       </p>
+
+      <section v-if="learning" class="detail-block panel">
+        <h3>互动预测依据</h3>
+        <p v-if="learning.mode === 'MACHINE_LEARNING'">
+          平台模型 {{ learning.modelId }} · 目标：{{
+            learning.target
+          }}。预测用于候选时间评分，排期仍需满足发布约束。
+        </p>
+        <p v-else>
+          {{ learningReasons[learning.reason || ''] || '平台模型未满足启用条件，使用统计推荐' }}
+        </p>
+        <template v-if="learning.mode === 'MACHINE_LEARNING' && learning.explanations.length">
+          <p>
+            以下解释对应模型评分最高的候选时间
+            {{ learning.explanationTime }}，实际排期可能因约束调整。
+          </p>
+          <ul>
+            <li v-for="(item, index) in learning.explanations" :key="index">
+              {{ item.feature }}：{{ item.contribution > 0 ? '+' : ''
+              }}{{ item.contribution }}（对数目标贡献）
+            </li>
+          </ul>
+        </template>
+      </section>
 
       <ContentScheduleProfilePanel
         v-if="recommendation.profile"

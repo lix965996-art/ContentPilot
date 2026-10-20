@@ -28,6 +28,11 @@ jobs:
           python -m venv backend/.venv
           & backend/.venv/Scripts/python.exe -m pip install -r backend/requirements.lock.txt
           if ($LASTEXITCODE -ne 0) { throw 'Backend install failed' }
+      # Native model tests are isolated and never contact social platforms.
+      - name: Install optional learning dependencies
+        run: |
+          & backend/.venv/Scripts/python.exe -m pip install -r backend/requirements-ml.lock.txt
+          if ($LASTEXITCODE -ne 0) { throw 'Learning dependency install failed' }
       - name: Install frontend dependencies
         working-directory: frontend
         run: |

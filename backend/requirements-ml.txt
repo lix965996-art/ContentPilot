@@ -1,0 +1,5 @@
+# Optional CPU training/inference dependencies, verified with Python 3.12 and NumPy 2.5.1.
+-r requirements.txt
+catboost==1.2.10
+lightgbm==4.7.0
+scikit-learn==1.9.1
