@@ -100,5 +100,6 @@ backend\.venv\Scripts\python.exe scripts\prompt-regression.py
 - [OPERATIONS](docs/OPERATIONS.md)：配置、部署、平台连接与故障排查。
 - [ROADMAP](docs/ROADMAP.md)：已确认问题、实现顺序与验收标准。
 - [修复记录](docs/REMEDIATION_REPORT.md)：当前修复、验证结果与账号接入状态。
+- [后续改进方案](docs/IMPROVEMENT_PLAN.md)：Bluesky/Mastodon 反馈闭环、机器学习接入步骤、GitHub 参考与验收标准。
 
 项目使用 [Apache License 2.0](LICENSE)。
