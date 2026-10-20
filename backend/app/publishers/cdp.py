@@ -17,19 +17,19 @@ import os
 import re
 import time
 from dataclasses import dataclass
-from pathlib import Path
 from typing import Any
 
-from playwright.async_api import Browser, BrowserContext, async_playwright
+from playwright.async_api import BrowserContext, async_playwright
 
 from app.core.config import settings
+from app.core.paths import SESSIONS_DIR, local_media_path
 from app.publishers.base import PublishResult
 
 # ---------------------------------------------------------------------------
 # shared browser helpers
 # ---------------------------------------------------------------------------
 
-USER_DATA_ROOT = Path.home() / ".contentpilot" / "chrome-profiles"
+USER_DATA_ROOT = SESSIONS_DIR / "chrome-profiles"
 CHROME_PATH = os.environ.get("CONTENTPILOT_CHROME_PATH", "")
 CDP_ENDPOINT = os.environ.get("CONTENTPILOT_CDP_ENDPOINT", "http://127.0.0.1:9222")
 WECHAT_MP_URL = "https://mp.weixin.qq.com"
@@ -45,7 +45,7 @@ async def _get_playwright():
     return _pw_instance
 
 
-async def _launch_browser(channel: str, headless: bool) -> Browser:
+async def _launch_browser(channel: str, headless: bool) -> BrowserContext:
     """Launch a persistent Chromium with the given profile sub-directory.
 
     If CONTENTPILOT_CDP_ENDPOINT is set, connect to an already-running
@@ -56,7 +56,9 @@ async def _launch_browser(channel: str, headless: bool) -> Browser:
     cdp_endpoint = os.environ.get("CONTENTPILOT_CDP_ENDPOINT", "")
     if cdp_endpoint:
         browser = await pw.chromium.connect_over_cdp(cdp_endpoint)
-        return browser  # type: ignore[return-value]
+        # Publishers operate on a BrowserContext; reuse the logged-in context
+        # created by the externally started Chrome instead of returning Browser.
+        return browser.contexts[0] if browser.contexts else await browser.new_context()
 
     profile_dir = USER_DATA_ROOT / channel
     profile_dir.mkdir(parents=True, exist_ok=True)
@@ -69,8 +71,7 @@ async def _launch_browser(channel: str, headless: bool) -> Browser:
     }
     if CHROME_PATH:
         launch_kwargs["executable_path"] = CHROME_PATH
-    context = await pw.chromium.launch_persistent_context(str(profile_dir), **launch_kwargs)
-    return context  # type: ignore[return-value]
+    return await pw.chromium.launch_persistent_context(str(profile_dir), **launch_kwargs)
 
 
 # ---------------------------------------------------------------------------
@@ -457,8 +458,8 @@ class XiaohongshuCDPPublisher:
                 upload_btn = page.locator('input[type="file"], .upload-input input').first
                 if await upload_btn.count() > 0:
                     for img_path in images[:9]:
-                        resolved = Path(img_path)
-                        if resolved.is_file():
+                        resolved = local_media_path(img_path)
+                        if resolved is not None:
                             await upload_btn.set_input_files(str(resolved))
                             await asyncio.sleep(1)
 

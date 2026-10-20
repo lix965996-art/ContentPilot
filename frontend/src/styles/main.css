@@ -1210,6 +1210,9 @@ body,
 .platform-icon.is-x {
   background: #111827;
 }
+.platform-icon.is-bluesky {
+  background: #0085ff;
+}
 .platform-icon.is-toutiao {
   color: #f04438;
   background: #fff0ee;
@@ -2856,6 +2859,12 @@ body,
   color: var(--sf-muted);
   font-size: 11px;
   text-align: center;
+}
+.quality-summary .stale-review {
+  grid-column: 1 / -1;
+  background: #fffaeb;
+  color: #b54708;
+  text-align: left;
 }
 .version-history {
   display: grid;
@@ -5546,4 +5555,9 @@ body,
   .research-library {
     grid-template-columns: 1fr;
   }
+}
+
+.platform-icon.is-mastodon {
+  background: #6364ff;
+  color: #fff;
 }

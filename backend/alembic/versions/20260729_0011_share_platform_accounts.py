@@ -78,6 +78,8 @@ def downgrade() -> None:
     with op.batch_alter_table("platform_account") as batch_op:
         batch_op.drop_constraint("uq_platform_account_platform", type_="unique")
         batch_op.create_unique_constraint("uq_platform_account_user", ["user_id", "platform"])
-        batch_op.drop_index("ix_platform_account_updated_by")
+        # MySQL refuses to drop an index that still backs a foreign key, so the
+        # constraint must go first.
         batch_op.drop_constraint("fk_platform_account_updated_by", type_="foreignkey")
+        batch_op.drop_index("ix_platform_account_updated_by")
         batch_op.drop_column("updated_by")

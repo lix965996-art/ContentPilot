@@ -62,8 +62,8 @@ def upgrade() -> None:
         sa.Column("status", sa.String(length=30), nullable=False),
         sa.Column("archived", sa.Boolean(), nullable=False),
         sa.Column("created_by", sa.Integer(), nullable=False),
-        sa.Column("created_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
-        sa.Column("updated_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
+        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
         sa.ForeignKeyConstraint(["created_by"], ["sys_user.id"]),
         sa.PrimaryKeyConstraint("id"),
     )

@@ -1,5 +1,8 @@
 $ErrorActionPreference = 'Stop'
-$projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+. (Join-Path $PSScriptRoot 'runtime-paths.ps1')
+$paths = Get-ContentPilotPaths
+Set-ContentPilotPythonEnvironment $paths
+$projectRoot = $paths.Project
 $backend = Join-Path $projectRoot 'backend'
 $python = Join-Path $backend '.venv\Scripts\python.exe'
 $mysqlHost = if ($env:MYSQL_HOST) { $env:MYSQL_HOST } else { '127.0.0.1' }

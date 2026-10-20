@@ -3,6 +3,7 @@ from datetime import date, datetime
 from fastapi import APIRouter, Depends, Request
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import get_current_user, require_roles
 from app.core.exceptions import AppException
@@ -28,8 +29,9 @@ from app.services.activity_service import (
     normalize_content_type,
 )
 from app.services.audit_service import record_audit
+from app.services.recommendation_analysis import curve
 from app.services.recommendation_narrative import classify_with_llm, narrate
-from app.services.recommendation_service import curve, recommend, slot_evidence
+from app.services.recommendation_service import recommend, slot_evidence
 from app.services.semantic_schedule_pipeline import (
     activity_summary,
     assignment_by_platform,
@@ -81,7 +83,8 @@ async def _create_publish_recommendation(
 
     target_date = payload.target_date or date.today()
     try:
-        result = recommend(
+        result = await run_in_threadpool(
+            recommend,
             db,
             payload.platform,
             target_date,

@@ -1,4 +1,15 @@
-export type Platform = 'WEIBO' | 'XIAOHONGSHU' | 'WECHAT_OFFICIAL' | 'TOUTIAO' | 'X'
+export type Platform =
+  'WEIBO' | 'XIAOHONGSHU' | 'WECHAT_OFFICIAL' | 'TOUTIAO' | 'X' | 'BLUESKY' | 'MASTODON'
+export type MetricBasis = 'IMPRESSIONS' | 'FOLLOWERS' | 'UNKNOWN' | 'MIXED'
+export type DataScope = 'REAL' | 'SIMULATED' | 'ALL'
+
+export interface MetricRateMetadata {
+  metricBasis?: MetricBasis
+  rateAvailable?: boolean
+  rateDenominator?: number | null
+  excludedRateCount?: number
+  unknownBasisCount?: number
+}
 
 export interface Article {
   id: number
@@ -11,13 +22,14 @@ export interface Article {
   keywords: string[]
   status: string
   variantCount: number
+  platforms?: Platform[]
   coverThumbnailUrl?: string
   createdAt: string
   updatedAt: string
   variants?: Variant[]
 }
 
-export interface ArticleEngagementMetric {
+export interface ArticleEngagementMetric extends MetricRateMetadata {
   scheduleId: number
   platform: Platform
   metricDate: string
@@ -28,18 +40,18 @@ export interface ArticleEngagementMetric {
   shares: number
   followers: number
   engagementTotal: number
-  engagementRate: number
+  engagementRate: number | null
   dataSource: string
 }
 
-export interface ArticleEngagementTotals {
+export interface ArticleEngagementTotals extends MetricRateMetadata {
   impressions: number
   likes: number
   comments: number
   collects: number
   shares: number
   engagementTotal: number
-  engagementRate: number
+  engagementRate: number | null
 }
 
 export interface ArticleEngagementSummary {
@@ -73,6 +85,8 @@ export interface Variant {
   manualEditRatio: number
   reviewStatus: string
   reviewDetailJson?: Record<string, unknown>
+  reviewFingerprint?: string | null
+  contentFingerprint?: string
   createdAt: string
 }
 
@@ -759,8 +773,11 @@ export interface RecommendationEffect {
     measuredCount: number
     impressions: number
     engagementTotal: number
-    engagementRate: number
-    avgEngagementRate: number
+    engagementRate: number | null
+    avgEngagementRate: number | null
+    metricBasis?: MetricBasis
+    rateAvailable?: boolean
+    rateDenominator?: number | null
   }>
   experimentGroups: RecommendationEffect['comparison']
   items: Array<{
@@ -778,7 +795,12 @@ export interface RecommendationEffect {
     sampleCount: number
     impressions: number
     engagementTotal: number
-    engagementRate: number
+    engagementRate: number | null
+    metricBasis?: MetricBasis
+    rateAvailable?: boolean
+    rateDenominator?: number | null
+    dataSources?: string[]
+    dataScope?: DataScope
   }>
   notice: string
 }
@@ -850,6 +872,10 @@ export interface PublishDecisionChain {
     engagementTotal: number
     engagementRate: number | null
     dataSources: string[]
+    dataScope?: DataScope
+    metricBasis?: MetricBasis
+    rateAvailable?: boolean
+    rateDenominator?: number | null
   }
 }
 
@@ -880,7 +906,7 @@ export interface PlatformAccount {
   platform: Platform
   platformName: string
   accountName: string
-  authType: 'NONE' | 'OAUTH2' | 'APP_SECRET' | 'QR_LOGIN'
+  authType: 'NONE' | 'OAUTH2' | 'APP_SECRET' | 'QR_LOGIN' | 'APP_PASSWORD' | 'ACCESS_TOKEN'
   publishMode: PublishMode
   status: PlatformAccountStatus
   capabilities: string[]
@@ -893,7 +919,9 @@ export interface PlatformAccount {
   appId: string
   clientId: string
   secretConfigured: boolean
+  appPasswordConfigured?: boolean
   accessTokenConfigured: boolean
+  instanceUrl?: string
   refreshTokenConfigured: boolean
   tokenHint: string
   tokenExpiresAt?: string
@@ -901,6 +929,12 @@ export interface PlatformAccount {
   publicPublishEnabled: boolean
   availablePublishModes: PublishMode[]
   config: {
+    identifier?: string
+    instanceUrl?: string
+    accessTokenConfigured?: boolean
+    maxCharacters?: number
+    charactersReservedPerUrl?: number
+    maxMediaAttachments?: number
     redirect_uri?: string
     operation_ip?: string
     default_author?: string
@@ -917,6 +951,8 @@ export interface PlatformAccount {
       | 'MANUAL_ONLY'
       | 'MANUAL_DELIVERY'
       | 'LOCAL_BROWSER_QR'
+      | 'APP_PASSWORD'
+      | 'ACCESS_TOKEN'
     consoleUrl: string
     callbackPath?: string
     steps: string[]
@@ -974,6 +1010,10 @@ export interface LlmUsage {
   budgetWarningPercent: number
   budgetUsedPercent: number
   budgetAlert: boolean
+  monthlyReservedCost?: number
+  monthlyUnknownCalls?: number
+  otherCurrencyCalls?: number
+  scope?: 'PROVIDER_CALL_LEDGER'
   byModel: Array<{
     model: string
     generations: number
@@ -988,15 +1028,27 @@ export interface LlmUsage {
     unpricedGenerations: number
   }>
   recent: Array<{
-    id: number
+    id: string | number
     articleTitle: string
-    platform: Platform
+    platform: Platform | ''
     model: string
-    promptTokens: number
-    completionTokens: number
+    provider?: string
+    operation?: string
+    status?: string
+    currency?: string
+    promptTokens: number | null
+    completionTokens: number | null
     totalTokens: number
     cost: number | null
-    pricingStatus: 'CURRENT_PRICE' | 'SAVED_ESTIMATE' | 'UNPRICED' | 'NO_USAGE'
+    pricingStatus:
+      | 'CURRENT_PRICE'
+      | 'SAVED_ESTIMATE'
+      | 'UNPRICED'
+      | 'NO_USAGE'
+      | 'PRICE_SNAPSHOT'
+      | 'LEGACY_ESTIMATE'
+      | 'PENDING'
+      | 'UNKNOWN_USAGE'
     createdAt: string
   }>
 }
@@ -1007,6 +1059,8 @@ export const platformNames: Record<Platform, string> = {
   WECHAT_OFFICIAL: '微信公众号',
   TOUTIAO: '今日头条',
   X: 'X',
+  BLUESKY: 'Bluesky',
+  MASTODON: 'Mastodon',
 }
 
 /** Extended labels for activity analysis (includes public research datasets). */
@@ -1021,4 +1075,6 @@ export const platformColors: Record<Platform, string> = {
   WECHAT_OFFICIAL: '#16a34a',
   TOUTIAO: '#f04438',
   X: '#111827',
+  BLUESKY: '#0085ff',
+  MASTODON: '#6364ff',
 }

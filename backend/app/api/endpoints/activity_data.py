@@ -7,10 +7,12 @@ from fastapi import APIRouter, Depends, File, Form, Request, UploadFile
 from fastapi.responses import StreamingResponse
 from sqlalchemy import delete, func, select
 from sqlalchemy.orm import Session
+from starlette.concurrency import run_in_threadpool
 
 from app.api.deps import get_current_user, require_roles
 from app.core.exceptions import AppException
 from app.core.responses import success_response
+from app.core.uploads import read_upload_limited
 from app.db.session import get_db
 from app.models.business import EngagementHistory, HistoryImportBatch
 from app.models.user import User
@@ -22,9 +24,11 @@ from app.services.activity_service import (
 from app.services.audit_service import record_audit
 from app.services.history_import_service import (
     CANONICAL_FIELDS,
+    MAX_UPLOAD_BYTES,
     build_preview,
     build_template,
     commit_import,
+    history_source_type_options,
     read_table,
     suggest_mapping,
 )
@@ -48,9 +52,7 @@ def history_fields(request: Request, _: User = Depends(get_current_user)) -> dic
         request,
         {
             "fields": CANONICAL_FIELDS,
-            "sourceTypes": [
-                {"value": key, "label": value} for key, value in SOURCE_TYPE_LABELS.items()
-            ],
+            "sourceTypes": history_source_type_options(),
         },
     )
 
@@ -78,13 +80,14 @@ async def history_preview(
     db: Session = Depends(get_db),
     _: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
-    raw = await file.read()
-    headers, records = read_table(raw, file.filename or "")
+    raw = await read_upload_limited(file, MAX_UPLOAD_BYTES)
+    headers, records = await run_in_threadpool(read_table, raw, file.filename or "")
     if not records:
         raise AppException(40047, "文件里没有数据行")
     resolved = suggest_mapping(headers)
     resolved.update({key: value for key, value in _parse_mapping(mapping).items() if value})
-    data = build_preview(
+    data = await run_in_threadpool(
+        build_preview,
         db,
         headers,
         records,
@@ -109,13 +112,14 @@ async def history_import(
     db: Session = Depends(get_db),
     user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
-    raw = await file.read()
-    headers, records = read_table(raw, file.filename or "")
+    raw = await read_upload_limited(file, MAX_UPLOAD_BYTES)
+    headers, records = await run_in_threadpool(read_table, raw, file.filename or "")
     if not records:
         raise AppException(40047, "文件里没有数据行")
     resolved = suggest_mapping(headers)
     resolved.update({key: value for key, value in _parse_mapping(mapping).items() if value})
-    batch = commit_import(
+    batch = await run_in_threadpool(
+        commit_import,
         db,
         filename=file.filename or "",
         headers=headers,

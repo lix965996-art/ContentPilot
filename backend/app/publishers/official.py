@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import hashlib
 import html
 import ipaddress
+import json
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -9,12 +11,16 @@ from typing import Any
 import httpx
 from sqlalchemy.orm import Session
 
-from app.core.config import BACKEND_DIR, settings
+from app.core.config import settings
 from app.core.credentials import decrypt_json, decrypt_secret, encrypt_secret
-from app.models.business import PlatformAccount
+from app.core.paths import local_media_path
+from app.core.urls import fetch_public_image
+from app.models.business import PlatformAccount, PublishSchedule
 from app.publishers.base import PublishResult
 from app.services.platform_content import build_weibo_status, build_xiaohongshu_package
 from app.services.wechat_formatting import markdown_to_wechat_html
+
+WECHAT_ATTEMPT_FIELD = "wechatPublish"
 
 
 class OfficialPublisher:
@@ -90,7 +96,9 @@ class WeiboPublisher(OfficialPublisher):
     async def get_capabilities(self) -> list[str]:
         return ["TEXT_PUBLISH", "IMAGE_PUBLISH", "STATUS_READ"]
 
-    def _api_failure(self, data: dict[str, Any], status_code: int) -> PublishResult:
+    def _api_failure(
+        self, data: dict[str, Any], status_code: int, *, publishing: bool = False
+    ) -> PublishResult:
         code = str(data.get("error_code") or status_code)
         message = str(data.get("error") or "微博接口调用失败")
         token_error = code in {"21314", "21315", "21327", "21332"}
@@ -98,7 +106,7 @@ class WeiboPublisher(OfficialPublisher):
         return self.failure(
             "TOKEN_EXPIRED" if token_error else "PERMISSION_DENIED" if permission_error else code,
             message,
-            retryable=status_code >= 500,
+            retryable=status_code == 429 or (not publishing and status_code >= 500),
             action="请重新授权微博账号。"
             if token_error
             else "请检查应用发布权限和微博开放平台审核状态。",
@@ -151,7 +159,7 @@ class WeiboPublisher(OfficialPublisher):
         api_base_url = (
             settings.weibo_upload_api_base_url if image_upload else settings.weibo_api_base_url
         )
-        payload = {
+        payload: dict[str, Any] = {
             "access_token": token,
             "status": status,
             "rip": operation_ip,
@@ -165,6 +173,8 @@ class WeiboPublisher(OfficialPublisher):
             async with httpx.AsyncClient(timeout=30) as client:
                 response = await client.post(f"{api_base_url}{endpoint}", data=payload, files=files)
             data = response.json()
+            if not isinstance(data, dict):
+                raise ValueError("微博发布响应格式无效")
             external_id = str(data.get("idstr") or data.get("id") or "")
             if response.is_success and external_id:
                 user_id = str((data.get("user") or {}).get("idstr") or "")
@@ -178,9 +188,23 @@ class WeiboPublisher(OfficialPublisher):
                     url,
                     detail={"real": True},
                 )
-            return self._api_failure(data, response.status_code)
-        except (httpx.HTTPError, ValueError, OSError) as exc:
-            return self.failure("NETWORK_ERROR", str(exc), retryable=True)
+            if (
+                response.status_code >= 500
+                or response.status_code == 408
+                or (response.is_success and not data.get("error_code"))
+            ):
+                return self.failure(
+                    "PUBLISH_UNCERTAIN",
+                    "微博未返回有效发布回执，尚未确认结果，不会自动重发。",
+                    action="请先检查微博个人主页，确认结果后再处理任务。",
+                )
+            return self._api_failure(data, response.status_code, publishing=True)
+        except (httpx.HTTPError, ValueError, OSError, TypeError):
+            return self.failure(
+                "PUBLISH_UNCERTAIN",
+                "微博请求中断或回执无效，尚未确认发布结果，不会自动重发。",
+                action="请先检查微博个人主页，确认结果后再处理任务。",
+            )
 
     async def query_status(self, task_id: str) -> dict[str, Any]:
         token = decrypt_secret(self.account.access_token_encrypted)
@@ -195,6 +219,74 @@ class WeiboPublisher(OfficialPublisher):
 class WechatDraftPublisher(OfficialPublisher):
     platform = "WECHAT_OFFICIAL"
     mode = "DRAFT_ONLY"
+
+    def _schedule_attempt(
+        self, request: dict[str, Any]
+    ) -> tuple[PublishSchedule, dict[str, Any]] | PublishResult:
+        schedule = (
+            self.db.get(PublishSchedule, request.get("schedule_id"))
+            if request.get("schedule_id")
+            else None
+        )
+        if (
+            schedule is None
+            or schedule.platform != self.platform
+            or schedule.account_id != self.account.id
+            or schedule.idempotency_key != request.get("idempotency_key")
+        ):
+            return self.failure("TASK_REQUIRED", "微信公众号发布需要有效的排期任务")
+        fingerprint = hashlib.sha256(
+            json.dumps(
+                {
+                    "accountId": self.account.id,
+                    "appId": self.account.app_id,
+                    "title": request.get("title", ""),
+                    "content": request.get("content", ""),
+                    "contentHtml": request.get("content_html", ""),
+                    "summary": request.get("summary", ""),
+                    "sourceUrl": request.get("source_url", ""),
+                    "images": [_image_identity(str(value)) for value in request.get("images", [])],
+                    "author": self.config.get("default_author", ""),
+                    "coverId": self.config.get("default_cover_media_id", ""),
+                    "coverUrl": _image_identity(str(self.config.get("default_cover_url") or "")),
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            ).encode()
+        ).hexdigest()
+        attempt = dict((schedule.publish_package_json or {}).get(WECHAT_ATTEMPT_FIELD) or {})
+        if attempt.get("requestHash") and attempt["requestHash"] != fingerprint:
+            return self.failure(
+                "TASK_CONTENT_CHANGED",
+                "该任务已尝试提交其他内容或账号，请先核对公众号后台，不能覆盖原发布尝试。",
+            )
+        attempt["requestHash"] = fingerprint
+        return schedule, attempt
+
+    def _save_attempt(self, schedule: PublishSchedule, attempt: dict[str, Any]) -> None:
+        package = dict(schedule.publish_package_json or {})
+        package[WECHAT_ATTEMPT_FIELD] = dict(attempt)
+        schedule.publish_package_json = package
+        # Commit before each irreversible call, so a crash or a lost response
+        # cannot erase the fact that the task may already exist on WeChat.
+        self.db.commit()
+
+    def _uncertain_failure(self, stage: str) -> PublishResult:
+        return self.failure(
+            f"WECHAT_{stage}_UNCERTAIN",
+            "上次公众号提交未获得可核对的回执，不会自动重建草稿或再次提交。",
+            action="请先检查公众号后台的草稿箱和发布记录，确认原任务结果后再处理。",
+        )
+
+    def _draft_receipt(self, draft_id: str, **detail: Any) -> PublishResult:
+        return PublishResult(
+            True,
+            self.platform,
+            self.mode,
+            "DRAFT_CREATED",
+            external_id=draft_id,
+            detail={"draftId": draft_id, "real": True, **detail},
+        )
 
     # ------------------------------------------------------------------
     # capabilities
@@ -363,6 +455,36 @@ class WechatDraftPublisher(OfficialPublisher):
         return str(value)
 
     async def publish(self, request: dict[str, Any]) -> PublishResult:
+        context = self._schedule_attempt(request)
+        if isinstance(context, PublishResult):
+            return context
+        schedule, attempt = context
+        if attempt.get("stage") not in {None, "DRAFT_CREATED", "DRAFT_REJECTED", "SUBMIT_REJECTED"}:
+            return self._uncertain_failure(
+                "DRAFT" if attempt.get("stage") == "DRAFT_CREATING" else "SUBMIT"
+            )
+        draft_id = str(attempt.get("draftId") or "")
+        if not draft_id and attempt.get("stage") in {"DRAFT_CREATED", "SUBMIT_REJECTED"}:
+            return self._uncertain_failure("DRAFT")
+        if draft_id:
+            try:
+                await WechatDraftPublisher.query_status(self, draft_id)
+                return self._draft_receipt(draft_id, reused=True)
+            except WechatApiError as exc:
+                return self.failure(
+                    exc.code, exc.message, retryable=exc.retryable, action=exc.suggested_action
+                )
+            except httpx.HTTPError:
+                return self.failure(
+                    "WECHAT_DRAFT_CHECK_FAILED",
+                    "无法核对已有公众号草稿，请稍后重试同一任务。",
+                    retryable=True,
+                )
+            except (ValueError, OSError, TypeError):
+                return self.failure(
+                    "WECHAT_DRAFT_CHECK_FAILED", "已有公众号草稿回执无效，请核对后台。"
+                )
+        draft_started = False
         try:
             token = await self._access_token()
             images = [path for value in request.get("images", []) if (path := _local_image(value))]
@@ -425,6 +547,9 @@ class WechatDraftPublisher(OfficialPublisher):
                 "need_open_comment": 0,
                 "only_fans_can_comment": 0,
             }
+            attempt["stage"] = "DRAFT_CREATING"
+            self._save_attempt(schedule, attempt)
+            draft_started = True
             async with httpx.AsyncClient(timeout=30) as client:
                 response = await client.post(
                     f"{settings.wechat_api_base_url}/cgi-bin/draft/add",
@@ -432,28 +557,28 @@ class WechatDraftPublisher(OfficialPublisher):
                     json={"articles": [article]},
                 )
             data = response.json()
+            if not isinstance(data, dict):
+                raise ValueError("微信草稿响应格式无效")
             if data.get("errcode"):
+                attempt["stage"] = "DRAFT_REJECTED"
+                self._save_attempt(schedule, attempt)
+                draft_started = False
                 raise WechatApiError(data)
+            if not response.is_success:
+                raise ValueError("微信草稿接口未返回成功回执")
             draft_id = str(data.get("media_id") or "")
             if not draft_id:
                 raise ValueError("微信草稿接口未返回 media_id")
-            return PublishResult(
-                True,
-                self.platform,
-                self.mode,
-                "DRAFT_CREATED",
-                external_id=draft_id,
-                detail={
-                    "draftId": draft_id,
-                    "real": True,
-                    "materialUploadFailed": material_upload_failed,
-                },
-            )
+            attempt.update(stage="DRAFT_CREATED", draftId=draft_id)
+            self._save_attempt(schedule, attempt)
+            return self._draft_receipt(draft_id, materialUploadFailed=material_upload_failed)
         except WechatApiError as exc:
             return self.failure(
                 exc.code, exc.message, retryable=exc.retryable, action=exc.suggested_action
             )
-        except (httpx.HTTPError, ValueError, OSError) as exc:
+        except (httpx.HTTPError, ValueError, OSError, TypeError) as exc:
+            if draft_started:
+                return self._uncertain_failure("DRAFT")
             return self.failure(
                 "WECHAT_DRAFT_FAILED", str(exc), retryable=isinstance(exc, httpx.HTTPError)
             )
@@ -467,6 +592,15 @@ class WechatDraftPublisher(OfficialPublisher):
                 json={"media_id": task_id},
             )
         data = resp.json()
+        if (
+            not isinstance(data, dict)
+            or not resp.is_success
+            or not isinstance(data.get("news_item"), list)
+            or not data["news_item"]
+        ):
+            if isinstance(data, dict) and data.get("errcode"):
+                raise WechatApiError(data)
+            raise ValueError("微信草稿核对响应无效")
         if data.get("errcode"):
             raise WechatApiError(data)
         return {"media_id": task_id, "status": "DRAFT_CREATED", "detail": data}
@@ -475,12 +609,10 @@ class WechatDraftPublisher(OfficialPublisher):
         local = _local_image(url)
         if local:
             return await self._upload_image(token, local, permanent=permanent)
-        async with httpx.AsyncClient(timeout=20, follow_redirects=True) as client:
-            response = await client.get(url)
-            response.raise_for_status()
-        content_type = response.headers.get("content-type", "")
-        if not content_type.startswith("image/") or len(response.content) > 10 * 1024 * 1024:
-            raise ValueError("默认封面 URL 必须返回不超过 10MB 的图片")
+        fetched = await fetch_public_image(url, max_bytes=10 * 1024 * 1024)
+        content_type = fetched.content_type
+        if not content_type.startswith("image/"):
+            raise ValueError("默认封面 URL 必须返回图片")
         endpoint = "/cgi-bin/material/add_material" if permanent else "/cgi-bin/media/uploadimg"
         params = {"access_token": token}
         if permanent:
@@ -489,7 +621,7 @@ class WechatDraftPublisher(OfficialPublisher):
             upload = await client.post(
                 f"{settings.wechat_api_base_url}{endpoint}",
                 params=params,
-                files={"media": ("cover.jpg", response.content, content_type)},
+                files={"media": ("cover.jpg", fetched.content, content_type)},
             )
         data = upload.json()
         if data.get("errcode"):
@@ -510,11 +642,41 @@ class WechatPublishPublisher(WechatDraftPublisher):
                 "该公众号配置未允许自动提交发布。",
                 action="在账号设置中确认接口权限后启用“允许提交发布”。",
             )
+        context = self._schedule_attempt(request)
+        if isinstance(context, PublishResult):
+            return context
+        schedule, attempt = context
+        if attempt.get("stage") == "SUBMITTING":
+            return self._uncertain_failure("SUBMIT")
+        if attempt.get("stage") == "SUBMITTED":
+            publish_id = str(attempt.get("publishId") or "")
+            if not publish_id:
+                return self._uncertain_failure("SUBMIT")
+            try:
+                await self.query_status(publish_id)
+                return self._submitted_receipt(str(attempt.get("draftId") or ""), publish_id)
+            except WechatApiError as exc:
+                return self.failure(
+                    exc.code, exc.message, retryable=exc.retryable, action=exc.suggested_action
+                )
+            except httpx.HTTPError:
+                return self.failure(
+                    "WECHAT_PUBLISH_CHECK_FAILED",
+                    "无法核对已有发布任务，请稍后重试同一任务。",
+                    retryable=True,
+                )
+            except (ValueError, OSError, TypeError):
+                return self._uncertain_failure("SUBMIT")
         draft = await super().publish(request)
         if not draft.success:
             return draft
+        attempt = dict((schedule.publish_package_json or {}).get(WECHAT_ATTEMPT_FIELD) or {})
+        submit_started = False
         try:
             token = await self._access_token()
+            attempt.update(stage="SUBMITTING", draftId=draft.external_id)
+            self._save_attempt(schedule, attempt)
+            submit_started = True
             async with httpx.AsyncClient(timeout=20) as client:
                 response = await client.post(
                     f"{settings.wechat_api_base_url}/cgi-bin/freepublish/submit",
@@ -522,23 +684,41 @@ class WechatPublishPublisher(WechatDraftPublisher):
                     json={"media_id": draft.external_id},
                 )
             data = response.json()
+            if not isinstance(data, dict):
+                raise ValueError("微信提交发布响应格式无效")
             if data.get("errcode"):
+                attempt["stage"] = "SUBMIT_REJECTED"
+                self._save_attempt(schedule, attempt)
+                submit_started = False
                 raise WechatApiError(data)
+            if not response.is_success:
+                raise ValueError("微信提交发布接口未返回成功回执")
             publish_id = str(data.get("publish_id") or "")
-            return PublishResult(
-                True,
-                self.platform,
-                self.mode,
-                "PUBLISH_SUBMITTED",
-                external_id=publish_id,
-                detail={"draftId": draft.external_id, "publishId": publish_id, "real": True},
-            )
+            if not publish_id:
+                raise ValueError("微信提交发布接口未返回 publish_id")
+            attempt.update(stage="SUBMITTED", publishId=publish_id)
+            self._save_attempt(schedule, attempt)
+            return self._submitted_receipt(draft.external_id, publish_id)
         except WechatApiError as exc:
             return self.failure(
                 exc.code, exc.message, retryable=exc.retryable, action=exc.suggested_action
             )
-        except (httpx.HTTPError, ValueError) as exc:
-            return self.failure("WECHAT_SUBMIT_FAILED", str(exc), retryable=True)
+        except (httpx.HTTPError, ValueError, OSError, TypeError) as exc:
+            if submit_started:
+                return self._uncertain_failure("SUBMIT")
+            return self.failure(
+                "WECHAT_SUBMIT_FAILED", str(exc), retryable=isinstance(exc, httpx.HTTPError)
+            )
+
+    def _submitted_receipt(self, draft_id: str, publish_id: str) -> PublishResult:
+        return PublishResult(
+            True,
+            self.platform,
+            self.mode,
+            "PUBLISH_SUBMITTED",
+            external_id=publish_id,
+            detail={"draftId": draft_id, "publishId": publish_id, "real": True},
+        )
 
     async def query_status(self, task_id: str) -> dict[str, Any]:
         token = await self._access_token()
@@ -548,7 +728,14 @@ class WechatPublishPublisher(WechatDraftPublisher):
                 params={"access_token": token},
                 json={"publish_id": task_id},
             )
-        return response.json()
+        data = response.json()
+        if not isinstance(data, dict):
+            raise ValueError("微信发布状态响应格式无效")
+        if data.get("errcode"):
+            raise WechatApiError(data)
+        if not response.is_success or type(data.get("publish_status")) is not int:
+            raise ValueError("微信发布状态响应无效")
+        return data
 
 
 class XiaohongshuManualPublisher:
@@ -608,23 +795,15 @@ class WechatApiError(Exception):
 
 
 def _local_image(value: str) -> Path | None:
-    if not value:
-        return None
-    direct = Path(value)
-    if direct.is_file():
-        return direct
-    try:
-        parsed = httpx.URL(value)
-    except httpx.InvalidURL:
-        return None
-    url_path = parsed.path if parsed.scheme else value
-    if url_path.startswith("/uploads/"):
-        path = BACKEND_DIR.parent / url_path.lstrip("/")
-    elif url_path.startswith("/media/"):
-        path = BACKEND_DIR.parent / "frontend" / "public" / url_path.lstrip("/")
-    else:
-        path = Path(value)
-    return path if path.is_file() else None
+    return local_media_path(value)
+
+
+def _image_identity(value: str) -> dict[str, str]:
+    identity = {"url": value}
+    local = _local_image(value)
+    if local:
+        identity["sha256"] = hashlib.sha256(local.read_bytes()).hexdigest()
+    return identity
 
 
 async def _first_image_upload(values: list[str]) -> tuple[str, bytes, str] | None:
@@ -642,24 +821,5 @@ async def _first_image_upload(values: list[str]) -> tuple[str, bytes, str] | Non
         raise ValueError("图片地址无效") from exc
     if parsed.scheme not in {"http", "https"}:
         raise ValueError("图片地址必须使用 HTTP 或 HTTPS")
-    host = parsed.host or ""
-    if host.lower() == "localhost":
-        raise ValueError("不允许读取本机图片地址")
-    try:
-        host_ip = ipaddress.ip_address(host)
-    except ValueError:
-        host_ip = None
-    if host_ip is not None and not host_ip.is_global:
-        raise ValueError("不允许读取内网图片地址")
-    async with httpx.AsyncClient(timeout=30, follow_redirects=True) as client:
-        response = await client.get(value)
-        response.raise_for_status()
-    if not response.content:
-        raise ValueError("图片文件为空")
-    if len(response.content) > 5 * 1024 * 1024:
-        raise ValueError("图片不能超过 5MB")
-    content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
-    if content_type and not content_type.startswith("image/"):
-        raise ValueError("远程地址返回的不是图片")
-    filename = Path(parsed.path).name or "weibo-image.jpg"
-    return filename, response.content, content_type or "application/octet-stream"
+    fetched = await fetch_public_image(value, max_bytes=5 * 1024 * 1024)
+    return fetched.filename, fetched.content, fetched.content_type

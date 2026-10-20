@@ -26,3 +26,10 @@ export async function fetchCurrentUser(): Promise<User> {
 export async function logout(): Promise<void> {
   await apiClient.post('/auth/logout')
 }
+
+export async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
+  await apiClient.put('/auth/password', {
+    current_password: currentPassword,
+    new_password: newPassword,
+  })
+}

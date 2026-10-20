@@ -1,6 +1,9 @@
 param([switch]$SkipFrontend)
 $ErrorActionPreference = 'Stop'
-$projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+. (Join-Path $PSScriptRoot 'runtime-paths.ps1')
+$paths = Get-ContentPilotPaths
+Set-ContentPilotPythonEnvironment $paths
+$projectRoot = $paths.Project
 $backend = Join-Path $projectRoot 'backend'
 $frontend = Join-Path $projectRoot 'frontend'
 $venvPython = Join-Path $backend '.venv\Scripts\python.exe'
@@ -35,14 +38,19 @@ if (-not (Test-Path -LiteralPath $venvPython)) {
 }
 
 Write-Host '[2/6] Syncing backend dependencies...'
-& $venvPython -m pip install --disable-pip-version-check -r (Join-Path $backend 'requirements.txt')
+& $venvPython -m pip install --disable-pip-version-check -r (Join-Path $backend 'requirements.lock.txt')
 if ($LASTEXITCODE -ne 0) { throw 'Backend dependency installation failed.' }
 
 if (-not $SkipFrontend) {
   if (-not (Get-Command node.exe -ErrorAction SilentlyContinue)) { throw 'Node.js 20+ was not found.' }
   Write-Host '[3/6] Syncing frontend dependencies...'
   Push-Location $frontend
-  try { & npm.cmd install --no-audit --no-fund; if ($LASTEXITCODE -ne 0) { throw 'Frontend dependency installation failed.' } }
+  try {
+    & npm.cmd ci --no-audit --no-fund
+    if ($LASTEXITCODE -ne 0) { throw 'Frontend dependency installation failed.' }
+    & npm.cmd exec -- playwright install chromium
+    if ($LASTEXITCODE -ne 0) { throw 'Browser test dependency installation failed.' }
+  }
   finally { Pop-Location }
 } else { Write-Host '[3/6] Frontend dependency sync skipped.' }
 
@@ -60,7 +68,7 @@ Push-Location $backend
 try { & $venvPython -m app.db.seed; if ($LASTEXITCODE -ne 0) { throw 'Demo data seed failed.' } }
 finally { Pop-Location }
 
-$runtime = Join-Path $projectRoot '.runtime'
+$runtime = $paths.Run
 New-Item -ItemType Directory -Force -Path $runtime | Out-Null
 Set-Content -LiteralPath (Join-Path $runtime 'setup.complete') -Value (Get-Date -Format o) -Encoding UTF8
 Write-Host 'Setup complete. Run .\contentpilot.ps1 start from the project root.' -ForegroundColor Green

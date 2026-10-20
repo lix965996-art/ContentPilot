@@ -21,6 +21,7 @@ from app.services.auth_service import (
     build_tokens,
     refresh_tokens,
     register_user,
+    revoke_user_tokens,
     update_password,
 )
 
@@ -89,9 +90,11 @@ def register(
 @router.post("/logout", summary="退出登录")
 def logout(
     request: Request,
-    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    user: User = Depends(get_current_user),
 ) -> dict:
-    return success_response(request, None, "已安全退出")
+    revoke_user_tokens(db, user)
+    return success_response(request, None, "已退出，当前账号的全部登录会话已撤销")
 
 
 @router.get("/me", summary="获取当前用户")
@@ -127,4 +130,4 @@ def change_password(
     user: User = Depends(get_current_user),
 ) -> dict:
     update_password(db, user, payload.current_password, payload.new_password)
-    return success_response(request, None, "密码修改成功，请重新登录")
+    return success_response(request, None, "密码修改成功，全部登录会话已撤销，请重新登录")

@@ -17,12 +17,12 @@ for (const viewport of [
   { width: 1366, height: 768, name: '1366x768' },
   { width: 1920, height: 1080, name: '1920x1080' },
 ]) {
-  test(`capture product UI at ${viewport.name}`, async ({ page }) => {
+  test(`capture product UI at ${viewport.name}`, async ({ page }, testInfo) => {
     test.setTimeout(120_000)
     await page.setViewportSize(viewport)
     await page.goto('/login')
     await page.waitForLoadState('networkidle')
-    await page.screenshot({ path: `artifacts/ui-audit/${viewport.name}/login.png` })
+    await page.screenshot({ path: testInfo.outputPath(`ui-audit/${viewport.name}/login.png`) })
     await page.getByTestId('username-input').fill('admin')
     await page.getByTestId('password-input').fill('Admin@123456')
     await page.getByTestId('login-button').click()
@@ -36,12 +36,12 @@ for (const viewport of [
           page.evaluate(() => document.documentElement.scrollWidth <= window.innerWidth + 1),
         )
         .toBe(true)
-      await page.screenshot({ path: `artifacts/ui-audit/${viewport.name}/${name}.png` })
+      await page.screenshot({ path: testInfo.outputPath(`ui-audit/${viewport.name}/${name}.png`) })
       if (name === 'settings') {
         await page.getByRole('tab', { name: '用量与费用' }).click()
         await page.waitForTimeout(300)
         await page.screenshot({
-          path: `artifacts/ui-audit/${viewport.name}/settings-usage.png`,
+          path: testInfo.outputPath(`ui-audit/${viewport.name}/settings-usage.png`),
         })
       }
     }

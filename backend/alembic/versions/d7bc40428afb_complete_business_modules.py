@@ -28,7 +28,7 @@ def upgrade() -> None:
         sa.Column("base_score", sa.Float(), nullable=False),
         sa.Column("source_description", sa.String(length=255), nullable=False),
         sa.Column("enabled", sa.Boolean(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
+        sa.Column("updated_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint(
             "platform", "day_of_week", "hour_of_day", name="uq_activity_prior_slot"
@@ -44,8 +44,8 @@ def upgrade() -> None:
         sa.Column("setting_value", sa.Text(), nullable=False),
         sa.Column("is_secret", sa.Boolean(), nullable=False),
         sa.Column("description", sa.String(length=255), nullable=True),
-        sa.Column("created_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
-        sa.Column("updated_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
+        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("setting_key"),
     )
@@ -62,7 +62,7 @@ def upgrade() -> None:
         sa.Column("ip_address", sa.String(length=100), nullable=True),
         sa.Column("success", sa.Boolean(), nullable=False),
         sa.Column("detail_json", sa.JSON(), nullable=False),
-        sa.Column("created_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
+        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
         sa.ForeignKeyConstraint(["user_id"], ["sys_user.id"], ondelete="SET NULL"),
         sa.PrimaryKeyConstraint("id"),
     )
@@ -81,8 +81,8 @@ def upgrade() -> None:
         sa.Column("keywords_json", sa.JSON(), nullable=False),
         sa.Column("status", sa.String(length=30), nullable=False),
         sa.Column("created_by", sa.Integer(), nullable=False),
-        sa.Column("created_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
-        sa.Column("updated_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
+        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
         sa.ForeignKeyConstraint(
             ["created_by"],
             ["sys_user.id"],
@@ -109,8 +109,8 @@ def upgrade() -> None:
         sa.Column("result_json", sa.JSON(), nullable=False),
         sa.Column("conclusion", sa.Text(), nullable=True),
         sa.Column("created_by", sa.Integer(), nullable=False),
-        sa.Column("created_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
-        sa.Column("updated_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
+        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
         sa.ForeignKeyConstraint(
             ["created_by"],
             ["sys_user.id"],
@@ -126,8 +126,8 @@ def upgrade() -> None:
         sa.Column("publish_mode", sa.String(length=30), nullable=False),
         sa.Column("credential_encrypted", sa.Text(), nullable=True),
         sa.Column("status", sa.String(length=30), nullable=False),
-        sa.Column("created_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
-        sa.Column("updated_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
+        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
         sa.ForeignKeyConstraint(
             ["user_id"],
             ["sys_user.id"],
@@ -151,7 +151,7 @@ def upgrade() -> None:
         sa.Column("avg_comments", sa.Float(), nullable=False),
         sa.Column("avg_collects", sa.Float(), nullable=False),
         sa.Column("avg_shares", sa.Float(), nullable=False),
-        sa.Column("updated_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
+        sa.Column("updated_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
         sa.ForeignKeyConstraint(["account_id"], ["platform_account.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
     )
@@ -175,8 +175,8 @@ def upgrade() -> None:
         sa.Column("manual_edit_ratio", sa.Float(), nullable=False),
         sa.Column("review_status", sa.String(length=30), nullable=False),
         sa.Column("original_generated_text", sa.Text(), nullable=True),
-        sa.Column("created_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
-        sa.Column("updated_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
+        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
         sa.ForeignKeyConstraint(["article_id"], ["content_article.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint("article_id", "platform", "version_no", name="uq_variant_version"),
@@ -200,8 +200,8 @@ def upgrade() -> None:
         sa.Column("result_variant_ids_json", sa.JSON(), nullable=False),
         sa.Column("error_message", sa.Text(), nullable=True),
         sa.Column("model_name", sa.String(length=100), nullable=False),
-        sa.Column("created_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
-        sa.Column("updated_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
+        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
         sa.ForeignKeyConstraint(["article_id"], ["content_article.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
     )
@@ -220,7 +220,7 @@ def upgrade() -> None:
         sa.Column("search_keyword", sa.String(length=100), nullable=True),
         sa.Column("usage_type", sa.String(length=30), nullable=False),
         sa.Column("selected", sa.Boolean(), nullable=False),
-        sa.Column("created_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
+        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
         sa.ForeignKeyConstraint(["article_id"], ["content_article.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["variant_id"], ["content_variant.id"], ondelete="SET NULL"),
         sa.PrimaryKeyConstraint("id"),
@@ -238,7 +238,7 @@ def upgrade() -> None:
         sa.Column("reason_json", sa.JSON(), nullable=False),
         sa.Column("alternative_times_json", sa.JSON(), nullable=False),
         sa.Column("algorithm_version", sa.String(length=30), nullable=False),
-        sa.Column("created_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
+        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
         sa.ForeignKeyConstraint(["article_id"], ["content_article.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["variant_id"], ["content_variant.id"], ondelete="SET NULL"),
         sa.PrimaryKeyConstraint("id"),
@@ -260,8 +260,8 @@ def upgrade() -> None:
         sa.Column("error_message", sa.Text(), nullable=True),
         sa.Column("idempotency_key", sa.String(length=100), nullable=False),
         sa.Column("created_by", sa.Integer(), nullable=False),
-        sa.Column("created_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
-        sa.Column("updated_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
+        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
         sa.ForeignKeyConstraint(["account_id"], ["platform_account.id"], ondelete="SET NULL"),
         sa.ForeignKeyConstraint(["article_id"], ["content_article.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(
@@ -300,8 +300,8 @@ def upgrade() -> None:
         sa.Column("engagement_rate", sa.Float(), nullable=False),
         sa.Column("group_type", sa.String(length=30), nullable=False),
         sa.Column("data_source", sa.String(length=30), nullable=False),
-        sa.Column("created_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
-        sa.Column("updated_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
+        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
+        sa.Column("updated_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
         sa.ForeignKeyConstraint(["schedule_id"], ["publish_schedule.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
         sa.UniqueConstraint(
@@ -322,7 +322,7 @@ def upgrade() -> None:
         sa.Column("group_type", sa.String(length=30), nullable=False),
         sa.Column("sample_label", sa.String(length=255), nullable=False),
         sa.Column("metric_value_json", sa.JSON(), nullable=False),
-        sa.Column("created_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
+        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
         sa.ForeignKeyConstraint(["experiment_id"], ["experiment.id"], ondelete="CASCADE"),
         sa.ForeignKeyConstraint(["schedule_id"], ["publish_schedule.id"], ondelete="SET NULL"),
         sa.PrimaryKeyConstraint("id"),
@@ -344,7 +344,7 @@ def upgrade() -> None:
         sa.Column("error_code", sa.String(length=50), nullable=True),
         sa.Column("error_message", sa.Text(), nullable=True),
         sa.Column("duration_ms", sa.Integer(), nullable=False),
-        sa.Column("created_at", sa.DateTime(), server_default=sa.text("now()"), nullable=False),
+        sa.Column("created_at", sa.DateTime(), server_default=sa.func.now(), nullable=False),
         sa.ForeignKeyConstraint(["schedule_id"], ["publish_schedule.id"], ondelete="CASCADE"),
         sa.PrimaryKeyConstraint("id"),
     )
@@ -356,39 +356,19 @@ def upgrade() -> None:
 
 def downgrade() -> None:
     # ### commands auto generated by Alembic - please adjust! ###
-    op.drop_index(op.f("ix_publish_log_schedule_id"), table_name="publish_log")
     op.drop_table("publish_log")
-    op.drop_index(op.f("ix_experiment_sample_experiment_id"), table_name="experiment_sample")
     op.drop_table("experiment_sample")
-    op.drop_index(op.f("ix_engagement_metric_schedule_id"), table_name="engagement_metric")
-    op.drop_index(op.f("ix_engagement_metric_platform"), table_name="engagement_metric")
     op.drop_table("engagement_metric")
-    op.drop_index(op.f("ix_publish_schedule_status"), table_name="publish_schedule")
-    op.drop_index(op.f("ix_publish_schedule_scheduled_at"), table_name="publish_schedule")
-    op.drop_index(op.f("ix_publish_schedule_platform"), table_name="publish_schedule")
-    op.drop_index(op.f("ix_publish_schedule_article_id"), table_name="publish_schedule")
     op.drop_table("publish_schedule")
     op.drop_table("publish_recommendation")
-    op.drop_index(op.f("ix_media_asset_article_id"), table_name="media_asset")
     op.drop_table("media_asset")
     op.drop_table("generation_task")
-    op.drop_index(op.f("ix_content_variant_review_status"), table_name="content_variant")
-    op.drop_index(op.f("ix_content_variant_platform"), table_name="content_variant")
-    op.drop_index(op.f("ix_content_variant_article_id"), table_name="content_variant")
     op.drop_table("content_variant")
     op.drop_table("account_activity_stat")
-    op.drop_index(op.f("ix_platform_account_user_id"), table_name="platform_account")
     op.drop_table("platform_account")
     op.drop_table("experiment")
-    op.drop_index(op.f("ix_content_article_title"), table_name="content_article")
-    op.drop_index(op.f("ix_content_article_status"), table_name="content_article")
-    op.drop_index(op.f("ix_content_article_created_by"), table_name="content_article")
     op.drop_table("content_article")
-    op.drop_index(op.f("ix_audit_log_module"), table_name="audit_log")
-    op.drop_index(op.f("ix_audit_log_created_at"), table_name="audit_log")
-    op.drop_index(op.f("ix_audit_log_action"), table_name="audit_log")
     op.drop_table("audit_log")
     op.drop_table("system_setting")
-    op.drop_index(op.f("ix_activity_prior_platform"), table_name="activity_prior")
     op.drop_table("activity_prior")
     # ### end Alembic commands ###

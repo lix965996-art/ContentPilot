@@ -19,5 +19,6 @@ def health(request: Request, db: Session = Depends(get_db)) -> dict:
             "app": settings.app_name,
             "environment": settings.app_env,
             "database": "connected",
+            "schedulerRole": getattr(request.app.state, "scheduler_role", "unknown"),
         },
     )

@@ -2,7 +2,13 @@ import { computed, ref } from 'vue'
 import { defineStore } from 'pinia'
 
 import * as authApi from '@/api/auth'
-import { clearTokens, persistTokens, readAccessToken } from '@/api/client'
+import {
+  clearTokens,
+  isAuthenticationError,
+  persistTokens,
+  readAccessToken,
+  readRefreshToken,
+} from '@/api/client'
 import type { LoginPayload, RegisterPayload, RoleCode, User } from '@/types/user'
 import {
   ROLE_SCOPES,
@@ -17,6 +23,9 @@ export const useAuthStore = defineStore('auth', () => {
   const user = ref<User | null>(null)
   const initialized = ref(false)
   const loading = ref(false)
+  const connectionError = ref(false)
+  let bootstrapPromise: Promise<void> | null = null
+  let sessionGeneration = 0
 
   const isAuthenticated = computed(() => Boolean(user.value && readAccessToken()))
   const roleCodes = computed(() => user.value?.roles.map((role) => role.code) ?? [])
@@ -42,9 +51,11 @@ export const useAuthStore = defineStore('auth', () => {
       const data = await authApi.login(payload)
       persistTokens(data.access_token, data.refresh_token, remember)
       user.value = data.user
+      sessionGeneration += 1
+      initialized.value = true
+      connectionError.value = false
     } finally {
       loading.value = false
-      initialized.value = true
     }
   }
 
@@ -54,48 +65,74 @@ export const useAuthStore = defineStore('auth', () => {
       const data = await authApi.register(payload)
       persistTokens(data.access_token, data.refresh_token, remember)
       user.value = data.user
+      sessionGeneration += 1
+      initialized.value = true
+      connectionError.value = false
     } finally {
       loading.value = false
-      initialized.value = true
     }
   }
 
   async function bootstrap(): Promise<void> {
     if (initialized.value) return
-    if (!readAccessToken()) {
+    if (!readAccessToken() && !readRefreshToken()) {
       initialized.value = true
       return
     }
-    try {
-      user.value = await authApi.fetchCurrentUser()
-    } catch {
-      clearTokens()
-      user.value = null
-    } finally {
-      initialized.value = true
-    }
+    const generation = sessionGeneration
+    bootstrapPromise ??= (async () => {
+      try {
+        const profile = await authApi.fetchCurrentUser()
+        if (generation === sessionGeneration) {
+          user.value = profile
+          initialized.value = true
+          connectionError.value = false
+        }
+      } catch (error) {
+        if (
+          generation === sessionGeneration &&
+          (isAuthenticationError(error) || (!readAccessToken() && !readRefreshToken()))
+        ) {
+          clearSession()
+        } else if (generation === sessionGeneration) {
+          connectionError.value = true
+        }
+        // Keep both the current user and credentials on transient failures; the next
+        // navigation can retry bootstrap instead of permanently marking it completed.
+      }
+    })().finally(() => {
+      bootstrapPromise = null
+    })
+    await bootstrapPromise
   }
 
   async function signOut(): Promise<void> {
     try {
-      if (readAccessToken()) await authApi.logout()
-    } finally {
-      clearTokens()
-      user.value = null
-      initialized.value = true
+      if (readAccessToken() || readRefreshToken()) await authApi.logout()
+    } catch (error) {
+      if (!isAuthenticationError(error)) throw error
     }
+    clearSession()
+  }
+
+  async function changePassword(currentPassword: string, newPassword: string): Promise<void> {
+    await authApi.changePassword(currentPassword, newPassword)
+    clearSession()
   }
 
   function clearSession(): void {
+    sessionGeneration += 1
     clearTokens()
     user.value = null
     initialized.value = true
+    connectionError.value = false
   }
 
   return {
     user,
     initialized,
     loading,
+    connectionError,
     isAuthenticated,
     roleCodes,
     primaryRoleCode,
@@ -109,6 +146,7 @@ export const useAuthStore = defineStore('auth', () => {
     signUp,
     bootstrap,
     signOut,
+    changePassword,
     clearSession,
   }
 })

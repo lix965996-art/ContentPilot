@@ -1,9 +1,11 @@
 import { apiClient } from '@/api/client'
+import { isAxiosError } from 'axios'
 import type { ApiResponse } from '@/types/api'
 import type {
   ActivityAnalysis,
   ActivityCurvePoint,
   Article,
+  DataScope,
   ArticleEngagementSummary,
   BatchRecommendationResponse,
   BatchScheduleResponse,
@@ -57,7 +59,9 @@ export const workflowApi = {
     return unwrap<TrendAnalysis>(apiClient.post('/trends/analyze', data, { timeout: 120_000 }))
   },
   articles(params: Record<string, unknown> = {}) {
-    return unwrap<{ items: Article[]; total: number }>(apiClient.get('/articles', { params }))
+    return unwrap<{ items: Article[]; total: number; page: number; pageSize: number }>(
+      apiClient.get('/articles', { params }),
+    )
   },
   article(id: number) {
     return unwrap<Article>(apiClient.get(`/articles/${id}`))
@@ -91,11 +95,11 @@ export const workflowApi = {
   formatWechatVariant(id: number, profile: WechatFormatProfile) {
     return unwrap<Variant>(apiClient.put(`/variants/${id}/format`, profile))
   },
-  approveVariant(id: number) {
-    return unwrap<Variant>(apiClient.post(`/variants/${id}/approve`))
+  approveVariant(id: number, data: { expected_fingerprint: string }) {
+    return unwrap<Variant>(apiClient.post(`/variants/${id}/approve`, data))
   },
-  rejectVariant(id: number) {
-    return unwrap<Variant>(apiClient.post(`/variants/${id}/reject`))
+  rejectVariant(id: number, data: { expected_fingerprint: string }) {
+    return unwrap<Variant>(apiClient.post(`/variants/${id}/reject`, data))
   },
   deleteVariant(id: number) {
     return unwrap<{ id: number }>(apiClient.delete(`/variants/${id}`))
@@ -255,6 +259,12 @@ export const workflowApi = {
   activityContentTypes() {
     return unwrap<Array<{ value: string; label: string }>>(apiClient.get('/activity/content-types'))
   },
+  historyFields() {
+    return unwrap<{
+      fields: HistoryImportPreview['fields']
+      sourceTypes: HistoryImportPreview['sourceTypes']
+    }>(apiClient.get('/activity/history/fields'))
+  },
   previewHistoryImport(data: FormData) {
     return unwrap<HistoryImportPreview>(
       apiClient.post('/activity/history/preview', data, {
@@ -328,11 +338,17 @@ export const workflowApi = {
       slotEvidence: Record<string, unknown>
     }>(apiClient.get(`/schedules/${id}/recommendation-basis`))
   },
-  recommendationEffect() {
-    return unwrap<RecommendationEffect>(apiClient.get('/analytics/recommendation-effect'))
+  recommendationEffect(params: Record<string, unknown> = {}) {
+    return unwrap<RecommendationEffect>(
+      apiClient.get('/analytics/recommendation-effect', { params }),
+    )
   },
-  publishDecision(scheduleId: number) {
-    return unwrap<PublishDecisionChain>(apiClient.get(`/analytics/publish-decision/${scheduleId}`))
+  publishDecision(scheduleId: number, dataScope: DataScope = 'REAL') {
+    return unwrap<PublishDecisionChain>(
+      apiClient.get(`/analytics/publish-decision/${scheduleId}`, {
+        params: { data_scope: dataScope },
+      }),
+    )
   },
   schedules(params: Record<string, unknown> = {}) {
     return unwrap<Schedule[]>(apiClient.get('/schedules', { params }))
@@ -378,8 +394,8 @@ export const workflowApi = {
   dashboard() {
     return unwrap<Record<string, unknown>>(apiClient.get('/dashboard/business'))
   },
-  analyticsOverview() {
-    return unwrap<Record<string, number>>(apiClient.get('/analytics/overview'))
+  analyticsOverview(params: Record<string, unknown> = {}) {
+    return unwrap<Record<string, unknown>>(apiClient.get('/analytics/overview', { params }))
   },
   analyticsPlatforms() {
     return unwrap<Array<Record<string, number | string>>>(
@@ -391,9 +407,9 @@ export const workflowApi = {
       apiClient.get('/analytics/time-comparison'),
     )
   },
-  analyticsRanking() {
-    return unwrap<Array<Record<string, number | string>>>(
-      apiClient.get('/analytics/content-ranking'),
+  analyticsRanking(params: Record<string, unknown> = {}) {
+    return unwrap<Array<Record<string, unknown>>>(
+      apiClient.get('/analytics/content-ranking', { params }),
     )
   },
   articleEngagement(articleId: number) {
@@ -414,11 +430,11 @@ export const workflowApi = {
   analyticsSummary() {
     return unwrap<Record<string, unknown>>(apiClient.post('/analytics/ai-summary'))
   },
-  experiments() {
-    return unwrap<Array<Record<string, unknown>>>(apiClient.get('/experiments'))
+  experiments(params: Record<string, unknown> = {}) {
+    return unwrap<Array<Record<string, unknown>>>(apiClient.get('/experiments', { params }))
   },
-  experiment(id: number) {
-    return unwrap<Record<string, unknown>>(apiClient.get(`/experiments/${id}`))
+  experiment(id: number, params: Record<string, unknown> = {}) {
+    return unwrap<Record<string, unknown>>(apiClient.get(`/experiments/${id}`, { params }))
   },
   createExperiment(data: Record<string, unknown>) {
     return unwrap<Record<string, unknown>>(apiClient.post('/experiments', data))
@@ -595,9 +611,25 @@ export const workflowApi = {
     return unwrap<PublishPackage>(apiClient.get(`/schedules/${id}/publish-package`))
   },
   async downloadPublishPackage(id: number) {
-    const response = await apiClient.get(`/schedules/${id}/publish-package/download`, {
-      responseType: 'blob',
-    })
+    let response
+    try {
+      response = await apiClient.get(`/schedules/${id}/publish-package/download`, {
+        responseType: 'blob',
+        timeout: 180_000,
+      })
+    } catch (error) {
+      if (
+        isAxiosError<Blob | ApiResponse<unknown>>(error) &&
+        error.response?.data instanceof Blob
+      ) {
+        try {
+          error.response.data = JSON.parse(await error.response.data.text()) as ApiResponse<unknown>
+        } catch {
+          // Preserve the original request failure when the server returned a non-JSON body.
+        }
+      }
+      throw error
+    }
     const url = URL.createObjectURL(response.data)
     const anchor = document.createElement('a')
     anchor.href = url

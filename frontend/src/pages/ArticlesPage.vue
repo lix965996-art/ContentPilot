@@ -25,6 +25,7 @@ const rows = ref<Article[]>([])
 const total = ref(0)
 const loading = ref(false)
 const importing = ref(false)
+const saving = ref(false)
 const editorOpen = ref(false)
 const previewOpen = ref(false)
 const previewArticle = ref<Article>()
@@ -34,6 +35,9 @@ const editingId = ref<number>()
 const rowPlatforms = ref<Record<number, Platform[]>>({})
 const rowEngagement = ref<Record<number, ArticleEngagementSummary>>({})
 const filters = reactive({ keyword: '', status: '', platform: '' })
+const pagination = reactive({ page: 1, pageSize: 20 })
+const hasFilters = computed(() => Boolean(filters.keyword || filters.status || filters.platform))
+let loadRevision = 0
 const tabs = [
   ['全部', ''],
   ['草稿', 'DRAFT'],
@@ -55,32 +59,54 @@ const form = reactive({
 })
 
 async function load() {
+  const revision = ++loadRevision
   loading.value = true
   try {
-    const data = await workflowApi.articles(filters)
+    const data = await workflowApi.articles({
+      ...filters,
+      page: pagination.page,
+      page_size: pagination.pageSize,
+    })
+    if (revision !== loadRevision) return
+    const lastPage = Math.max(1, Math.ceil(data.total / pagination.pageSize))
+    if (pagination.page > lastPage) {
+      pagination.page = lastPage
+      await load()
+      return
+    }
     rows.value = data.items
     total.value = data.total
-    const pairs = await Promise.all(
-      data.items.map(
-        async (row) =>
-          [
-            row.id,
-            [...new Set((await workflowApi.variants(row.id)).map((x) => x.platform))],
-          ] as const,
-      ),
-    )
     const mapping: Record<number, Platform[]> = {}
-    for (const [id, platforms] of pairs) mapping[id] = [...platforms]
+    for (const row of data.items) mapping[row.id] = row.platforms || []
     rowPlatforms.value = mapping
+    rowEngagement.value = {}
+    if (!data.items.length) return
     const engagementData = await workflowApi.articlesEngagement(data.items.map((row) => row.id))
+    if (revision !== loadRevision) return
     const engagementMap: Record<number, ArticleEngagementSummary> = {}
     for (const item of engagementData.items) engagementMap[item.articleId] = item
     rowEngagement.value = engagementMap
   } catch (error) {
-    ElMessage.error(getApiErrorMessage(error))
+    if (revision === loadRevision) ElMessage.error(getApiErrorMessage(error))
   } finally {
-    loading.value = false
+    if (revision === loadRevision) loading.value = false
   }
+}
+function applyFilters() {
+  pagination.page = 1
+  void load()
+}
+function resetFilters() {
+  Object.assign(filters, { keyword: '', status: '', platform: '' })
+  applyFilters()
+}
+function changePage(page: number) {
+  pagination.page = page
+  void load()
+}
+function changePageSize(size: number) {
+  pagination.pageSize = size
+  applyFilters()
 }
 async function importArticle(options: any) {
   importing.value = true
@@ -124,8 +150,15 @@ async function openArticle(row: Article) {
   await openEdit(row)
 }
 async function openEdit(row: Article) {
-  const detail = await workflowApi.article(row.id)
-  editingId.value = row.id
+  try {
+    const detail = await workflowApi.article(row.id)
+    showEditor(detail)
+  } catch (error) {
+    ElMessage.error(getApiErrorMessage(error, '文章打开失败'))
+  }
+}
+function showEditor(detail: Article) {
+  editingId.value = detail.id
   Object.assign(form, {
     title: detail.title,
     source_text: detail.sourceText,
@@ -139,8 +172,10 @@ async function openEdit(row: Article) {
   editorOpen.value = true
 }
 async function save() {
+  if (saving.value) return
   if (!form.title.trim() || form.source_text.trim().length < 10)
     return ElMessage.warning('请填写标题和至少 10 个字的正文')
+  saving.value = true
   try {
     if (editingId.value) await workflowApi.updateArticle(editingId.value, form)
     else await workflowApi.createArticle(form)
@@ -149,6 +184,8 @@ async function save() {
     await load()
   } catch (error) {
     ElMessage.error(getApiErrorMessage(error))
+  } finally {
+    saving.value = false
   }
 }
 function requestRemove(row: Article) {
@@ -157,28 +194,44 @@ function requestRemove(row: Article) {
 }
 async function confirmRemove() {
   if (!deleteTarget.value) return
-  await workflowApi.deleteArticle(deleteTarget.value.id)
-  confirmDeleteOpen.value = false
-  deleteTarget.value = undefined
-  await load()
+  try {
+    await workflowApi.deleteArticle(deleteTarget.value.id)
+    confirmDeleteOpen.value = false
+    deleteTarget.value = undefined
+    ElMessage.success('内容已删除')
+    await load()
+  } catch (error) {
+    ElMessage.error(getApiErrorMessage(error))
+  }
 }
 async function archive(row: Article) {
-  await workflowApi.archiveArticle(row.id)
-  await load()
+  try {
+    await workflowApi.archiveArticle(row.id)
+    ElMessage.success('内容已归档')
+    await load()
+  } catch (error) {
+    ElMessage.error(getApiErrorMessage(error))
+  }
 }
 function toStudio(row: Article) {
   router.push({ name: 'studio', query: { article: row.id } })
 }
 function selectStatus(value: string) {
   filters.status = value
-  void load()
+  applyFilters()
 }
 async function handleRouteAction() {
   if (route.query.create === '1' && canOperate.value) openCreate()
   const editId = Number(route.query.edit)
-  if (editId) {
-    const row = rows.value.find((item) => item.id === editId)
-    if (row) await openEdit(row)
+  if (Number.isSafeInteger(editId) && editId > 0) {
+    try {
+      const detail = await workflowApi.article(editId)
+      if (Number(route.query.edit) !== editId) return
+      if (canOperate.value) showEditor(detail)
+      else openPreview(detail)
+    } catch (error) {
+      ElMessage.error(getApiErrorMessage(error, '文章打开失败'))
+    }
   }
 }
 watch(
@@ -223,7 +276,8 @@ onMounted(async () => {
         clearable
         placeholder="搜索标题或正文"
         class="!w-64"
-        @keyup.enter="load"
+        @keyup.enter="applyFilters"
+        @clear="applyFilters"
         ><template #prefix><Search :size="15" /></template
       ></el-input>
       <el-select
@@ -231,13 +285,16 @@ onMounted(async () => {
         clearable
         placeholder="全部平台"
         class="!w-36"
-        @change="load"
+        @change="applyFilters"
         ><el-option label="微博" value="WEIBO" /><el-option
           label="小红书"
           value="XIAOHONGSHU" /><el-option label="微信公众号" value="WECHAT_OFFICIAL" /><el-option
           label="今日头条"
-          value="TOUTIAO" /><el-option label="X" value="X"
+          value="TOUTIAO" /><el-option label="X" value="X" /><el-option
+          label="Bluesky"
+          value="BLUESKY" /><el-option label="Mastodon" value="MASTODON"
       /></el-select>
+      <el-button @click="applyFilters">搜索</el-button>
       <span class="ml-auto text-xs text-muted">{{ total }} 条内容</span>
     </FilterBar>
     <DataList :loading="loading" :empty="!rows.length" class="content-list mt-3">
@@ -301,14 +358,27 @@ onMounted(async () => {
         </div>
       </article>
       <template #empty
-        ><EmptyState title="内容库还是空的"
+        ><EmptyState :title="hasFilters ? '未找到匹配内容' : '内容库还是空的'"
           ><template #icon><FilePlus2 :size="28" /></template
-          ><el-button v-if="canOperate" type="primary" plain @click="openCreate"
+          ><el-button v-if="hasFilters" @click="resetFilters">清除筛选</el-button
+          ><el-button v-else-if="canOperate" type="primary" plain @click="openCreate"
             >新建内容</el-button
           ></EmptyState
         ></template
       >
     </DataList>
+    <el-pagination
+      v-if="total > 0"
+      class="mt-5 flex justify-end"
+      data-testid="article-pagination"
+      :current-page="pagination.page"
+      :page-size="pagination.pageSize"
+      :page-sizes="[20, 50, 100]"
+      :total="total"
+      layout="total, sizes, prev, pager, next"
+      @current-change="changePage"
+      @size-change="changePageSize"
+    />
     <ArticlePlatformPreviewDialog v-model="previewOpen" :article="previewArticle" />
     <ConfirmDialog
       v-model="confirmDeleteOpen"
@@ -321,9 +391,12 @@ onMounted(async () => {
       v-model="editorOpen"
       :title="!canOperate ? '查看原文' : editingId ? '编辑原文' : '新建内容'"
       width="min(820px, 92vw)"
+      :close-on-click-modal="!saving"
+      :close-on-press-escape="!saving"
+      :show-close="!saving"
       destroy-on-close
     >
-      <el-form label-position="top"
+      <el-form label-position="top" :disabled="saving"
         ><div class="grid gap-x-4 sm:grid-cols-2">
           <el-form-item label="标题" class="sm:col-span-2" required
             ><el-input v-model="form.title" :disabled="!canOperate" maxlength="255" show-word-limit
@@ -365,8 +438,12 @@ onMounted(async () => {
           /></el-form-item></div
       ></el-form>
       <template #footer
-        ><el-button @click="editorOpen = false">{{ canOperate ? '取消' : '关闭' }}</el-button
-        ><el-button v-if="canOperate" type="primary" @click="save">保存内容</el-button></template
+        ><el-button :disabled="saving" @click="editorOpen = false">{{
+          canOperate ? '取消' : '关闭'
+        }}</el-button
+        ><el-button v-if="canOperate" type="primary" :loading="saving" @click="save"
+          >保存内容</el-button
+        ></template
       >
     </el-dialog>
   </div>

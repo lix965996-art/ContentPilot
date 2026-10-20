@@ -7,6 +7,7 @@ from typing import Any
 
 from app.models.business import ContentArticle
 from app.prompts.profiles import build_generation_prompt
+from app.services.fact_check_service import factual_conflicts as _contradictions
 from app.services.generation_service import _baseline_variant, edit_ratio
 from app.services.platform_content import build_x_post, x_weighted_length
 
@@ -17,13 +18,13 @@ PLATFORMS = ("WEIBO", "X", "XIAOHONGSHU", "WECHAT_OFFICIAL", "TOUTIAO")
 @dataclass(frozen=True)
 class PromptMetrics:
     platform_format_compliance: float
-    factual_consistency: float
-    information_completeness: float
+    factual_consistency: float | None
+    information_completeness: float | None
     average_duration_ms: float
     token_usage: float
     manual_edit_ratio: float
 
-    def as_dict(self) -> dict[str, float]:
+    def as_dict(self) -> dict[str, float | None]:
         return {
             "platformFormatCompliance": self.platform_format_compliance,
             "factualConsistency": self.factual_consistency,
@@ -90,28 +91,38 @@ def _is_compliant(platform: str, output: dict[str, Any]) -> bool:
     )
 
 
-def _score(case: dict[str, Any], output: dict[str, Any]) -> tuple[float, float, float]:
+def _score(
+    case: dict[str, Any], output: dict[str, Any]
+) -> tuple[float | None, float | None, float, dict[str, Any]]:
     content = output.get("content", "")
-    facts = case["expected_facts"]
-    present = sum(1 for fact in facts if fact in content)
-    completeness = present / len(facts) * 100
-    factual = (
-        100.0
-        if all(sentence in case["source"] for sentence in _source_sentences(content, case))
-        else 90.0
-    )
+    facts = case.get("expected_facts", [])
+    present = [fact for fact in facts if fact in content]
+    missing = [fact for fact in facts if fact not in content]
+    completeness = (len(present) / len(facts) * 100) if facts else None
+    contradictions = _contradictions(case.get("source", ""), content, facts)
+    if not facts:
+        factual = None
+    elif contradictions:
+        factual = max(0.0, 100.0 - 50.0 * len(contradictions))
+    elif not present:
+        # No expected fact is covered: there is no positive evidence that the
+        # output is correct. Do not turn an empty intersection into "100".
+        factual = None
+    else:
+        factual = 100.0
     preferred = "。".join(facts)
     manual_ratio = edit_ratio(content, preferred)
-    return factual, completeness, manual_ratio
-
-
-def _source_sentences(content: str, case: dict[str, Any]) -> list[str]:
-    return [fact for fact in case["expected_facts"] if fact in content]
+    evidence = {
+        "presentFacts": present,
+        "missingFacts": missing,
+        "contradictions": contradictions,
+    }
+    return factual, completeness, manual_ratio, evidence
 
 
 def run_regression() -> dict[str, Any]:
     cases = load_cases()
-    buckets: dict[str, list[float]] = {
+    buckets: dict[str, list[float | None]] = {
         key: []
         for key in (
             "old_format",
@@ -128,6 +139,7 @@ def run_regression() -> dict[str, Any]:
             "new_edit",
         )
     }
+    issues: list[dict[str, Any]] = []
     for case in cases:
         for platform in PLATFORMS:
             old_started = time.perf_counter()
@@ -136,8 +148,8 @@ def run_regression() -> dict[str, Any]:
             new_started = time.perf_counter()
             new, new_tokens = _new_output(case, platform)
             new_duration = (time.perf_counter() - new_started) * 1000
-            old_fact, old_complete, old_edit = _score(case, old)
-            new_fact, new_complete, new_edit = _score(case, new)
+            old_fact, old_complete, old_edit, old_evidence = _score(case, old)
+            new_fact, new_complete, new_edit, new_evidence = _score(case, new)
             buckets["old_format"].append(float(_is_compliant(platform, old)) * 100)
             buckets["new_format"].append(float(_is_compliant(platform, new)) * 100)
             buckets["old_fact"].append(old_fact)
@@ -150,15 +162,35 @@ def run_regression() -> dict[str, Any]:
             buckets["new_tokens"].append(new_tokens)
             buckets["old_edit"].append(old_edit)
             buckets["new_edit"].append(new_edit)
+            for prompt_name, factual, completeness, evidence in (
+                ("oldPrompt", old_fact, old_complete, old_evidence),
+                ("newPrompt", new_fact, new_complete, new_evidence),
+            ):
+                if factual is None or evidence["contradictions"] or evidence["missingFacts"]:
+                    issues.append(
+                        {
+                            "caseId": case["id"],
+                            "platform": platform,
+                            "prompt": prompt_name,
+                            "factualConsistency": factual,
+                            "informationCompleteness": completeness,
+                            **evidence,
+                        }
+                    )
 
     def metrics(prefix: str) -> PromptMetrics:
+        def values(key: str) -> list[float]:
+            return [value for value in buckets[key] if value is not None]
+
+        fact_values = values(f"{prefix}_fact")
+        complete_values = values(f"{prefix}_complete")
         return PromptMetrics(
-            round(mean(buckets[f"{prefix}_format"]), 2),
-            round(mean(buckets[f"{prefix}_fact"]), 2),
-            round(mean(buckets[f"{prefix}_complete"]), 2),
-            round(mean(buckets[f"{prefix}_duration"]), 3),
-            round(sum(buckets[f"{prefix}_tokens"]), 2),
-            round(mean(buckets[f"{prefix}_edit"]), 2),
+            round(mean(values(f"{prefix}_format")), 2),
+            round(mean(fact_values), 2) if fact_values else None,
+            round(mean(complete_values), 2) if complete_values else None,
+            round(mean(values(f"{prefix}_duration")), 3),
+            round(sum(values(f"{prefix}_tokens")), 2),
+            round(mean(values(f"{prefix}_edit")), 2),
         )
 
     return {
@@ -166,4 +198,9 @@ def run_regression() -> dict[str, Any]:
         "evaluationCount": len(cases) * len(PLATFORMS),
         "oldPrompt": metrics("old").as_dict(),
         "newPrompt": metrics("new").as_dict(),
+        "factualUnknownCount": sum(
+            1 for value in buckets["old_fact"] + buckets["new_fact"] if value is None
+        ),
+        "contradictionCount": sum(1 for issue in issues if issue["contradictions"]),
+        "issues": issues,
     }

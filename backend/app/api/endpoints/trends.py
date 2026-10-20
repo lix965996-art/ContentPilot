@@ -44,7 +44,7 @@ async def analyze_trend(
         "每个 angle 的 outline 必须是 JSON 字符串数组，不能是一整段编号文本。\n"
         f"完整输出结构：{json.dumps(TrendAnalysisOutput.model_json_schema(), ensure_ascii=False)}"
     )
-    result, prompt_tokens, completion_tokens, _ = await _validated_completion(
+    result, prompt_tokens, completion_tokens, _attempt = await _validated_completion(
         runtime, system_prompt, user_prompt, TrendAnalysisOutput
     )
     data = result.model_dump(mode="json")

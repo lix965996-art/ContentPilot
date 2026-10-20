@@ -69,27 +69,45 @@ test('a selected preview image can be removed without deleting the asset', async
       'Content-Type': 'application/json',
     }
     const articleResponse = await fetch('/api/articles?page_size=1', { headers })
+    if (!articleResponse.ok)
+      throw new Error(`Article fixture request failed: ${articleResponse.status}`)
     const articleBody = await articleResponse.json()
     const articleId = articleBody.data.items[0].id as number
-    const altText = `可移除配图-${Date.now()}`
-    const selectedResponse = await fetch('/api/media/select', {
-      method: 'POST',
-      headers,
-      body: JSON.stringify({
-        article_id: articleId,
-        source: 'E2E',
-        source_id: altText,
-        image_url:
-          'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="200" height="120"%3E%3Crect width="100%25" height="100%25" fill="%236b8afd"/%3E%3C/svg%3E',
-        thumbnail_url:
-          'data:image/svg+xml,%3Csvg xmlns="http://www.w3.org/2000/svg" width="200" height="120"%3E%3Crect width="100%25" height="100%25" fill="%236b8afd"/%3E%3C/svg%3E',
-        alt_text: altText,
-        usage_type: 'COVER',
-      }),
+    const altText = `可移除配图-${Date.now()}.png`
+    const canvas = document.createElement('canvas')
+    canvas.width = 200
+    canvas.height = 120
+    const context = canvas.getContext('2d')!
+    context.fillStyle = '#6b8afd'
+    context.fillRect(0, 0, canvas.width, canvas.height)
+    context.fillStyle = '#ffffff'
+    context.fillText(altText, 5, 60)
+    const png = await new Promise<Blob>((resolve, reject) => {
+      canvas.toBlob(
+        (blob) => (blob ? resolve(blob) : reject(new Error('PNG fixture encoding failed'))),
+        'image/png',
+      )
     })
+    const upload = new FormData()
+    upload.append('article_id', String(articleId))
+    upload.append('usage_type', 'COVER')
+    upload.append('file', png, altText)
+    const selectedResponse = await fetch('/api/media/upload', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${token}` },
+      body: upload,
+    })
+    if (!selectedResponse.ok)
+      throw new Error(`PNG fixture upload failed: ${selectedResponse.status}`)
     const selectedBody = await selectedResponse.json()
-    return { articleId, altText, assetId: selectedBody.data.id as number }
+    return {
+      articleId,
+      altText,
+      assetId: selectedBody.data.id as number,
+      uploadStatus: selectedResponse.status,
+    }
   })
+  expect(fixture.uploadStatus).toBe(200)
 
   await page.goto(`/studio?article=${fixture.articleId}`)
   const image = page.getByAltText(fixture.altText)
@@ -107,6 +125,18 @@ test('a selected preview image can be removed without deleting the asset', async
   await detached
   await expect(image).toHaveCount(0)
   await expect(page.getByText('图片已移除，可以重新选择')).toBeVisible()
+  const retained = await page.evaluate(async ({ articleId, assetId }) => {
+    const token =
+      localStorage.getItem('contentpilot_access_token') ||
+      sessionStorage.getItem('contentpilot_access_token')
+    const response = await fetch(`/api/articles/${articleId}/media`, {
+      headers: { Authorization: `Bearer ${token}` },
+    })
+    if (!response.ok) throw new Error(`Retained asset verification failed: ${response.status}`)
+    const body = await response.json()
+    return body.data.find((item: { id: number; selected: boolean }) => item.id === assetId)
+  }, fixture)
+  expect(retained).toMatchObject({ id: fixture.assetId, selected: false })
 })
 
 test('viewer sees read-only actions instead of operations that return 403', async ({ page }) => {

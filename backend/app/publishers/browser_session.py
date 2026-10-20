@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import html
 import os
 from collections.abc import Callable, Coroutine
 from dataclasses import dataclass
@@ -21,6 +22,7 @@ from typing import Any
 from playwright.async_api import BrowserContext, Page, Playwright, async_playwright
 
 from app.core.config import settings
+from app.core.paths import SESSIONS_DIR
 
 
 @dataclass
@@ -32,6 +34,11 @@ class LoginSession:
 
 # Type alias for the platform-specific login-detection callback.
 LoggedInCheck = Callable[[Page], Coroutine[Any, Any, bool]]
+
+
+def plain_text_to_html(content: str) -> str:
+    """Wrap plain text in paragraphs, escaping any markup in the input."""
+    return "".join(f"<p>{html.escape(line)}</p>" for line in content.splitlines() if line.strip())
 
 
 class BrowserSessionManager:
@@ -70,6 +77,7 @@ class BrowserSessionManager:
         profile_root_setting: str,
         headless_setting: str,
         platform_label: str,
+        platform_id: str,
         logged_in_check: LoggedInCheck,
         login_timeout: int = 60_000,
     ) -> None:
@@ -79,6 +87,9 @@ class BrowserSessionManager:
         self._profile_root_setting = profile_root_setting
         self._headless_setting = headless_setting
         self._platform_label = platform_label
+        if not platform_id or Path(platform_id).name != platform_id or platform_id in {".", ".."}:
+            raise ValueError("Platform session identifier must be a single directory name")
+        self._platform_id = platform_id
         self._logged_in_check = logged_in_check
         self._login_timeout = login_timeout
 
@@ -91,12 +102,7 @@ class BrowserSessionManager:
 
     def _profile_root(self) -> Path:
         configured: str = getattr(settings, self._profile_root_setting, "").strip()
-        default_dir = self._platform_label.lower().replace(" ", "-")
-        root = (
-            Path(configured).expanduser()
-            if configured
-            else Path.home() / ".contentpilot" / default_dir
-        )
+        root = Path(configured).expanduser() if configured else SESSIONS_DIR / self._platform_id
         root.mkdir(parents=True, exist_ok=True)
         return root.resolve()
 
@@ -203,6 +209,11 @@ class BrowserSessionManager:
                     await session.page.wait_for_timeout(2_000)
                     self._sessions[account_id] = session
                 except Exception as exc:
+                    if session is not None:
+                        try:
+                            await self._close(session)
+                        except Exception:
+                            pass
                     return {
                         "connected": False,
                         "image_data_url": "",

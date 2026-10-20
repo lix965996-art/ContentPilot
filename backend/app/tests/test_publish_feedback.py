@@ -43,6 +43,12 @@ def publish_one(client: TestClient, auth: dict, admin_auth: dict, monkeypatch) -
     variant = client.get(f"/api/generation/tasks/{task['taskId']}", headers=auth).json()["data"][
         "variants"
     ][0]
+    approved = client.post(
+        f"/api/variants/{variant['id']}/approve",
+        headers=auth,
+        json={"expected_fingerprint": variant["contentFingerprint"]},
+    )
+    assert approved.status_code == 200, approved.text
 
     accounts = client.get("/api/platform-accounts", headers=auth).json()["data"]
     account_id = next(item["id"] for item in accounts if item["platform"] == "WEIBO")
@@ -105,13 +111,21 @@ def publish_one(client: TestClient, auth: dict, admin_auth: dict, monkeypatch) -
     return schedule_id
 
 
-def record_metric(client: TestClient, auth: dict, schedule_id: int, *, likes: int, day: int = 0):
+def record_metric(
+    client: TestClient,
+    auth: dict,
+    schedule_id: int,
+    *,
+    likes: int,
+    day: int = 0,
+    platform: str = "WEIBO",
+):
     return client.post(
         "/api/analytics/manual",
         headers=auth,
         json={
             "schedule_id": schedule_id,
-            "platform": "WEIBO",
+            "platform": platform,
             "metric_date": (date.today() + timedelta(days=day)).isoformat(),
             "group_type": "RECOMMENDED_TIME",
             "impressions": 42000,
@@ -185,7 +199,9 @@ def test_unpublished_schedule_produces_no_evidence(client: TestClient, login_as)
     schedules = client.get("/api/schedules", headers=auth).json()["data"]
     pending = next(item for item in schedules if item["status"] not in ("PUBLISHED", "SUCCESS"))
 
-    response = record_metric(client, auth, pending["id"], likes=500, day=2)
+    response = record_metric(
+        client, auth, pending["id"], likes=500, day=2, platform=pending["platform"]
+    )
     assert response.status_code == 200, response.text
     assert response.json()["data"]["feedbackHistoryId"] is None
 

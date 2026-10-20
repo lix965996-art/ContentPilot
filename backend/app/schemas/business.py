@@ -3,7 +3,7 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, field_validator
 
-Platform = Literal["WEIBO", "XIAOHONGSHU", "WECHAT_OFFICIAL", "TOUTIAO", "X"]
+Platform = Literal["WEIBO", "XIAOHONGSHU", "WECHAT_OFFICIAL", "TOUTIAO", "X", "BLUESKY", "MASTODON"]
 
 
 class ArticleCreate(BaseModel):
@@ -51,6 +51,12 @@ class VariantUpdate(BaseModel):
     title: str = Field(min_length=1, max_length=255)
     content_text: str = Field(min_length=1, max_length=100_000)
     hashtags: list[str] = Field(default_factory=list, max_length=20)
+
+
+class VariantDecisionRequest(BaseModel):
+    """Bind a manual decision to the version the operator actually saw."""
+
+    expected_fingerprint: str = Field(min_length=64, max_length=64, pattern=r"^[a-f0-9]{64}$")
 
 
 class WechatFormatRequest(BaseModel):
@@ -233,6 +239,8 @@ class ScheduleCreate(BaseModel):
     platform: Platform
     scheduled_at: datetime
     publish_mode: PublishModeLiteral = "MANUAL_CONFIRM"
+    # Client-generated key so retries/double-clicks return the same schedule.
+    idempotency_key: str | None = Field(default=None, max_length=100)
     # Traceability for the recommendation that produced this schedule.
     recommendation_id: int | None = None
     time_source: TimeSourceLiteral = "CUSTOM"
@@ -274,11 +282,9 @@ class MetricCreate(BaseModel):
     collects: int = Field(default=0, ge=0)
     shares: int = Field(default=0, ge=0)
     followers: int = Field(default=0, ge=0)
-    # Explicit denominator selector. Defaults to IMPRESSIONS so existing callers
-    # (CSV/XLSX imports, manual entry) keep their current behavior. Callers that
-    # only have follower counts must opt into FOLLOWERS to avoid silent
-    # substitution that previously inflated engagement rates.
-    metric_basis: Literal["IMPRESSIONS", "FOLLOWERS"] = "IMPRESSIONS"
+    # A missing selector has no trustworthy provenance. Store the counters,
+    # and expose the rate as unavailable until a caller supplies its basis.
+    metric_basis: Literal["IMPRESSIONS", "FOLLOWERS", "UNKNOWN"] = "UNKNOWN"
     group_type: Literal["RECOMMENDED_TIME", "FIXED_TIME"] = "RECOMMENDED_TIME"
     data_source: Literal["REAL", "MANUAL", "IMPORTED", "SIMULATED"] = "MANUAL"
 

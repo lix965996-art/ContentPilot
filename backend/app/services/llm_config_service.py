@@ -7,7 +7,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from app.core.exceptions import AppException
-from app.models.business import ContentVariant, SystemSetting
+from app.models.business import SystemSetting
 from app.schemas.business import LlmConfigUpdate
 from app.services.setting_service import decrypt_secret, encrypt_secret, setting_value
 
@@ -149,117 +149,125 @@ def _connection_error_message(response: httpx.Response) -> str:
 
 
 def llm_usage(db: Session, days: int) -> dict:
+    from app.services.llm_usage_service import ensure_legacy_usage
+
+    accounting = ensure_legacy_usage(db.get_bind(), db)
+    with Session(accounting) as ledger_db:
+        return _ledger_usage(ledger_db, days)
+
+
+def _ledger_usage(db: Session, days: int) -> dict:
+    from app.models.business import LlmBudgetMonth, LlmUsageEntry
+
     since = datetime.now() - timedelta(days=days)
+    currency = setting_value(db, "llm.currency", "CNY")
+    rows = db.scalars(
+        select(LlmUsageEntry)
+        .where(LlmUsageEntry.created_at >= since)
+        .order_by(LlmUsageEntry.created_at.desc())
+    ).all()
+    current_rows = [row for row in rows if row.currency == currency]
     input_price = float(setting_value(db, "llm.input_price_per_million", "0") or 0)
     output_price = float(setting_value(db, "llm.output_price_per_million", "0") or 0)
-    price_configured = input_price > 0 or output_price > 0
-
-    def priced_cost(row: ContentVariant) -> tuple[float | None, str]:
-        if row.token_usage <= 0:
-            return 0.0, "NO_USAGE"
-        if price_configured and row.prompt_tokens + row.completion_tokens > 0:
-            cost = (
-                row.prompt_tokens * input_price + row.completion_tokens * output_price
-            ) / 1_000_000
-            return round(cost, 8), "CURRENT_PRICE"
-        if row.estimated_cost > 0:
-            return round(row.estimated_cost, 8), "SAVED_ESTIMATE"
-        return None, "UNPRICED"
-
-    rows = db.scalars(
-        select(ContentVariant)
-        .where(ContentVariant.created_at >= since)
-        .order_by(ContentVariant.created_at.desc())
-    ).all()
-    model_groups: dict[str, dict[str, float | int | str]] = {}
-    daily_groups: dict[str, dict[str, float | int | str]] = defaultdict(
-        lambda: {"tokens": 0, "cost": 0.0, "unpriced": 0}
-    )
-    priced_generations = 0
-    unpriced_generations = 0
+    groups: dict[str, dict] = {}
+    daily: dict[str, dict] = defaultdict(lambda: {"tokens": 0, "cost": 0.0, "unpriced": 0})
     for row in rows:
-        cost, pricing_status = priced_cost(row)
-        if pricing_status == "UNPRICED":
-            unpriced_generations += 1
-        elif pricing_status != "NO_USAGE":
-            priced_generations += 1
-        model = row.model_name or "未标记模型"
-        group = model_groups.setdefault(
-            model,
+        tokens = (row.prompt_tokens or 0) + (row.completion_tokens or 0)
+        group = groups.setdefault(
+            row.model,
             {
-                "model": model,
+                "model": row.model,
                 "generations": 0,
                 "tokens": 0,
                 "cost": 0.0,
                 "unpricedGenerations": 0,
+                "currencies": set(),
             },
         )
-        group["generations"] = int(group["generations"]) + 1
-        group["tokens"] = int(group["tokens"]) + row.token_usage
-        group["cost"] = float(group["cost"]) + (cost or 0)
-        if pricing_status == "UNPRICED":
-            group["unpricedGenerations"] = int(group["unpricedGenerations"]) + 1
+        group["generations"] += 1
+        group["tokens"] += tokens
+        group["currencies"].add(row.currency)
+        if row.currency == currency:
+            group["cost"] += row.estimated_cost or 0
+        if row.estimated_cost is None:
+            group["unpricedGenerations"] += 1
         day = row.created_at.date().isoformat()
-        daily_groups[day]["tokens"] = int(daily_groups[day]["tokens"]) + row.token_usage
-        daily_groups[day]["cost"] = float(daily_groups[day]["cost"]) + (cost or 0)
-        if pricing_status == "UNPRICED":
-            daily_groups[day]["unpriced"] = int(daily_groups[day]["unpriced"]) + 1
-    total_tokens = sum(row.token_usage for row in rows)
-    total_cost = sum((priced_cost(row)[0] or 0) for row in rows)
-
-    month_start = datetime.now().replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        daily[day]["tokens"] += tokens
+        if row.currency == currency:
+            daily[day]["cost"] += row.estimated_cost or 0
+        daily[day]["unpriced"] += int(row.estimated_cost is None)
+    now = datetime.now()
+    month_start = now.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
     month_rows = db.scalars(
-        select(ContentVariant).where(ContentVariant.created_at >= month_start)
+        select(LlmUsageEntry).where(
+            LlmUsageEntry.created_at >= month_start, LlmUsageEntry.currency == currency
+        )
     ).all()
-    month_cost = round(sum((priced_cost(row)[0] or 0) for row in month_rows), 6)
+    month_cost = sum(row.estimated_cost or 0 for row in month_rows)
     monthly_budget = float(setting_value(db, "llm.monthly_budget", "0") or 0)
-    warning_percent = int(setting_value(db, "llm.budget_warning_percent", "80") or 80)
-    budget_used_percent = round(month_cost / monthly_budget * 100, 2) if monthly_budget > 0 else 0
+    warning = int(setting_value(db, "llm.budget_warning_percent", "80") or 80)
+    used_percent = round(month_cost / monthly_budget * 100, 2) if monthly_budget else 0
+    month = db.get(LlmBudgetMonth, f"{now:%Y-%m}:{currency}")
+    unknown = sum(row.estimated_cost is None and row.status != "RUNNING" for row in month_rows)
     return {
         "days": days,
+        # Retained API names count provider attempts, including failures/retries.
         "generations": len(rows),
-        "pricedGenerations": priced_generations,
-        "unpricedGenerations": unpriced_generations,
-        "promptTokens": sum(row.prompt_tokens for row in rows),
-        "completionTokens": sum(row.completion_tokens for row in rows),
-        "totalTokens": total_tokens,
-        "estimatedCost": round(total_cost, 6),
-        "averageTokens": round(total_tokens / len(rows)) if rows else 0,
-        "currency": setting_value(db, "llm.currency", "CNY"),
-        "priceConfigured": price_configured,
+        "pricedGenerations": sum(row.estimated_cost is not None for row in rows),
+        "unpricedGenerations": sum(row.estimated_cost is None for row in rows),
+        "promptTokens": sum(row.prompt_tokens or 0 for row in rows),
+        "completionTokens": sum(row.completion_tokens or 0 for row in rows),
+        "totalTokens": sum((row.prompt_tokens or 0) + (row.completion_tokens or 0) for row in rows),
+        "estimatedCost": round(sum(row.estimated_cost or 0 for row in current_rows), 8),
+        "averageTokens": round(
+            sum((row.prompt_tokens or 0) + (row.completion_tokens or 0) for row in rows) / len(rows)
+        )
+        if rows
+        else 0,
+        "currency": currency,
+        "priceConfigured": input_price + output_price > 0,
         "inputPricePerMillion": input_price,
         "outputPricePerMillion": output_price,
         "monthlyBudget": monthly_budget,
-        "monthlyCost": month_cost,
-        "budgetWarningPercent": warning_percent,
-        "budgetUsedPercent": budget_used_percent,
-        "budgetAlert": monthly_budget > 0 and budget_used_percent >= warning_percent,
+        "monthlyCost": round(month_cost, 8),
+        "monthlyReservedCost": round(month.reserved_cost, 8) if month else 0,
+        "monthlyUnknownCalls": unknown,
+        "budgetWarningPercent": warning,
+        "budgetUsedPercent": used_percent,
+        "budgetAlert": monthly_budget > 0 and (used_percent >= warning or unknown > 0),
+        "scope": "PROVIDER_CALL_LEDGER",
+        "otherCurrencyCalls": sum(row.currency != currency for row in rows),
         "byModel": [
-            {**item, "cost": round(float(item["cost"]), 6)}
-            for item in sorted(
-                model_groups.values(), key=lambda item: int(item["tokens"]), reverse=True
-            )
+            {
+                **{key: value for key, value in group.items() if key != "currencies"},
+                "cost": round(group["cost"], 8),
+            }
+            for group in sorted(groups.values(), key=lambda item: item["tokens"], reverse=True)
         ],
         "daily": [
             {
                 "date": day,
                 "tokens": values["tokens"],
-                "cost": round(float(values["cost"]), 6),
+                "cost": round(values["cost"], 8),
                 "unpricedGenerations": values["unpriced"],
             }
-            for day, values in sorted(daily_groups.items())
+            for day, values in sorted(daily.items())
         ],
         "recent": [
             {
                 "id": row.id,
-                "articleTitle": row.article.title,
-                "platform": row.platform,
-                "model": row.model_name or "未标记模型",
+                "articleTitle": row.operation,
+                "platform": "",
+                "model": row.model,
+                "provider": row.provider,
+                "operation": row.operation,
+                "status": row.status,
                 "promptTokens": row.prompt_tokens,
                 "completionTokens": row.completion_tokens,
-                "totalTokens": row.token_usage,
-                "cost": priced_cost(row)[0],
-                "pricingStatus": priced_cost(row)[1],
+                "totalTokens": (row.prompt_tokens or 0) + (row.completion_tokens or 0),
+                "cost": row.estimated_cost,
+                "currency": row.currency,
+                "pricingStatus": row.pricing_status,
                 "createdAt": row.created_at.isoformat(),
             }
             for row in rows[:20]

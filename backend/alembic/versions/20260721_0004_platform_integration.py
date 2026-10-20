@@ -43,9 +43,6 @@ def upgrade() -> None:
         f"UPDATE platform_account SET capabilities_json = {empty_json} "
         "WHERE capabilities_json IS NULL"
     )
-    op.alter_column(
-        "platform_account", "capabilities_json", existing_type=sa.JSON(), nullable=False
-    )
     op.execute(
         "UPDATE platform_account SET credentials_encrypted = credential_encrypted "
         "WHERE credentials_encrypted IS NULL AND credential_encrypted IS NOT NULL"
@@ -54,10 +51,10 @@ def upgrade() -> None:
     unique_names = {
         item.get("name") for item in sa.inspect(bind).get_unique_constraints("platform_account")
     }
-    if "uq_platform_account_user" not in unique_names:
-        op.create_unique_constraint(
-            "uq_platform_account_user", "platform_account", ["user_id", "platform"]
-        )
+    with op.batch_alter_table("platform_account") as batch_op:
+        batch_op.alter_column("capabilities_json", existing_type=sa.JSON(), nullable=False)
+        if "uq_platform_account_user" not in unique_names:
+            batch_op.create_unique_constraint("uq_platform_account_user", ["user_id", "platform"])
     if not sa.inspect(bind).has_table("platform_auth_log"):
         op.create_table(
             "platform_auth_log",
@@ -95,18 +92,18 @@ def downgrade() -> None:
     op.drop_column("publish_schedule", "publish_package_json")
     op.drop_column("publish_schedule", "result_mode")
     op.drop_column("publish_schedule", "external_id")
-    op.drop_index("ix_platform_auth_log_created", table_name="platform_auth_log")
-    op.drop_index("ix_platform_auth_log_action", table_name="platform_auth_log")
-    op.drop_index("ix_platform_auth_log_account", table_name="platform_auth_log")
+    # Dropping the table removes its indexes; dropping the FK-backed index
+    # first is rejected by MySQL while the constraint still exists.
     op.drop_table("platform_auth_log")
-    op.drop_constraint("uq_platform_account_user", "platform_account", type_="unique")
-    op.drop_column("platform_account", "last_error")
-    op.drop_column("platform_account", "last_test_at")
-    op.drop_column("platform_account", "capabilities_json")
-    op.drop_column("platform_account", "token_expires_at")
-    op.drop_column("platform_account", "refresh_token_encrypted")
-    op.drop_column("platform_account", "access_token_encrypted")
-    op.drop_column("platform_account", "credentials_encrypted")
-    op.drop_column("platform_account", "client_id")
-    op.drop_column("platform_account", "app_id")
-    op.drop_column("platform_account", "auth_type")
+    with op.batch_alter_table("platform_account") as batch_op:
+        batch_op.drop_constraint("uq_platform_account_user", type_="unique")
+        batch_op.drop_column("last_error")
+        batch_op.drop_column("last_test_at")
+        batch_op.drop_column("capabilities_json")
+        batch_op.drop_column("token_expires_at")
+        batch_op.drop_column("refresh_token_encrypted")
+        batch_op.drop_column("access_token_encrypted")
+        batch_op.drop_column("credentials_encrypted")
+        batch_op.drop_column("client_id")
+        batch_op.drop_column("app_id")
+        batch_op.drop_column("auth_type")

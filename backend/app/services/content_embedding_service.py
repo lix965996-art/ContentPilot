@@ -23,9 +23,11 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
+from app.core.exceptions import AppException
 from app.models.business import ContentArticle, ContentEmbedding, ContentVariant, EngagementHistory
 from app.services.activity_service import BASELINE_SOURCE_TYPES, content_type_name
 from app.services.generation_service import load_llm_runtime
+from app.services.llm_usage_service import begin_usage, finish_usage
 from app.services.setting_service import setting_value
 
 EMBEDDING_VERSION = "v1"
@@ -97,19 +99,38 @@ async def embed_text(db: Session, text: str) -> tuple[list[float], str]:
     """Return (vector, model_name). Falls back to hashed vectors on any failure."""
     runtime = load_embedding_runtime(db)
     if runtime.usable:
+        ticket = None
         try:
+            ticket = begin_usage(
+                load_llm_runtime(db), "EMBEDDING", model=runtime.model, token_priced=False
+            )
             async with httpx.AsyncClient(timeout=settings.llm_timeout_seconds) as client:
                 response = await client.post(
                     f"{runtime.base_url.rstrip('/')}/embeddings",
                     headers={"Authorization": f"Bearer {runtime.api_key}"},
                     json={"model": runtime.model, "input": text[:4000]},
                 )
+                payload = response.json()
+                usage = payload.get("usage") or {}
+                tokens = usage.get("prompt_tokens", usage.get("total_tokens"))
+                finish_usage(
+                    ticket,
+                    prompt_tokens=int(tokens) if tokens is not None else None,
+                    completion_tokens=0 if tokens is not None else None,
+                    status="SUCCEEDED" if response.is_success else "FAILED",
+                    error_code=None if response.is_success else f"HTTP_{response.status_code}",
+                )
                 response.raise_for_status()
-                vector = response.json()["data"][0]["embedding"]
+                vector = payload["data"][0]["embedding"]
                 if isinstance(vector, list) and vector:
                     return [float(value) for value in vector], runtime.model
-        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError):
-            pass
+        except AppException as exc:
+            if exc.code not in {40961, 40962, 40963}:
+                raise
+            # Optional embeddings degrade to the explicitly labelled local
+            # vector without sending an unpriced/budget-blocked external call.
+        except (httpx.HTTPError, KeyError, IndexError, TypeError, ValueError) as exc:
+            finish_usage(ticket, status="FAILED", error_code=type(exc).__name__)
     return hashed_vector(text), FALLBACK_MODEL
 
 
@@ -358,6 +379,7 @@ def top_k_similar(
     query = query / (float(np.linalg.norm(query)) or 1.0)
     limit = min(k, len(usable))
     if FAISS_AVAILABLE:
+        assert faiss is not None
         index = faiss.IndexFlatIP(matrix.shape[1])
         index.add(matrix)
         scores, positions = index.search(query, limit)

@@ -1,22 +1,25 @@
 <script setup lang="ts">
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import ChartPanel from '@/components/ChartPanel.vue'
 import { workflowApi } from '@/api/workflow'
-import type { PublishDecisionChain, RecommendationEffect } from '@/types/business'
+import type { DataScope, PublishDecisionChain, RecommendationEffect } from '@/types/business'
 import { analysisPlatformNames, platformNames } from '@/types/business'
 import { AXIS_STYLE, CHART_COLORS, tooltipStyle } from '@/config/echartsTheme'
+import { escapeHtml } from '@/utils/previewContent'
 import {
   evaluatePublishReviewRecord,
   formatDateTime,
   formatDeviation,
   groupStats,
+  METRIC_BASIS_LABELS,
   type PublishReviewRecord,
 } from '@/utils/publishReviewMetrics'
 
 const props = defineProps<{
-  overview: Record<string, number>
+  overview: Record<string, unknown>
   ranking: Array<Record<string, unknown>>
   effect?: RecommendationEffect
+  dataScope?: DataScope
 }>()
 
 const expandedRows = ref<number[]>([])
@@ -33,12 +36,26 @@ function buildRawRecord(row: Record<string, unknown>) {
   const scheduleId = row.scheduleId as number
   const linked = effectItem(scheduleId)
   const platformKey = String(row.platform || linked?.platform || '')
+  const sources = linked?.dataSources || []
+  const containsSimulated = sources.some((source) => source.toUpperCase() === 'SIMULATED')
+  const containsReal = sources.some((source) => source.toUpperCase() !== 'SIMULATED')
+  const scope = linked?.dataScope || props.dataScope || 'REAL'
+  const source =
+    containsSimulated && containsReal
+      ? 'MIXED'
+      : containsSimulated
+        ? 'SIMULATED'
+        : containsReal || scope === 'REAL'
+          ? 'REAL'
+          : scope === 'SIMULATED'
+            ? 'SIMULATED'
+            : 'UNKNOWN'
   return evaluatePublishReviewRecord({
     scheduleId,
     title: String(row.title || linked?.title || '未知内容'),
     platformKey,
     platformLabel: displayPlatform(platformKey),
-    dataSource: row.dataSource ? String(row.dataSource) : undefined,
+    dataSource: row.dataSource ? String(row.dataSource) : source,
     timeSource: linked?.timeSource || 'CUSTOM',
     scheduledAt: linked?.scheduledAt ?? null,
     recommendedAt: linked?.recommendedAt ?? null,
@@ -49,11 +66,22 @@ function buildRawRecord(row: Record<string, unknown>) {
     collects: typeof row.collects === 'number' ? row.collects : null,
     shares: typeof row.shares === 'number' ? row.shares : null,
     followers: typeof row.followers === 'number' ? row.followers : null,
-    engagementTotal: Number(row.engagementTotal ?? linked?.engagementTotal ?? 0) || null,
-    apiEngagementRate:
-      typeof row.engagementRate === 'number'
+    engagementTotal:
+      typeof row.engagementTotal === 'number'
+        ? row.engagementTotal
+        : (linked?.engagementTotal ?? null),
+    apiEngagementRate: Object.prototype.hasOwnProperty.call(row, 'engagementRate')
+      ? typeof row.engagementRate === 'number'
         ? row.engagementRate
-        : (linked?.engagementRate ?? null),
+        : null
+      : (linked?.engagementRate ?? null),
+    metricBasis: typeof row.metricBasis === 'string' ? row.metricBasis : linked?.metricBasis,
+    rateAvailable:
+      typeof row.rateAvailable === 'boolean' ? row.rateAvailable : linked?.rateAvailable,
+    rateDenominator:
+      typeof row.rateDenominator === 'number'
+        ? row.rateDenominator
+        : (linked?.rateDenominator ?? null),
     impressions:
       typeof row.impressions === 'number' ? row.impressions : (linked?.impressions ?? null),
   })
@@ -72,41 +100,74 @@ const records = computed<PublishReviewRecord[]>(() => {
         platform: item.platform,
         engagementTotal: item.engagementTotal,
         engagementRate: item.engagementRate,
+        metricBasis: item.metricBasis,
+        rateAvailable: item.rateAvailable,
+        rateDenominator: item.rateDenominator,
       }),
     )
 })
 
-const totalCount = computed(() => props.overview.sampleCount || records.value.length)
+const totalCount = computed(() =>
+  typeof props.overview.sampleCount === 'number'
+    ? props.overview.sampleCount
+    : records.value.length,
+)
 const realValidCount = computed(() => records.value.filter((row) => row.isRealValid).length)
 const simulatedCount = computed(
-  () => records.value.filter((row) => !row.participatesInRealEffect).length,
+  () => records.value.filter((row) => row.dataSource === 'SIMULATED').length,
 )
 const recommendedCount = computed(
   () => records.value.filter((row) => row.isRecommendedGroup).length,
 )
 const customCount = computed(() => records.value.filter((row) => !row.isRecommendedGroup).length)
 
-/**
- * SIMULATED records never count as measured platform effect, but excluding them
- * leaves the comparison empty on a demo dataset. Opt in explicitly and badge it.
- */
-const includeSimulated = ref(true)
+const includeSimulated = computed(() => props.dataScope === 'SIMULATED')
 
 const comparableRecords = computed(() =>
   records.value.filter(
-    (row) => row.rateStatus === 'ok' && (row.participatesInRealEffect || includeSimulated.value),
+    (row) =>
+      row.rateStatus === 'ok' &&
+      (includeSimulated.value ? row.dataSource === 'SIMULATED' : row.participatesInRealEffect),
   ),
 )
 
 const recommendedStats = computed(() =>
-  groupStats(comparableRecords.value.filter((row) => row.isRecommendedGroup)),
+  groupStats(
+    comparableRecords.value.filter((row) => row.isRecommendedGroup),
+    { includeSimulated: includeSimulated.value },
+  ),
 )
 const customStats = computed(() =>
-  groupStats(comparableRecords.value.filter((row) => !row.isRecommendedGroup)),
+  groupStats(
+    comparableRecords.value.filter((row) => !row.isRecommendedGroup),
+    { includeSimulated: includeSimulated.value },
+  ),
 )
 
+const sameComparisonBasis = computed(
+  () =>
+    recommendedStats.value.rateAvailable &&
+    customStats.value.rateAvailable &&
+    recommendedStats.value.metricBasis === customStats.value.metricBasis &&
+    recommendedStats.value.sourceScope === customStats.value.sourceScope,
+)
+const comparisonNotice = computed(() => {
+  if (recommendedStats.value.metricBasis === 'MIXED' || customStats.value.metricBasis === 'MIXED')
+    return '分组包含混合分母，无法合并互动率或计算提升。'
+  if (
+    recommendedStats.value.rateAvailable &&
+    customStats.value.rateAvailable &&
+    !sameComparisonBasis.value
+  )
+    return '推荐与自选使用不同分母，无法计算提升或绘制合并对比。'
+  return ''
+})
+
 const canCompareUplift = computed(
-  () => recommendedStats.value.validCount >= 3 && customStats.value.validCount >= 3,
+  () =>
+    sameComparisonBasis.value &&
+    recommendedStats.value.validCount >= 3 &&
+    customStats.value.validCount >= 3,
 )
 
 const upliftPercent = computed(() => {
@@ -117,9 +178,10 @@ const upliftPercent = computed(() => {
   return Number((((recAvg - customAvg) / customAvg) * 100).toFixed(2))
 })
 
-const plottableRecords = computed(() =>
-  records.value.filter((row) => row.rateStatus === 'ok' && row.engagementRate !== null),
-)
+const plottableRecords = computed(() => {
+  const rows = comparableRecords.value.filter((row) => row.engagementRate !== null)
+  return new Set(rows.map((row) => row.metricBasis)).size <= 1 ? rows : []
+})
 
 const scatterOption = computed(() => {
   const plottable = plottableRecords.value
@@ -135,9 +197,9 @@ const scatterOption = computed(() => {
         const row = plottable[param.dataIndex]
         if (!row) return ''
         return [
-          `<strong>${row.title}</strong>`,
-          `${row.platformLabel} · ${row.timeSourceLabel}`,
-          `互动率 ${row.rateStatusLabel}`,
+          `<strong>${escapeHtml(row.title)}</strong>`,
+          `${escapeHtml(row.platformLabel)} · ${escapeHtml(row.timeSourceLabel)}`,
+          `互动率 ${escapeHtml(row.rateStatusLabel)}`,
           `浏览 ${row.impressions ?? '—'}`,
         ].join('<br/>')
       },
@@ -204,8 +266,8 @@ const groupPieOption = computed(() => {
 })
 
 const compareBarOption = computed(() => {
-  const rec = recommendedStats.value.avg
-  const custom = customStats.value.avg
+  const rec = sameComparisonBasis.value ? recommendedStats.value.avg : null
+  const custom = sameComparisonBasis.value ? customStats.value.avg : null
   return {
     grid: { left: 48, right: 16, top: 28, bottom: 28 },
     tooltip: {
@@ -294,22 +356,40 @@ const sourcePieOption = computed(() => {
 const decisions = ref<Record<number, PublishDecisionChain>>({})
 const decisionLoading = ref<number[]>([])
 const decisionErrors = ref<Record<number, string>>({})
+let decisionScopeRevision = 0
 
 async function loadDecision(scheduleId: number) {
   if (decisions.value[scheduleId] || decisionLoading.value.includes(scheduleId)) return
+  const scopeRevision = decisionScopeRevision
+  const scope = props.dataScope || 'REAL'
   decisionLoading.value = [...decisionLoading.value, scheduleId]
   delete decisionErrors.value[scheduleId]
   try {
+    const decision = await workflowApi.publishDecision(scheduleId, scope)
+    if (scopeRevision !== decisionScopeRevision) return
     decisions.value = {
       ...decisions.value,
-      [scheduleId]: await workflowApi.publishDecision(scheduleId),
+      [scheduleId]: decision,
     }
   } catch {
+    if (scopeRevision !== decisionScopeRevision) return
     decisionErrors.value = { ...decisionErrors.value, [scheduleId]: '推荐依据加载失败' }
   } finally {
-    decisionLoading.value = decisionLoading.value.filter((id) => id !== scheduleId)
+    if (scopeRevision === decisionScopeRevision)
+      decisionLoading.value = decisionLoading.value.filter((id) => id !== scheduleId)
   }
 }
+
+watch(
+  () => props.dataScope,
+  () => {
+    decisionScopeRevision += 1
+    expandedRows.value = []
+    decisions.value = {}
+    decisionErrors.value = {}
+    decisionLoading.value = []
+  },
+)
 
 function toggleExpand(scheduleId: number) {
   if (expandedRows.value.includes(scheduleId)) {
@@ -390,7 +470,7 @@ function hourlyOption(chain: PublishDecisionChain) {
         <strong>{{ customCount }}</strong>
       </div>
       <div v-if="upliftPercent !== null" class="review-kpi-accent">
-        <span>推荐提升</span>
+        <span>{{ includeSimulated ? '演示比较提升（不代表真实效果）' : '推荐提升' }}</span>
         <strong>{{ upliftPercent >= 0 ? '+' : '' }}{{ upliftPercent }}%</strong>
       </div>
     </section>
@@ -430,19 +510,20 @@ function hourlyOption(chain: PublishDecisionChain) {
     <section class="review-block">
       <div class="review-block-head">
         <h3>推荐 vs 自选</h3>
-        <label class="review-toggle">
-          <input v-model="includeSimulated" type="checkbox" />
-          包含演示数据（{{ simulatedCount }} 条）
-        </label>
+        <span class="review-toggle">{{
+          includeSimulated ? '仅查看演示数据' : '仅比较真实数据'
+        }}</span>
       </div>
       <p v-if="includeSimulated && simulatedCount" class="review-warning">
-        当前对比包含 {{ simulatedCount }} 条 SIMULATED
+        当前演示对比包含 {{ simulatedCount }} 条 SIMULATED
         模拟互动数据，用于演示流程，不代表真实平台效果。
       </p>
+      <p v-if="comparisonNotice" class="review-warning">{{ comparisonNotice }}</p>
       <table class="review-table">
         <thead>
           <tr>
             <th>分组</th>
+            <th>分母口径</th>
             <th>有效样本</th>
             <th>平均互动率</th>
             <th>中位互动率</th>
@@ -451,12 +532,14 @@ function hourlyOption(chain: PublishDecisionChain) {
         <tbody>
           <tr>
             <td>推荐</td>
+            <td>{{ METRIC_BASIS_LABELS[recommendedStats.metricBasis] }}</td>
             <td>{{ recommendedStats.validCount }}</td>
             <td>{{ recommendedStats.avg !== null ? `${recommendedStats.avg}%` : '—' }}</td>
             <td>{{ recommendedStats.median !== null ? `${recommendedStats.median}%` : '—' }}</td>
           </tr>
           <tr>
             <td>自选</td>
+            <td>{{ METRIC_BASIS_LABELS[customStats.metricBasis] }}</td>
             <td>{{ customStats.validCount }}</td>
             <td>{{ customStats.avg !== null ? `${customStats.avg}%` : '—' }}</td>
             <td>{{ customStats.median !== null ? `${customStats.median}%` : '—' }}</td>
@@ -494,7 +577,9 @@ function hourlyOption(chain: PublishDecisionChain) {
                   {{ row.isRecommendedGroup ? '推荐' : '自选' }}
                 </span>
               </td>
-              <td>{{ row.rateStatusLabel }}</td>
+              <td>
+                {{ row.rateStatusLabel }} <small>（{{ row.metricBasisLabel }}）</small>
+              </td>
             </tr>
             <tr v-if="expandedRows.includes(row.scheduleId)" class="expand-row">
               <td colspan="5">

@@ -1,11 +1,12 @@
 param([switch]$Force)
 
 $ErrorActionPreference = 'Stop'
-$projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+. (Join-Path $PSScriptRoot 'runtime-paths.ps1')
+$paths = Get-ContentPilotPaths
 $version = 'v2.2.6'
 $assetName = 'xiaohongshu-mcp-windows-amd64.exe'
 $expectedSha256 = '16266FAC57D756D1811BD1A6FDC77226E268810296B355D942E1616839FB88E3'
-$targetDirectory = Join-Path $projectRoot ".runtime\xiaohongshu-mcp\$version"
+$targetDirectory = Join-Path $paths.Tools "xiaohongshu-mcp\$version"
 $targetPath = Join-Path $targetDirectory $assetName
 $downloadUrl = "https://github.com/xpzouying/xiaohongshu-mcp/releases/download/$version/$assetName"
 

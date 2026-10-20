@@ -1,9 +1,10 @@
-import { computed, reactive, ref } from 'vue'
+import { computed, getCurrentScope, onScopeDispose, reactive, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import { useRouter } from 'vue-router'
 import { getApiErrorMessage } from '@/api/client'
 import { workflowApi } from '@/api/workflow'
 import { defaultPublishMode } from '@/composables/usePublishModes'
+import { createIdempotencyIntent, normalizeSchedulePayload } from '@/utils/idempotency'
 import type {
   Article,
   BatchRecommendationResponse,
@@ -22,18 +23,23 @@ export const RECOMMEND_PLATFORMS: Platform[] = [
   'XIAOHONGSHU',
   'WECHAT_OFFICIAL',
   'TOUTIAO',
+  'BLUESKY',
+  'MASTODON',
 ]
 
 const confidenceLabels: Record<string, string> = { HIGH: '高', MEDIUM: '中', LOW: '低' }
 
 function formatLocalInput(value: string) {
-  return value.slice(0, 16).replace('T', ' ')
+  const date = new Date(value.replace(' ', 'T'))
+  if (!Number.isFinite(date.getTime())) return ''
+  const pad = (number: number) => String(number).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`
 }
 
 function toIso(value: string) {
   if (!value) return ''
-  if (value.includes('T')) return value
-  return value.replace(' ', 'T')
+  const date = new Date(value.replace(' ', 'T'))
+  return Number.isFinite(date.getTime()) ? date.toISOString() : ''
 }
 
 export function useBatchRecommendation() {
@@ -51,6 +57,7 @@ export function useBatchRecommendation() {
   const recommendEndDate = ref('')
   const loading = ref(false)
   const scheduling = ref(false)
+  const batchCreateIntent = createIdempotencyIntent('batch')
   const batchResult = ref<BatchRecommendationResponse>()
   const planRows = ref<RecommendationPlanRow[]>([])
   const calcStep = ref(0)
@@ -60,24 +67,17 @@ export function useBatchRecommendation() {
   const lastError = ref('')
   // Semantic pipeline switch. When off the backend keeps the hybrid-v2 result.
   const optimizeEnabled = ref(true)
-  // Platform → operator-locked ISO time, replayed on every re-calculation.
+  // Locks belong to the current article/account selection, not to a global platform.
   const lockedByPlatform = reactive<Partial<Record<Platform, string>>>({})
-  let calcTimer: ReturnType<typeof setInterval> | undefined
+  let requestSequence = 0
+  let variantSequence = 0
+  const variantsLoading = ref(false)
+  let applyingContentType = false
+  const conflictSequences = new WeakMap<RecommendationPlanRow, number>()
 
-  const CALC_STEPS = [
-    '读取内容与平台版本',
-    'LLM 生成内容排期画像',
-    '检索语义相似历史内容',
-    '计算相似内容用户活跃度',
-    'OR-Tools 跨平台联合求解',
-    'LLM 审查排期方案',
-  ]
+  const CALC_STEPS = ['等待推荐服务返回（服务端未提供实时进度）', '校验推荐时间与现有排期冲突']
 
   function stopCalcProgress(final = false) {
-    if (calcTimer) {
-      clearInterval(calcTimer)
-      calcTimer = undefined
-    }
     if (final) {
       calcStep.value = CALC_STEPS.length
       calcPercent.value = 100
@@ -87,12 +87,54 @@ export function useBatchRecommendation() {
   function startCalcProgress() {
     stopCalcProgress()
     calcStep.value = 0
-    calcPercent.value = 8
-    calcTimer = setInterval(() => {
-      if (calcStep.value < CALC_STEPS.length - 1) calcStep.value += 1
-      calcPercent.value = Math.min(92, calcPercent.value + 7 + Math.floor(Math.random() * 5))
-    }, 620)
+    calcPercent.value = 0
   }
+
+  function invalidate(clearLocks = false) {
+    requestSequence += 1
+    loading.value = false
+    batchResult.value = undefined
+    planRows.value = []
+    calcStep.value = 0
+    calcPercent.value = 0
+    lastError.value = ''
+    if (clearLocks) for (const platform of RECOMMEND_PLATFORMS) delete lockedByPlatform[platform]
+  }
+
+  watch(
+    articleId,
+    () => {
+      variantSequence += 1
+      variantsLoading.value = false
+      variants.value = []
+      invalidate(true)
+    },
+    { flush: 'sync' },
+  )
+  watch(
+    () => JSON.stringify(accountByPlatform),
+    () => invalidate(true),
+    { flush: 'sync' },
+  )
+  watch(
+    [
+      selectedPlatforms,
+      contentType,
+      recommendWindow,
+      recommendStartDate,
+      recommendEndDate,
+      optimizeEnabled,
+    ],
+    () => {
+      if (!applyingContentType) invalidate()
+    },
+    { deep: true, flush: 'sync' },
+  )
+  if (getCurrentScope())
+    onScopeDispose(() => {
+      requestSequence += 1
+      variantSequence += 1
+    })
 
   const missingAccountPlatforms = computed(() =>
     selectedPlatforms.value.filter((platform) => !accountByPlatform[platform]),
@@ -101,6 +143,7 @@ export function useBatchRecommendation() {
   const canCalculate = computed(
     () =>
       Boolean(articleId.value) &&
+      !variantsLoading.value &&
       selectedPlatforms.value.length > 0 &&
       missingAccountPlatforms.value.length === 0 &&
       (recommendWindow.value !== 'CUSTOM' ||
@@ -127,7 +170,13 @@ export function useBatchRecommendation() {
     planRows.value.filter((row) => !row.skipped && row.recommendation),
   )
   const canSchedule = computed(
-    () => activePlanRows.value.length > 0 && activePlanRows.value.every((row) => row.selectedAt),
+    () =>
+      !loading.value &&
+      !scheduling.value &&
+      activePlanRows.value.length > 0 &&
+      activePlanRows.value.every(
+        (row) => row.selectedAt && !['冲突检测失败', '正在检查冲突'].includes(row.conflictMessage),
+      ),
   )
 
   function accountsFor(platform: Platform) {
@@ -159,9 +208,16 @@ export function useBatchRecommendation() {
 
   async function loadVariants() {
     if (!articleId.value) return
-    variants.value = await workflowApi.variants(articleId.value)
-    batchResult.value = undefined
-    planRows.value = []
+    const id = articleId.value
+    const sequence = ++variantSequence
+    variantsLoading.value = true
+    invalidate()
+    try {
+      const rows = await workflowApi.variants(id)
+      if (sequence === variantSequence && id === articleId.value) variants.value = rows
+    } finally {
+      if (sequence === variantSequence) variantsLoading.value = false
+    }
   }
 
   function syncAccountDefaults() {
@@ -201,17 +257,21 @@ export function useBatchRecommendation() {
         variantId: recommendation.variantId || variantFor(item.platform)?.id || 0,
         recommendation,
         skipped: false,
-        selectedAt: recommendation.recommendedAt,
-        timeSource: 'RECOMMENDED' as TimeSource,
+        selectedAt: lockedByPlatform[item.platform] || recommendation.recommendedAt,
+        timeSource: lockedByPlatform[item.platform]
+          ? ('CUSTOM' as TimeSource)
+          : ('RECOMMENDED' as TimeSource),
         recommendedAt: recommendation.recommendedAt,
-        customAt: formatLocalInput(recommendation.recommendedAt),
+        customAt: formatLocalInput(lockedByPlatform[item.platform] || recommendation.recommendedAt),
         conflictLevel: summarizeConflict(recommendation),
         conflictMessage: summarizeConflictMessage(recommendation),
         locked: Boolean(lockedByPlatform[item.platform]),
       }
     })
     if (response.contentType && !contentType.value) {
+      applyingContentType = true
       contentType.value = response.contentType
+      applyingContentType = false
     }
   }
 
@@ -229,12 +289,25 @@ export function useBatchRecommendation() {
 
   async function refreshRowConflict(row: RecommendationPlanRow) {
     if (!row.selectedAt || row.skipped) return
+    const sequence = (conflictSequences.get(row) || 0) + 1
+    conflictSequences.set(row, sequence)
+    const at = row.selectedAt
+    const accountId = row.accountId
+    const context = requestSequence
+    const active = () =>
+      context === requestSequence &&
+      conflictSequences.get(row) === sequence &&
+      row.selectedAt === at &&
+      row.accountId === accountId &&
+      planRows.value.includes(row)
+    row.conflictMessage = '正在检查冲突'
     try {
       const result = await workflowApi.scheduleConflictCheck({
         platform: row.platform,
-        scheduled_at: row.selectedAt,
-        account_id: row.accountId,
+        scheduled_at: at,
+        account_id: accountId,
       })
+      if (!active()) return
       row.conflictLevel = result.hasConflict
         ? 'CONFLICT'
         : result.hasDensityWarning
@@ -243,7 +316,7 @@ export function useBatchRecommendation() {
       row.conflictMessage =
         result.conflicts[0]?.message || (result.hasDensityWarning ? '同账号发布较密' : '无冲突')
     } catch {
-      row.conflictLevel = 'NONE'
+      if (!active()) return
       row.conflictMessage = '冲突检测失败'
     }
   }
@@ -253,66 +326,83 @@ export function useBatchRecommendation() {
       return ElMessage.warning(calculateHint.value || '请完善输入条件')
     }
     loading.value = true
+    const sequence = ++requestSequence
+    const active = () => sequence === requestSequence
+    const request = {
+      article_id: articleId.value,
+      content_type: contentType.value || undefined,
+      targets: selectedPlatforms.value.map((platform) => ({
+        platform,
+        account_id: accountByPlatform[platform]!,
+        variant_id: variantFor(platform)?.id,
+        locked_at: lockedByPlatform[platform],
+      })),
+      optimize: optimizeEnabled.value,
+      window: recommendWindow.value,
+      window_start_date: recommendWindow.value === 'CUSTOM' ? recommendStartDate.value : undefined,
+      window_end_date: recommendWindow.value === 'CUSTOM' ? recommendEndDate.value : undefined,
+    }
     lastError.value = ''
     batchResult.value = undefined
     planRows.value = []
     startCalcProgress()
     try {
-      const response = await workflowApi.recommendBatch({
-        article_id: articleId.value,
-        content_type: contentType.value || undefined,
-        targets: selectedPlatforms.value.map((platform) => ({
-          platform,
-          account_id: accountByPlatform[platform]!,
-          variant_id: variantFor(platform)?.id,
-          locked_at: lockedByPlatform[platform],
-        })),
-        optimize: optimizeEnabled.value,
-        window: recommendWindow.value,
-        window_start_date:
-          recommendWindow.value === 'CUSTOM' ? recommendStartDate.value : undefined,
-        window_end_date: recommendWindow.value === 'CUSTOM' ? recommendEndDate.value : undefined,
-      })
+      const response = await workflowApi.recommendBatch(request)
+      if (!active()) return
       batchResult.value = response
       buildPlanRows(response)
+      calcStep.value = 1
       await Promise.all(planRows.value.map((row) => refreshRowConflict(row)))
+      if (!active()) return
       stopCalcProgress(true)
       if (!planRows.value.length) {
         lastError.value = '接口未返回任何平台结果，请检查该文章是否已生成对应平台版本。'
         ElMessage.warning(lastError.value)
         return
       }
+      if (!activePlanRows.value.length) {
+        lastError.value = '所有平台推荐均失败，请查看各平台错误后重试。'
+        ElMessage.error(lastError.value)
+        return
+      }
       const solved = response.plan?.optimizationApplied
-      ElMessage.success(
-        solved
-          ? `已生成 ${response.successCount} 个平台的联合排期方案（求解状态 ${response.plan?.solverStatus}）`
-          : `已生成 ${response.successCount} 个平台的推荐方案`,
+      const message = solved
+        ? `已生成 ${response.successCount} 个平台的联合排期方案（求解状态 ${response.plan?.solverStatus}）`
+        : `已生成 ${response.successCount} 个平台的推荐方案`
+      if (
+        response.failureCount ||
+        planRows.value.some((row) => row.conflictMessage === '冲突检测失败')
       )
+        ElMessage.warning(`${message}，部分推荐或冲突校验失败，请检查结果`)
+      else ElMessage.success(message)
       // Bring the result table into view; otherwise a long wait looks like "nothing happened".
       requestAnimationFrame(() => {
+        if (!active()) return
         document
           .querySelector('.result-table-wrap, .profile-panel')
           ?.scrollIntoView({ behavior: 'smooth', block: 'start' })
       })
     } catch (error) {
+      if (!active()) return
       stopCalcProgress()
       calcPercent.value = 0
       calcStep.value = 0
       lastError.value = getApiErrorMessage(
         error,
-        optimizeEnabled.value
+        request.optimize
           ? '联合排期计算失败。可关闭上方语义开关后重试，或确认后端服务仍在运行。'
           : '推荐计算失败，请稍后重试',
       )
       ElMessage.error(lastError.value)
     } finally {
-      loading.value = false
+      if (active()) loading.value = false
     }
   }
 
   /** Keep an existing lock pinned to whatever time the operator just chose. */
   function syncLock(row: RecommendationPlanRow) {
     if (row.locked && row.selectedAt) lockedByPlatform[row.platform] = row.selectedAt
+    else delete lockedByPlatform[row.platform]
   }
 
   function toggleLock(row: RecommendationPlanRow) {
@@ -345,7 +435,12 @@ export function useBatchRecommendation() {
   }
 
   function applyCustomTime(row: RecommendationPlanRow) {
-    if (!row.customAt) return
+    if (!row.customAt) {
+      row.selectedAt = ''
+      row.timeSource = 'CUSTOM'
+      syncLock(row)
+      return
+    }
     row.selectedAt = toIso(row.customAt)
     row.timeSource = 'CUSTOM'
     syncLock(row)
@@ -357,46 +452,76 @@ export function useBatchRecommendation() {
   }
 
   async function staggerOverlaps(minutes = 15) {
+    if (minutes <= 0) return
     const groups = batchResult.value?.overlapGroups || []
     if (!groups.length) return
     const overlapSet = new Set(groups.flat())
     const affected = planRows.value
       .filter((row) => overlapSet.has(row.platform) && !row.skipped && row.recommendation)
-      .sort((a, b) => a.selectedAt.localeCompare(b.selectedAt))
+      .sort((a, b) => new Date(a.selectedAt).getTime() - new Date(b.selectedAt).getTime())
     if (affected.length < 2) return
-    let cursor = new Date(affected[0].selectedAt)
-    for (let index = 1; index < affected.length; index += 1) {
-      cursor = new Date(cursor.getTime() + minutes * 60_000)
-      affected[index].selectedAt = cursor.toISOString()
-      affected[index].timeSource = 'CUSTOM'
-      affected[index].customAt = formatLocalInput(affected[index].selectedAt)
-      await refreshRowConflict(affected[index])
+    const context = requestSequence
+    const spacing = minutes * 60_000
+    const occupied = affected
+      .filter((row) => row.locked)
+      .map((row) => new Date(row.selectedAt).getTime())
+    let changed = 0
+    for (const row of affected) {
+      if (context !== requestSequence) return
+      if (row.locked) continue
+      const original = new Date(row.selectedAt).getTime()
+      if (!Number.isFinite(original)) continue
+      let at = original
+      while (occupied.some((time) => Math.abs(time - at) < spacing)) {
+        at = Math.max(...occupied.filter((time) => Math.abs(time - at) < spacing)) + spacing
+      }
+      occupied.push(at)
+      if (at === original) continue
+      row.selectedAt = new Date(at).toISOString()
+      row.timeSource = 'CUSTOM'
+      row.customAt = formatLocalInput(row.selectedAt)
+      changed += 1
+      await refreshRowConflict(row)
     }
-    ElMessage.success(`已按 ${minutes} 分钟间隔错开重合时间`)
+    if (context === requestSequence)
+      ElMessage.info(
+        changed
+          ? `已错开 ${changed} 个未锁定平台，锁定时间保持不变`
+          : '当前时间已错开，锁定时间保持不变',
+      )
   }
 
   async function createBatchSchedules() {
     if (!canSchedule.value || !articleId.value) return
     scheduling.value = true
     try {
-      const batchKey = `batch-${articleId.value}-${Date.now()}`
-      const response = await workflowApi.createSchedulesBatch({
+      const payload = {
         article_id: articleId.value,
         content_type: contentType.value || undefined,
-        idempotency_key: batchKey,
-        items: activePlanRows.value.map((row) => {
-          const account = accounts.value.find((item) => item.id === row.accountId)
-          return {
-            platform: row.platform,
-            variant_id: row.variantId,
-            account_id: row.accountId,
-            scheduled_at: row.selectedAt,
-            recommendation_id: row.recommendation!.id,
-            time_source: row.timeSource,
-            recommended_at: row.recommendedAt,
-            publish_mode: defaultPublishMode(row.platform, account),
-          }
-        }),
+        items: activePlanRows.value
+          .map((row) => {
+            const account = accounts.value.find((item) => item.id === row.accountId)
+            return normalizeSchedulePayload({
+              platform: row.platform,
+              variant_id: row.variantId,
+              account_id: row.accountId,
+              scheduled_at: row.selectedAt,
+              recommendation_id: row.recommendation!.id,
+              time_source: row.timeSource,
+              recommended_at: row.recommendedAt,
+              publish_mode: defaultPublishMode(row.platform, account),
+            })
+          })
+          .sort(
+            (a, b) =>
+              a.platform.localeCompare(b.platform) ||
+              a.account_id - b.account_id ||
+              a.variant_id - b.variant_id,
+          ),
+      }
+      const response = await workflowApi.createSchedulesBatch({
+        ...payload,
+        idempotency_key: batchCreateIntent.keyFor(payload),
       })
       const failed = response.items.filter((item) => !item.success)
       if (failed.length) {

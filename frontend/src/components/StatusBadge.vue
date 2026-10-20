@@ -9,6 +9,9 @@ const labelMap: Record<string, string> = {
   PENDING: '待执行',
   RUNNING: '执行中',
   PUBLISHING: '发布中',
+  PUBLISHED: '已公开发布',
+  EXPIRED: '已错过排期',
+  INTERRUPTED: '执行中断',
   RETRYING: '重试中',
   SUCCESS: '成功',
   PARTIAL_SUCCESS: '部分成功',
@@ -30,6 +33,7 @@ const labelMap: Record<string, string> = {
 const tone = computed(() =>
   [
     'SUCCESS',
+    'PUBLISHED',
     'DRAFT_CREATED',
     'PUBLISH_SUBMITTED',
     'MANUAL_PUBLISHED',
@@ -42,7 +46,9 @@ const tone = computed(() =>
       ? 'danger'
       : ['RUNNING', 'PUBLISHING', 'RETRYING', 'GENERATED', 'RESEARCHING'].includes(props.status)
         ? 'primary'
-        : ['WAITING_MANUAL_CONFIRM', 'PARTIAL_SUCCESS', 'READY'].includes(props.status)
+        : ['WAITING_MANUAL_CONFIRM', 'PARTIAL_SUCCESS', 'READY', 'EXPIRED', 'INTERRUPTED'].includes(
+              props.status,
+            )
           ? 'warning'
           : 'neutral',
 )

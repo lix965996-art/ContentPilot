@@ -1,4 +1,6 @@
 <script setup lang="ts">
+import logoUrl from '@/assets/contentpilot-logo.png'
+
 withDefaults(
   defineProps<{
     compact?: boolean
@@ -20,7 +22,7 @@ withDefaults(
     aria-label="ContentPilot 多平台内容运营工作台"
   >
     <span class="brand-image-frame" :class="{ 'is-compact': compact }" aria-hidden="true">
-      <img src="/brand/contentpilot-logo.png" alt="" />
+      <img :src="logoUrl" alt="" />
     </span>
     <span v-if="showSubtitle && !compact" class="brand-subtitle">多平台内容运营工作台</span>
   </div>

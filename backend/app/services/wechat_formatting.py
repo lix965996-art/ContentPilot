@@ -213,8 +213,13 @@ def format_wechat_html(markdown: str, profile: dict | None = None) -> tuple[str,
         elif plain_heading:
             blocks.append(f'<h3 style="{heading_style(2)}">{inline(stripped)}</h3>')
         elif ordered or bullet:
-            marker = f"{ordered.group(1)}." if ordered else "•"
-            content = ordered.group(2) if ordered else bullet.group(1)
+            if ordered is not None:
+                marker = f"{ordered.group(1)}."
+                content = ordered.group(2)
+            else:
+                assert bullet is not None
+                marker = "•"
+                content = bullet.group(1)
             blocks.append(
                 f'<section style="display:flex;margin:0 0 {max(8, spacing - 4)}px;'
                 f'color:#2b2b2b;font-size:{font_size}px;line-height:{line_height};">'

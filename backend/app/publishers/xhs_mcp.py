@@ -8,6 +8,7 @@ Xiaohongshu cookies in ContentPilot and is disabled unless
 from __future__ import annotations
 
 import asyncio
+import os
 import re
 import socket
 import subprocess
@@ -20,6 +21,14 @@ from urllib.parse import urlparse
 import httpx
 
 from app.core.config import settings
+from app.core.paths import (
+    LOGS_DIR,
+    PROJECT_ROOT,
+    TOOLS_DIR,
+    XHS_COOKIE_PATH,
+    XHS_SESSION_DIR,
+    ensure_directory,
+)
 from app.publishers.base import PublishResult
 from app.services.platform_content import normalize_topics
 
@@ -41,12 +50,22 @@ VISIBILITY_ALIASES = {
     "仅互关好友可见": "仅互关好友可见",
 }
 
-_session: dict[str, Any] = {"id": None, "client": None}
+_session: dict[str, Any] = {"id": None}
 _local_process: subprocess.Popen[bytes] | None = None
-_local_start_lock = asyncio.Lock()
+_local_start_locks: dict[int, asyncio.Lock] = {}
 
-PROJECT_ROOT = Path(__file__).resolve().parents[3]
-XHS_RUNTIME_DIR = PROJECT_ROOT / ".runtime" / "xiaohongshu-mcp"
+
+def _local_start_lock() -> asyncio.Lock:
+    """Return a lock bound to the current event loop.
+
+    Scheduler jobs use a fresh ``asyncio.run`` loop while the API uses uvicorn's
+    loop; a module-level ``asyncio.Lock`` would stay bound to the first loop.
+    """
+    loop_id = id(asyncio.get_running_loop())
+    return _local_start_locks.setdefault(loop_id, asyncio.Lock())
+
+
+XHS_RUNTIME_DIR = TOOLS_DIR / "xiaohongshu-mcp"
 
 
 def _mcp_host_port() -> tuple[str, int]:
@@ -97,21 +116,24 @@ async def _ensure_local_service() -> None:
     if await _port_is_open(host, port):
         return
 
-    async with _local_start_lock:
+    async with _local_start_lock():
         if await _port_is_open(host, port):
             return
         binary = _find_local_binary()
         if binary is None:
             raise RuntimeError("小红书本地 MCP 服务未安装。请先安装 xiaohongshu-mcp Windows 程序。")
 
-        PROJECT_ROOT.joinpath(".runtime").mkdir(parents=True, exist_ok=True)
-        stdout_path = PROJECT_ROOT / ".runtime" / "xhs-mcp.stdout.log"
-        stderr_path = PROJECT_ROOT / ".runtime" / "xhs-mcp.stderr.log"
+        ensure_directory(LOGS_DIR)
+        ensure_directory(XHS_SESSION_DIR)
+        stdout_path = LOGS_DIR / "xhs-mcp.stdout.log"
+        stderr_path = LOGS_DIR / "xhs-mcp.stderr.log"
+        environment = {**os.environ, "COOKIES_PATH": str(XHS_COOKIE_PATH)}
         creationflags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         with stdout_path.open("ab") as stdout_file, stderr_path.open("ab") as stderr_file:
             _local_process = subprocess.Popen(
                 [str(binary), "-headless=true", f"-port=:{port}"],
-                cwd=str(binary.parent),
+                cwd=str(XHS_SESSION_DIR),
+                env=environment,
                 stdin=subprocess.DEVNULL,
                 stdout=stdout_file,
                 stderr=stderr_file,
@@ -124,7 +146,7 @@ async def _ensure_local_service() -> None:
             if _local_process.poll() is not None:
                 break
             await asyncio.sleep(0.5)
-        raise RuntimeError("小红书本地 MCP 服务启动失败。请查看 .runtime/xhs-mcp.stderr.log。")
+        raise RuntimeError(f"小红书本地 MCP 服务启动失败。请查看 {stderr_path}。")
 
 
 def _friendly_mcp_error(exc: Exception) -> str:
@@ -139,9 +161,8 @@ def _friendly_mcp_error(exc: Exception) -> str:
 
 
 def _get_client() -> httpx.AsyncClient:
-    if _session["client"] is None:
-        _session["client"] = httpx.AsyncClient(timeout=30)
-    return _session["client"]
+    """Create a client per call; cached clients cannot cross event loops."""
+    return httpx.AsyncClient(timeout=30)
 
 
 async def _ensure_session() -> str:
@@ -151,42 +172,59 @@ async def _ensure_session() -> str:
 
     await _ensure_local_service()
     client = _get_client()
-    response = await client.post(
-        XHS_MCP_URL,
-        json={
-            "jsonrpc": "2.0",
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {},
-                "clientInfo": {"name": "contentpilot", "version": "1.0.0"},
+    try:
+        response = await client.post(
+            XHS_MCP_URL,
+            json={
+                "jsonrpc": "2.0",
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {},
+                    "clientInfo": {"name": "contentpilot", "version": "1.0.0"},
+                },
+                "id": uuid.uuid4().hex[:8],
             },
-            "id": uuid.uuid4().hex[:8],
-        },
-    )
-    response.raise_for_status()
-    session_id = response.headers.get("Mcp-Session-Id") or response.headers.get("mcp-session-id")
-    if not session_id:
-        raise RuntimeError("xiaohongshu-mcp 未返回 Mcp-Session-Id")
+        )
+        response.raise_for_status()
+        session_id = response.headers.get("Mcp-Session-Id") or response.headers.get(
+            "mcp-session-id"
+        )
+        if not session_id:
+            raise RuntimeError("xiaohongshu-mcp 未返回 Mcp-Session-Id")
 
-    initialized = await client.post(
-        XHS_MCP_URL,
-        json={"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
-        headers={"Mcp-Session-Id": session_id},
-    )
-    initialized.raise_for_status()
-    _session["id"] = session_id
-    return session_id
+        initialized = await client.post(
+            XHS_MCP_URL,
+            json={"jsonrpc": "2.0", "method": "notifications/initialized", "params": {}},
+            headers={"Mcp-Session-Id": session_id},
+        )
+        initialized.raise_for_status()
+        _session["id"] = session_id
+        return session_id
+    finally:
+        close = getattr(client, "aclose", None)
+        if close is not None:
+            await close()
 
 
 async def _rpc_call(
-    method: str, params: dict[str, Any] | None = None, timeout: float = 30
+    method: str,
+    params: dict[str, Any] | None = None,
+    timeout: float = 30,
+    *,
+    retry: bool = True,
 ) -> dict[str, Any]:
-    """Send one JSON-RPC request within an initialized MCP session."""
-    for attempt in range(2):
+    """Send one JSON-RPC request within an initialized MCP session.
+
+    Mutating calls such as ``publish_content`` pass ``retry=False`` so a lost
+    response cannot publish a second note.
+    """
+    attempts = 2 if retry else 1
+    for attempt in range(attempts):
         session_id = await _ensure_session()
+        client = _get_client()
         try:
-            response = await _get_client().post(
+            response = await client.post(
                 XHS_MCP_URL,
                 json={
                     "jsonrpc": "2.0",
@@ -206,9 +244,13 @@ async def _rpc_call(
             # A local MCP restart invalidates its session id. Clear it and retry
             # once so a crashed bridge can be started again transparently.
             _session["id"] = None
-            if attempt == 0:
+            if attempt + 1 < attempts:
                 continue
             raise
+        finally:
+            close = getattr(client, "aclose", None)
+            if close is not None:
+                await close()
 
     raise RuntimeError("xiaohongshu-mcp request failed")
 
@@ -378,6 +420,7 @@ class XiaohongshuMCPPublisher:
                 "tools/call",
                 {"name": "publish_content", "arguments": arguments},
                 timeout=120,
+                retry=False,
             )
             detail_text = _extract_text(response)
             safe_text = _safe_detail(detail_text)

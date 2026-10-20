@@ -28,7 +28,7 @@ const router = useRouter()
 const auth = useAuthStore()
 const loading = ref(true)
 const dashboard = ref<Record<string, any>>({})
-const overview = ref<Record<string, number>>({})
+const overview = ref<Record<string, unknown>>({})
 const recentArticles = ref<Article[]>([])
 const recentEngagement = ref<Record<number, ArticleEngagementSummary>>({})
 const schedules = ref<Schedule[]>([])
@@ -238,7 +238,12 @@ onMounted(load)
         </header>
         <div v-if="dashboard.trend?.length" class="performance-content">
           <div class="performance-metric">
-            <span>平均互动率</span><strong>{{ overview.engagementRate || 0 }}%</strong
+            <span>互动率</span
+            ><strong>{{
+              typeof overview.engagementRate === 'number'
+                ? `${overview.engagementRate}%`
+                : '口径未确认或无数据'
+            }}</strong
             ><small>基于 {{ overview.sampleCount || 0 }} 条数据</small>
           </div>
           <ChartPanel :option="trendOption" height="112px" />

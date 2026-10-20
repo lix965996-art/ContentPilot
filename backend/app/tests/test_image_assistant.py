@@ -1,16 +1,91 @@
 import base64
 
+import httpcore
 import httpx
 import pytest
 from fastapi.testclient import TestClient
 
+from app.core import urls
 from app.core.exceptions import AppException
+from app.services import image_service
 from app.services.generation_service import LlmRuntime
 from app.services.image_service import MEDIA_UPLOAD_DIR, generate_provider_image
 
 PNG_BYTES = base64.b64decode(
     "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
 )
+
+
+@pytest.mark.asyncio
+async def test_generated_provider_image_cannot_fetch_private_target(monkeypatch) -> None:
+    async def provider_response(_runtime, _payload):
+        return httpx.Response(
+            200,
+            request=httpx.Request("POST", "https://provider.example/images/generations"),
+            json={"images": [{"url": "https://127.0.0.1/private.png"}]},
+        )
+
+    async def forbidden_connection(*_args, **_kwargs):
+        pytest.fail("generated images must not connect to a private target")
+
+    monkeypatch.setattr(image_service, "_post_image_request", provider_response)
+    monkeypatch.setattr(httpcore.AnyIOBackend, "connect_tcp", forbidden_connection)
+    with pytest.raises(AppException, match="内网") as error:
+        await generate_provider_image(
+            LlmRuntime(
+                provider="siliconflow",
+                api_key="test-key",
+                base_url="https://provider.example",
+                model_name="test-image",
+            ),
+            prompt="An isolated image generation test",
+            model="test-image",
+        )
+    assert error.value.status_code == 502
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("declared_length", [None, "12"])
+async def test_generated_image_download_stops_before_reading_oversize_body(
+    monkeypatch, declared_length
+) -> None:
+    class OversizeStream(httpx.AsyncByteStream):
+        reads = 0
+        closed = False
+
+        async def __aiter__(self):
+            for chunk in [b"1234", b"5678", b"9012"]:
+                self.reads += 1
+                yield chunk
+
+        async def aclose(self):
+            self.closed = True
+
+    stream = OversizeStream()
+
+    async def handler(_request):
+        headers = {"Content-Type": "image/png"}
+        if declared_length:
+            headers["Content-Length"] = declared_length
+        return httpx.Response(200, headers=headers, stream=stream)
+
+    monkeypatch.setattr(urls, "PublicHTTPTransport", lambda **_kwargs: httpx.MockTransport(handler))
+    monkeypatch.setattr(image_service, "MAX_IMAGE_BYTES", 5)
+    with pytest.raises(AppException, match="图片不能超过") as error:
+        await image_service._download_generated_image("https://images.example/large.png")
+    assert error.value.status_code == 502
+    assert stream.reads == (0 if declared_length else 2)
+    assert stream.closed
+
+
+@pytest.mark.asyncio
+async def test_generated_image_download_keeps_valid_image_and_type(monkeypatch) -> None:
+    async def handler(_request):
+        return httpx.Response(200, headers={"Content-Type": "image/png"}, content=PNG_BYTES)
+
+    monkeypatch.setattr(urls, "PublicHTTPTransport", lambda **_kwargs: httpx.MockTransport(handler))
+    suffix, content = await image_service._download_generated_image("https://images.example/img")
+    assert suffix == ".png" and content == PNG_BYTES
 
 
 @pytest.mark.asyncio
@@ -146,8 +221,12 @@ def test_real_image_model_flow_and_transform(client: TestClient, login_as, monke
 
 
 def test_external_image_can_be_detached_and_reselected_with_long_attribution(
-    client: TestClient, login_as
+    client: TestClient, login_as, monkeypatch
 ) -> None:
+    async def download(_url):
+        return ".png", PNG_BYTES
+
+    monkeypatch.setattr("app.api.endpoints.media._download_generated_image", download)
     token = login_as("operator", "Operator@123456")["access_token"]
     auth = headers(token)
     article = client.post(
@@ -186,12 +265,17 @@ def test_external_image_can_be_detached_and_reselected_with_long_attribution(
     assert reselected.json()["data"]["id"] == selected_data["id"]
     assert reselected.json()["data"]["selected"] is True
     rows = client.get(f"/api/articles/{article['id']}/media", headers=auth).json()["data"]
-    assert sum(item["imageUrl"] == image_url for item in rows) == 1
+    assert sum(item["id"] == selected_data["id"] for item in rows) == 1
+    assert selected_data["imageUrl"].startswith("/uploads/media/")
 
 
 def test_selected_body_image_can_replace_cover_without_losing_old_cover(
-    client: TestClient, login_as
+    client: TestClient, login_as, monkeypatch
 ) -> None:
+    async def download(_url):
+        return ".png", PNG_BYTES
+
+    monkeypatch.setattr("app.api.endpoints.media._download_generated_image", download)
     token = login_as("operator", "Operator@123456")["access_token"]
     auth = headers(token)
     article = client.post(

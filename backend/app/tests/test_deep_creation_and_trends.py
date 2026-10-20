@@ -224,6 +224,15 @@ def test_user_can_select_and_persist_a_deep_candidate(client, login_as) -> None:
     assert selected.status_code == 200
     data = selected.json()["data"]
     assert data["variant"]["title"] == "候选二"
+    selected_fingerprint = data["variant"]["contentFingerprint"]
+    assert len(selected_fingerprint) == 64
+    approved = client.post(
+        f"/api/variants/{data['variant']['id']}/approve",
+        headers=auth,
+        json={"expected_fingerprint": selected_fingerprint},
+    )
+    assert approved.status_code == 200, approved.text
+    assert approved.json()["data"]["reviewFingerprint"] == selected_fingerprint
     state = data["task"]["platformStatusJson"]["WEIBO"]
     assert state["userSelectedCandidate"] == 1
     assert state["userSelectedVariantId"] == data["variant"]["id"]

@@ -1,9 +1,17 @@
 import { defineConfig, devices } from '@playwright/test'
+import { randomBytes } from 'node:crypto'
+import { resolve } from 'node:path'
+import { fileURLToPath } from 'node:url'
 
+const projectRoot = fileURLToPath(new URL('..', import.meta.url))
+const varDirectory = resolve(projectRoot, process.env.CONTENTPILOT_VAR_DIR?.trim() || 'var')
+const e2eDirectory = resolve(varDirectory, 'run/e2e')
 const apiPort = Number(process.env.E2E_API_PORT || 8001)
 const webPort = Number(process.env.E2E_WEB_PORT || 5174)
 const apiUrl = `http://127.0.0.1:${apiPort}`
 const webUrl = `http://127.0.0.1:${webPort}`
+// Ephemeral per-run secret: the E2E server only lives for this test session.
+const e2eJwtSecret = process.env.E2E_JWT_SECRET?.trim() || randomBytes(32).toString('hex')
 
 export default defineConfig({
   testDir: './tests/e2e',
@@ -11,7 +19,11 @@ export default defineConfig({
   // E2E cases share a disposable SQLite database that is never reused by the dev server.
   workers: 1,
   retries: 0,
-  reporter: [['list'], ['html', { open: 'never' }]],
+  outputDir: resolve(varDirectory, 'reports/playwright/results'),
+  reporter: [
+    ['list'],
+    ['html', { open: 'never', outputFolder: resolve(varDirectory, 'reports/playwright/html') }],
+  ],
   use: {
     baseURL: webUrl,
     trace: 'retain-on-failure',
@@ -29,9 +41,10 @@ export default defineConfig({
       env: {
         APP_DEMO_MODE: 'true',
         APP_ENV: 'test',
-        DATABASE_URL: 'sqlite:///./app/tests/.e2e_socialflow.db',
+        CONTENTPILOT_VAR_DIR: e2eDirectory,
+        PYTHONDONTWRITEBYTECODE: '1',
         E2E_API_PORT: String(apiPort),
-        JWT_SECRET: 'e2e-secret-that-is-long-enough-for-jwt-signing',
+        JWT_SECRET: e2eJwtSecret,
       },
       url: `${apiUrl}/api/health`,
       reuseExistingServer: false,
@@ -42,6 +55,7 @@ export default defineConfig({
       env: {
         CONTENTPILOT_API_TARGET: apiUrl,
         CONTENTPILOT_WEB_PORT: String(webPort),
+        CONTENTPILOT_VAR_DIR: e2eDirectory,
       },
       url: webUrl,
       reuseExistingServer: false,

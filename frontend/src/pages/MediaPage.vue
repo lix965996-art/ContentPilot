@@ -22,12 +22,17 @@ const onlyFavorite = ref(false)
 const assetQuery = ref('')
 const keywords = ref<Array<{ zh: string; en: string; reason: string }>>([])
 const activeKeyword = ref('')
+const resultsKeyword = ref('')
 const images = ref<Array<Record<string, unknown>>>([])
 const selectedForArticle = ref<MediaAsset[]>([])
 const loading = ref(false)
 const uploading = ref(false)
 const saving = ref(false)
 const notice = ref('')
+let articleContextSequence = 0
+let extractSequence = 0
+let searchSequence = 0
+let loadedArticleId: number | undefined
 const metadata = ref({
   title: '',
   collection: '',
@@ -74,13 +79,40 @@ async function loadAssets() {
 }
 
 async function loadArticleContext() {
-  if (!articleId.value) {
+  const target = articleId.value
+  const sequence = ++articleContextSequence
+  if (!target) {
+    loadedArticleId = undefined
     selectedForArticle.value = []
     keywords.value = []
+    activeKeyword.value = ''
+    resultsKeyword.value = ''
+    images.value = []
+    notice.value = ''
     return
   }
-  selectedForArticle.value = await workflowApi.articleMedia(articleId.value)
-  if (view.value === 'search') await extract()
+  if (loadedArticleId !== target) {
+    // Switching articles: clear state that belongs to the previous context.
+    selectedForArticle.value = []
+    keywords.value = []
+    activeKeyword.value = ''
+    resultsKeyword.value = ''
+    images.value = []
+    notice.value = ''
+  }
+  try {
+    const data = await workflowApi.articleMedia(target)
+    if (sequence !== articleContextSequence || target !== articleId.value) return
+    selectedForArticle.value = data
+    loadedArticleId = target
+    if (view.value === 'search' && !keywords.value.length) {
+      await extract(target, sequence)
+    }
+  } catch (error) {
+    if (sequence === articleContextSequence && target === articleId.value) {
+      ElMessage.error(getApiErrorMessage(error, '文章素材加载失败'))
+    }
+  }
 }
 
 function fillMetadata(asset: MediaAsset) {
@@ -129,16 +161,17 @@ async function toggleFavorite(asset: MediaAsset) {
 }
 
 async function upload(options: any) {
+  const target = articleId.value
   const body = new FormData()
-  if (articleId.value) body.append('article_id', String(articleId.value))
+  if (target) body.append('article_id', String(target))
   body.append('usage_type', 'BODY')
   body.append('file', options.file)
   uploading.value = true
   try {
     await workflowApi.uploadMedia(body)
     await loadAssets()
-    if (articleId.value) await loadArticleContext()
-    ElMessage.success(articleId.value ? '素材已上传并关联内容' : '素材已上传到资产库')
+    if (target === articleId.value) await loadArticleContext()
+    ElMessage.success(target ? '素材已上传并关联内容' : '素材已上传到资产库')
   } catch (error) {
     ElMessage.error(getApiErrorMessage(error, '上传失败'))
   } finally {
@@ -147,49 +180,101 @@ async function upload(options: any) {
 }
 
 async function attach(asset: MediaAsset, usageType: 'COVER' | 'BODY') {
-  if (!articleId.value) return ElMessage.warning('请先选择要使用素材的内容')
+  const target = articleId.value
+  if (!target) return ElMessage.warning('请先选择要使用素材的内容')
   try {
-    await workflowApi.attachMedia(asset.id, articleId.value, usageType)
-    await loadArticleContext()
+    await workflowApi.attachMedia(asset.id, target, usageType)
     await loadAssets()
-    ElMessage.success(usageType === 'COVER' ? '已设为封面' : '已加入正文')
+    if (target === articleId.value) {
+      await loadArticleContext()
+      ElMessage.success(usageType === 'COVER' ? '已设为封面' : '已加入正文')
+    } else {
+      ElMessage.success('已关联到之前选择的内容')
+    }
   } catch (error) {
     ElMessage.error(getApiErrorMessage(error, '关联素材失败'))
   }
 }
 
-async function extract() {
-  if (!articleId.value) return
+async function extract(target = articleId.value, contextSequence = articleContextSequence) {
+  if (!target || target !== articleId.value) return
+  const sequence = ++extractSequence
   loading.value = true
   try {
-    const data = await workflowApi.keywords(articleId.value)
+    const data = await workflowApi.keywords(target)
+    if (
+      sequence !== extractSequence ||
+      contextSequence !== articleContextSequence ||
+      target !== articleId.value
+    ) {
+      return
+    }
     keywords.value = data.keywords
     activeKeyword.value = data.keywords[0]?.en || 'editorial'
-    await searchOnline()
+    await searchOnline(target, sequence, contextSequence)
   } catch (error) {
-    ElMessage.error(getApiErrorMessage(error))
+    if (sequence === extractSequence && target === articleId.value) {
+      ElMessage.error(getApiErrorMessage(error))
+    }
   } finally {
-    loading.value = false
+    if (sequence === extractSequence) loading.value = false
   }
 }
 
-async function searchOnline() {
-  if (!articleId.value) return ElMessage.warning('在线选图前请先选择关联内容')
-  if (!activeKeyword.value) return
+async function searchOnline(
+  target = articleId.value,
+  extractSeq = extractSequence,
+  contextSeq = articleContextSequence,
+  manual = false,
+) {
+  if (!target || target !== articleId.value) {
+    return ElMessage.warning('在线选图前请先选择关联内容')
+  }
+  if (manual) {
+    // An explicit keyword/search must not be overwritten by an older auto extraction.
+    extractSequence += 1
+    extractSeq = extractSequence
+    loading.value = false
+  }
+  const keyword = activeKeyword.value
+  if (!keyword) return
+  const sequence = ++searchSequence
   try {
-    const data = await workflowApi.searchMedia(activeKeyword.value)
+    const data = await workflowApi.searchMedia(keyword)
+    if (
+      sequence !== searchSequence ||
+      extractSeq !== extractSequence ||
+      contextSeq !== articleContextSequence ||
+      target !== articleId.value ||
+      keyword !== activeKeyword.value
+    ) {
+      return
+    }
     images.value = data.items
     notice.value = data.notice
+    resultsKeyword.value = keyword
   } catch (error) {
-    ElMessage.error(getApiErrorMessage(error, '图片搜索失败'))
+    if (
+      sequence === searchSequence &&
+      target === articleId.value &&
+      keyword === activeKeyword.value
+    ) {
+      ElMessage.error(getApiErrorMessage(error, '图片搜索失败'))
+    }
   }
+}
+
+function manualSearch() {
+  void searchOnline(undefined, undefined, undefined, true)
 }
 
 async function selectOnline(image: Record<string, unknown>, usage: 'COVER' | 'BODY') {
-  if (!articleId.value) return
+  const target = articleId.value
+  if (!target) return
+  const keyword = activeKeyword.value
   try {
     await workflowApi.selectMedia({
-      article_id: articleId.value,
+      article_id: target,
       source: image.source,
       source_id: image.id,
       image_url: image.imageUrl,
@@ -197,14 +282,19 @@ async function selectOnline(image: Record<string, unknown>, usage: 'COVER' | 'BO
       photographer_name: image.photographerName,
       photographer_url: image.photographerUrl,
       alt_text: image.altText,
-      search_keyword: activeKeyword.value,
+      search_keyword: resultsKeyword.value || keyword,
       title: image.altText,
       license_type: image.licenseName,
       license_note: image.licenseUrl,
       usage_type: usage,
     })
-    await Promise.all([loadArticleContext(), loadAssets()])
-    ElMessage.success(usage === 'COVER' ? '已设为封面' : '已加入正文')
+    await loadAssets()
+    if (target === articleId.value) {
+      await loadArticleContext()
+      ElMessage.success(usage === 'COVER' ? '已设为封面' : '已加入正文')
+    } else {
+      ElMessage.success('已关联到之前选择的内容')
+    }
   } catch (error) {
     ElMessage.error(getApiErrorMessage(error, '选择图片失败'))
   }
@@ -227,7 +317,7 @@ function chooseCollection(value: string) {
 
 function chooseKeyword(value: string) {
   activeKeyword.value = value
-  void searchOnline()
+  void searchOnline(undefined, undefined, undefined, true)
 }
 
 function returnToStudio() {
@@ -418,11 +508,14 @@ onMounted(init)
             <input
               v-model="activeKeyword"
               placeholder="输入图片关键词"
-              @keyup.enter="searchOnline"
+              @keyup.enter="manualSearch"
             />
-            <button @click="searchOnline">搜索</button>
+            <button @click="manualSearch">搜索</button>
           </div>
-          <span>{{ notice }}</span>
+          <span
+            >{{ notice
+            }}<template v-if="resultsKeyword"> · 结果关键词：{{ resultsKeyword }}</template></span
+          >
         </header>
         <div v-if="images.length" class="media-masonry">
           <article v-for="item in images" :key="String(item.id)">

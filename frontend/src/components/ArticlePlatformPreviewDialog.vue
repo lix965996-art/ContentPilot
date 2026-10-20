@@ -10,6 +10,9 @@ import XiaohongshuPreview from '@/components/platform-preview/XiaohongshuPreview
 import WechatPreview from '@/components/platform-preview/WechatPreview.vue'
 import ToutiaoPreview from '@/components/platform-preview/ToutiaoPreview.vue'
 import XPreview from '@/components/platform-preview/XPreview.vue'
+import BlueskyPreview from '@/components/platform-preview/BlueskyPreview.vue'
+import MastodonPreview from '@/components/platform-preview/MastodonPreview.vue'
+import { mastodonLimits } from '@/utils/mastodon'
 import { getApiErrorMessage } from '@/api/client'
 import { workflowApi } from '@/api/workflow'
 import type {
@@ -43,12 +46,23 @@ const previewPlatformNames: Record<Platform, string> = {
   TOUTIAO: '头条',
 }
 
-const platforms: Platform[] = ['WEIBO', 'XIAOHONGSHU', 'WECHAT_OFFICIAL', 'TOUTIAO', 'X']
+const platforms: Platform[] = [
+  'WEIBO',
+  'XIAOHONGSHU',
+  'WECHAT_OFFICIAL',
+  'TOUTIAO',
+  'X',
+  'BLUESKY',
+  'MASTODON',
+]
 
 const loading = ref(false)
 const variants = ref<Variant[]>([])
 const media = ref<MediaAsset[]>([])
 const accounts = ref<PlatformAccount[]>([])
+const currentMastodonLimits = computed(() =>
+  mastodonLimits(accounts.value.find((item) => item.platform === 'MASTODON')?.config),
+)
 const articleDetail = ref<Article>()
 const engagement = ref<ArticleEngagementSummary>()
 const activePlatform = ref<Platform>('WEIBO')
@@ -136,6 +150,8 @@ function accountLabel(platform: Platform) {
       WECHAT_OFFICIAL: '未配置公众号',
       TOUTIAO: '未配置今日头条账号',
       X: '未配置 X 账号',
+      BLUESKY: '未配置 Bluesky 账号',
+      MASTODON: '未配置 Mastodon 账号',
     } satisfies Record<Platform, string>
   )[platform]
 }
@@ -298,6 +314,23 @@ watch(
           :tags="draft.hashtags"
           :media="previewMedia"
           :status-length="xStatusLength"
+        />
+        <BlueskyPreview
+          v-else-if="hasPreviewContent && activePlatform === 'BLUESKY'"
+          :account-name="accountLabel('BLUESKY')"
+          :title="draft.title"
+          :content="draft.content_text"
+          :tags="draft.hashtags"
+          :media="previewMedia"
+        />
+        <MastodonPreview
+          v-else-if="hasPreviewContent && activePlatform === 'MASTODON'"
+          :account-name="accountLabel('MASTODON')"
+          :title="draft.title"
+          :content="draft.content_text"
+          :tags="draft.hashtags"
+          :media="previewMedia"
+          v-bind="currentMastodonLimits"
         />
         <WechatPreview
           v-else-if="hasPreviewContent && activePlatform === 'WECHAT_OFFICIAL'"

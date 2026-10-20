@@ -66,6 +66,32 @@ PLATFORM_PROFILES = {
         ),
         output_schema=('{"title":"...","content":"...","hashtags":["#Topic"],"warnings":["..."]}'),
     ),
+    "BLUESKY": PlatformPromptProfile(
+        name="Bluesky",
+        objective="将原文改写为可独立阅读、忠于事实的简洁社交短帖。",
+        format_rules=(
+            "title 作为首句钩子；title、content、换行和 hashtags 合并后最多 300 个 Unicode 可见字符（字素簇）",
+            "中文通常算 1 个可见字符；组合 Emoji 算 1 个，URL 按完整文本计数，不套用 X 的加权规则",
+            "完整帖子 UTF-8 编码不超过 3000 字节；不能拆断组合 Emoji 或省略重要限定条件",
+            "标签放入 hashtags 数组，最多 4 个；关闭标签时返回空数组",
+            "使用纯文本、短段落；不输出 Markdown 标题或加粗标记，不编造数据、来源和经历",
+            "关闭 Emoji 时 title 和 content 不得出现 Emoji",
+        ),
+        output_schema=('{"title":"...","content":"...","hashtags":["#话题"],"warnings":["..."]}'),
+    ),
+    "MASTODON": PlatformPromptProfile(
+        name="Mastodon",
+        objective="面向所属社区发布可独立阅读、忠于原文事实的简洁社交短帖。",
+        format_rules=(
+            "title 是首句钩子；title、content、换行和 hashtags 合并后默认最多 500 个计数字符",
+            "按 Unicode 字素簇计数，中文通常算 1 个字符，组合 Emoji 算 1 个；每条 HTTP(S) URL 按 23 个字符预留",
+            "不同服务器可能配置不同长度和媒体限制，发布前需按已连接服务器再次校验",
+            "使用纯文本与短段落，不输出 Markdown 标题、加粗标记或 HTML；最多配 4 张图片",
+            "标签放入 hashtags 数组，最多 4 个；关闭标签时必须返回空数组",
+            "不得虚构社区热点、真实互动量、来源或亲身经历；关闭 Emoji 时标题与正文不得出现 Emoji",
+        ),
+        output_schema=('{"title":"...","content":"...","hashtags":["#话题"],"warnings":["..."]}'),
+    ),
     "XIAOHONGSHU": PlatformPromptProfile(
         name="小红书",
         objective="以自然、有层次、便于收藏的笔记表达原文信息，不伪造体验。",

@@ -4,13 +4,16 @@ import json
 import re
 import time
 from collections.abc import Awaitable, Callable
+from contextvars import ContextVar
 from dataclasses import dataclass
 from difflib import SequenceMatcher
 from typing import Any
 
 import httpx
+import regex
 from pydantic import BaseModel, ValidationError
 from sqlalchemy import func, select
+from sqlalchemy.engine import Connection, Engine
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
@@ -38,10 +41,17 @@ from app.schemas.generation import (
     KeywordExtractionOutput,
     QualityReviewOutput,
 )
+from app.services.fact_check_service import factual_conflicts
+from app.services.llm_usage_service import begin_usage, finish_usage
 from app.services.platform_content import (
+    bluesky_grapheme_length,
+    build_bluesky_post,
+    build_mastodon_post,
     build_weibo_status,
     build_x_post,
+    mastodon_text_length,
     normalize_topics,
+    validate_platform_publish,
     x_weighted_length,
 )
 from app.services.setting_service import setting_value
@@ -50,6 +60,8 @@ from app.services.wechat_formatting import format_wechat_html
 PLATFORM_NAMES = {
     "WEIBO": "微博",
     "X": "X",
+    "BLUESKY": "Bluesky",
+    "MASTODON": "Mastodon",
     "XIAOHONGSHU": "小红书",
     "WECHAT_OFFICIAL": "微信公众号",
     "TOUTIAO": "今日头条",
@@ -65,6 +77,8 @@ class LlmRuntime:
     api_key: str
     base_url: str
     model_name: str
+    usage_bind: Engine | Connection | None = None
+    usage_session: Session | None = None
 
 
 @dataclass(frozen=True)
@@ -89,6 +103,8 @@ def load_llm_runtime(db: Session) -> LlmRuntime:
         api_key=setting_value(db, "llm.api_key", settings.llm_api_key),
         base_url=setting_value(db, "llm.base_url", settings.llm_base_url),
         model_name=setting_value(db, "llm.model", settings.llm_model),
+        usage_bind=db.get_bind(),
+        usage_session=db,
     )
 
 
@@ -159,6 +175,24 @@ def _baseline_variant(
             "hashtags": tags,
             "warnings": [f"Prompt 回归基线：本地规则按“{style}”风格生成"],
         }
+    if platform == "BLUESKY":
+        return compact_bluesky_payload(
+            {
+                "title": article.title,
+                "content": "；".join(selected) or article.title,
+                "hashtags": [f"#{item}" for item in keywords[:2]] if include_tags else [],
+                "warnings": [f"Prompt 回归基线：本地规则按“{style}”风格生成"],
+            }
+        )
+    if platform == "MASTODON":
+        return compact_mastodon_payload(
+            {
+                "title": article.title,
+                "content": "；".join(selected) or article.title,
+                "hashtags": [f"#{item}" for item in keywords[:2]] if include_tags else [],
+                "warnings": [f"Prompt 回归基线：本地规则按“{style}”风格生成"],
+            }
+        )
     if platform == "XIAOHONGSHU":
         sections = "\n\n".join(f"{index + 1}. {point}" for index, point in enumerate(selected))
         return {
@@ -225,6 +259,54 @@ def validate_platform_output(platform: str, raw_text: str) -> dict[str, Any]:
     return validated.model_dump()
 
 
+_response_usage: ContextVar[tuple[int, int] | None] = ContextVar("llm_response_usage", default=None)
+
+
+async def _tracked_chat_completion(
+    runtime: LlmRuntime,
+    system_prompt: str,
+    messages: list[dict[str, str]],
+    *,
+    temperature: float = 0.5,
+) -> tuple[str, int, int]:
+    operation = "CHAT"
+    if "关键词" in system_prompt:
+        operation = "KEYWORDS"
+    elif "评审" in system_prompt or "事实一致性" in system_prompt:
+        operation = "REVIEW"
+    ticket = begin_usage(
+        runtime,
+        operation,
+        prompt_text=system_prompt + "".join(message.get("content", "") for message in messages),
+    )
+    usage_context = _response_usage.set(None)
+    try:
+        result = await _chat_completion(runtime, system_prompt, messages, temperature=temperature)
+    except BaseException as exc:
+        captured = _response_usage.get()
+        finish_usage(
+            ticket,
+            prompt_tokens=captured[0] if captured and captured[0] >= 0 else None,
+            completion_tokens=captured[1] if captured and captured[1] >= 0 else None,
+            status="FAILED",
+            error_code=type(exc).__name__,
+        )
+        raise
+    else:
+        captured = _response_usage.get()
+        # Test/provider adapters returning the established token tuple remain
+        # supported. A missing provider usage object uses the (-1, -1) sentinel.
+        captured = captured if captured is not None else (result[1], result[2])
+        finish_usage(
+            ticket,
+            prompt_tokens=captured[0] if captured[0] >= 0 else None,
+            completion_tokens=captured[1] if captured[1] >= 0 else None,
+        )
+        return result
+    finally:
+        _response_usage.reset(usage_context)
+
+
 async def _chat_completion(
     runtime: LlmRuntime,
     system_prompt: str,
@@ -246,9 +328,8 @@ async def _chat_completion(
             headers={"Authorization": f"Bearer {runtime.api_key}"},
             json=request_payload,
         )
-        response.raise_for_status()
         payload = response.json()
-        usage = payload.get("usage", {})
+        usage = payload.get("usage", {}) if isinstance(payload, dict) else {}
         prompt_tok = int(usage.get("prompt_tokens", 0))
         completion_tok = int(usage.get("completion_tokens", 0))
         # Some providers omit completion_tokens but return total_tokens.
@@ -258,6 +339,12 @@ async def _chat_completion(
         if not completion_tok:
             total_tok = int(usage.get("total_tokens", 0))
             completion_tok = max(0, total_tok - prompt_tok)
+        _response_usage.set(
+            (prompt_tok, completion_tok)
+            if any(key in usage for key in ("prompt_tokens", "completion_tokens", "total_tokens"))
+            else (-1, -1)
+        )
+        response.raise_for_status()
         return (
             payload["choices"][0]["message"]["content"],
             prompt_tok,
@@ -265,16 +352,16 @@ async def _chat_completion(
         )
 
 
-async def _validated_completion(
+async def _validated_completion[StructuredOutputT: BaseModel](
     runtime: LlmRuntime,
     system_prompt: str,
     user_prompt: str,
-    output_model: type[BaseModel],
+    output_model: type[StructuredOutputT],
     *,
     status_callback: StatusCallback | None = None,
     max_attempts: int = MAX_STRUCTURED_ATTEMPTS,
     temperature: float = 0.5,
-) -> tuple[BaseModel, int, int, int]:
+) -> tuple[StructuredOutputT, int, int, int]:
     messages = [{"role": "user", "content": user_prompt}]
     prompt_tokens = 0
     completion_tokens = 0
@@ -298,7 +385,7 @@ async def _validated_completion(
                 },
             )
         try:
-            raw, used_prompt, used_completion = await _chat_completion(
+            raw, used_prompt, used_completion = await _tracked_chat_completion(
                 runtime, system_prompt, messages, temperature=temperature
             )
             prompt_tokens += used_prompt
@@ -385,6 +472,100 @@ def compact_weibo_image_payload(data: dict[str, Any], limit: int = 140) -> dict[
     warnings = [str(item) for item in fitted.get("warnings") or []]
     notice = "已自动压缩为适合微博图文接口的 140 字版本"
     fitted["warnings"] = list(dict.fromkeys([*warnings, notice]))
+    return fitted
+
+
+def compact_bluesky_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Fit generated drafts to Bluesky without splitting Unicode graphemes.
+
+    This is a generation-only fallback. Editing and publishing must reject an
+    over-limit user draft instead of changing the text at the delivery boundary.
+    """
+    fitted = dict(data)
+    title_clusters = regex.findall(r"\X", str(fitted.get("title") or "").strip())
+    body_clusters = regex.findall(r"\X", str(fitted.get("content") or "").strip())
+    hashtags = normalize_topics(fitted.get("hashtags"), limit=4)
+
+    def post() -> str:
+        return build_bluesky_post("".join(title_clusters), "".join(body_clusters), hashtags)
+
+    def too_long() -> bool:
+        text = post()
+        return bluesky_grapheme_length(text) > 300 or len(text.encode("utf-8")) > 3000
+
+    # title is stored in a shared VARCHAR(255) column across platforms.
+    changed = False
+    while title_clusters and len("".join(title_clusters)) > 255:
+        title_clusters.pop()
+        changed = True
+    while too_long() and hashtags:
+        hashtags.pop()
+        changed = True
+    while too_long() and len(body_clusters) > 1:
+        body_clusters.pop()
+        changed = True
+    while too_long() and len(title_clusters) > 1:
+        title_clusters.pop()
+        changed = True
+    if too_long():
+        raise AppException(40030, "Bluesky 生成稿包含无法在 3000 字节内保留的单个可见字符")
+    fitted.update(title="".join(title_clusters), content="".join(body_clusters), hashtags=hashtags)
+    if changed:
+        fitted["warnings"] = list(
+            dict.fromkeys(
+                [*(fitted.get("warnings") or []), "已压缩生成稿以适应 Bluesky 的帖子长度限制"]
+            )
+        )
+    return fitted
+
+
+def compact_mastodon_payload(data: dict[str, Any]) -> dict[str, Any]:
+    """Fit a generated draft to the default 500-character status limit.
+
+    Preserve whole graphemes and HTTP(S) URLs when shortening generated prose.
+    User edits and publishing always validate without changing their content.
+    Instance-specific limits are checked again by the real publisher.
+    """
+    fitted = dict(data)
+    title_units = regex.findall(r"\X", str(fitted.get("title") or "").strip())
+    body_units = regex.findall(
+        r"https?://[^\s<>]+|\X",
+        str(fitted.get("content") or "").strip(),
+        flags=regex.IGNORECASE,
+    )
+    hashtags = normalize_topics(fitted.get("hashtags"), limit=4)
+
+    def too_long() -> bool:
+        return (
+            mastodon_text_length(
+                build_mastodon_post("".join(title_units), "".join(body_units), hashtags)
+            )
+            > 500
+        )
+
+    changed = False
+    # Shared content_variant.title is VARCHAR(255).
+    while title_units and len("".join(title_units)) > 255:
+        title_units.pop()
+        changed = True
+    while too_long() and hashtags:
+        hashtags.pop()
+        changed = True
+    while too_long() and len(body_units) > 1:
+        body_units.pop()
+        changed = True
+    while too_long() and len(title_units) > 1:
+        title_units.pop()
+        changed = True
+    if too_long():
+        raise AppException(40030, "Mastodon 生成稿无法压缩到默认的 500 字符限制")
+    fitted.update(title="".join(title_units), content="".join(body_units), hashtags=hashtags)
+    if changed:
+        fitted["warnings"] = list(
+            dict.fromkeys(
+                [*(fitted.get("warnings") or []), "已压缩生成稿以适应 Mastodon 默认的帖子长度限制"]
+            )
+        )
     return fitted
 
 
@@ -822,9 +1003,12 @@ def rule_quality_review(
     content_terms = set(re.findall(r"[\u4e00-\u9fff]{2,6}", content))
     overlap = len(source_terms & content_terms) / max(1, min(len(source_terms), 30))
     completeness = min(100.0, 55 + overlap * 45)
-    factual = min(100.0, 70 + overlap * 30)
+    # Vocabulary overlap is a completeness hint, never proof that numbers,
+    # dates or assertions are correct. Rules alone always require a human.
+    fact_issues = factual_conflicts(article.source_text, content)
+    factual = 0.0 if fact_issues else min(70.0, 40 + overlap * 30)
     profile = PLATFORM_PROFILES[platform]
-    issues: list[str] = []
+    issues: list[str] = list(fact_issues)
     format_score = 100.0
     if platform == "WECHAT_OFFICIAL" and not re.search(
         r"(?m)^(?:[一二三四五六七八九十]+、|\d+[、.])", content
@@ -853,6 +1037,17 @@ def rule_quality_review(
         if weighted_length > 280:
             format_score -= 40
             issues.append(f"X 帖子超过 280 个加权字符（当前 {weighted_length}）")
+    if platform in {"BLUESKY", "MASTODON"}:
+        errors = validate_platform_publish(
+            platform=platform,
+            title=data.get("title", ""),
+            content=content,
+            hashtags=data.get("hashtags", []),
+            images=[],
+        )
+        if errors:
+            format_score -= 40
+            issues.extend(errors)
     readability = max(
         55.0, 100 - max(0, len(max(content.split("\n"), key=len, default="")) - 120) / 3
     )
@@ -865,6 +1060,10 @@ def rule_quality_review(
         "format_compliance": round(max(0, format_score), 1),
         "issues": issues,
         "suggestions": [f"发布前按{profile.name}规范完成最终事实核验"],
+        "factCheckStatus": "CONFLICT" if fact_issues else "UNVERIFIED",
+        "factCheckIssues": fact_issues,
+        "needHumanReview": True,
+        "reviewSource": "RULES",
     }
 
 
@@ -909,6 +1108,13 @@ async def review_variant_quality(
         )
         combined["ruleReview"] = rule_result
         combined["semanticReview"] = semantic_data
+        # A model's optimistic score must not average away a known conflict.
+        if rule_result["factCheckIssues"]:
+            combined["factual_consistency"] = 0.0
+        combined["factCheckStatus"] = rule_result["factCheckStatus"]
+        combined["factCheckIssues"] = rule_result["factCheckIssues"]
+        combined["needHumanReview"] = bool(combined["issues"] or rule_result["factCheckIssues"])
+        combined["reviewSource"] = "MODEL_AND_RULES"
         return combined, runtime.provider
     except (AppException, httpx.HTTPError, ValidationError, ValueError):
         return {**rule_result, "ruleReview": rule_result}, "RULE_FALLBACK"
@@ -944,13 +1150,23 @@ def save_variant(
     data = sanitize_generation_payload(result.data)
     if platform == "WEIBO":
         data = compact_weibo_image_payload(data)
+    elif platform == "BLUESKY":
+        data = compact_bluesky_payload(data)
+    elif platform == "MASTODON":
+        data = compact_mastodon_payload(data)
     content = data["content"]
     data["title"] = normalize_visible_markdown(data.get("title") or article.title)
     data["hashtags"] = normalize_topics(
         data.get("hashtags", []),
-        limit={"WEIBO": 5, "X": 4, "XIAOHONGSHU": 10, "WECHAT_OFFICIAL": 8, "TOUTIAO": 8}.get(
-            platform, 10
-        ),
+        limit={
+            "WEIBO": 5,
+            "X": 4,
+            "BLUESKY": 4,
+            "MASTODON": 4,
+            "XIAOHONGSHU": 10,
+            "WECHAT_OFFICIAL": 8,
+            "TOUTIAO": 8,
+        }.get(platform, 10),
     )
     if platform == "WECHAT_OFFICIAL":
         content_html, format_profile = format_wechat_html(content)
@@ -981,6 +1197,14 @@ def save_variant(
             ruleReview=rule_review,
             deepReview=semantic_review,
             strategy=result.strategy,
+        )
+        if rule_review["factCheckIssues"]:
+            review["factual_consistency"] = 0.0
+        review.update(
+            factCheckStatus=rule_review["factCheckStatus"],
+            factCheckIssues=rule_review["factCheckIssues"],
+            needHumanReview=bool(review["issues"]),
+            reviewSource="MODEL_AND_RULES",
         )
     else:
         review = rule_review

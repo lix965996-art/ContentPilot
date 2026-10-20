@@ -15,7 +15,16 @@ const props = defineProps<{
   label?: string
 }>()
 
-function metricValue(key: keyof ArticleEngagementTotals) {
+function metricValue(
+  key:
+    | 'impressions'
+    | 'likes'
+    | 'comments'
+    | 'collects'
+    | 'shares'
+    | 'engagementTotal'
+    | 'engagementRate',
+) {
   if (props.totals && props.totals[key] != null) return props.totals[key]
   const direct = {
     impressions: props.impressions,
@@ -52,6 +61,9 @@ function formatNum(value: number | null | undefined) {
       >
       <span v-if="metricValue('engagementRate') != null" class="metrics-rate">
         互动率 {{ metricValue('engagementRate') }}%
+      </span>
+      <span v-else-if="totals" class="metrics-rate">
+        {{ totals.metricBasis === 'MIXED' ? '互动率：口径混合' : '互动率：口径未确认' }}
       </span>
     </div>
   </div>

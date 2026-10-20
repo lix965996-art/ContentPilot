@@ -730,6 +730,10 @@ button:active:not(:disabled),
   background: rgba(15, 23, 42, 0.08);
   color: #0f172a;
 }
+.platform-icon.is-bluesky {
+  background: rgba(0, 133, 255, 0.1);
+  color: #0085ff;
+}
 .platform-icon.is-toutiao {
   color: #f04438;
   background: #fff0ee;
@@ -1327,19 +1331,23 @@ button:active:not(:disabled),
   position: sticky;
   top: 0;
   z-index: 1;
-  display: grid;
+  display: flex;
   height: 44px;
-  grid-template-columns: repeat(5, minmax(0, 1fr));
   align-items: center;
   gap: 2px;
+  overflow-x: auto;
+  scrollbar-width: none;
   border-bottom: 1px solid var(--sf-line);
   background: rgba(251, 251, 253, 0.94);
   padding: 5px 7px;
   backdrop-filter: blur(12px);
 }
+.preview-tabs::-webkit-scrollbar {
+  display: none;
+}
 .preview-tabs button {
-  width: 100%;
-  min-width: 0;
+  flex: 0 0 auto;
+  min-width: max-content;
   height: 32px;
   justify-content: center;
   border-radius: 8px;
@@ -3342,4 +3350,9 @@ button:active:not(:disabled),
   .calendar-workspace {
     grid-template-columns: 1fr;
   }
+}
+
+.platform-icon.is-mastodon {
+  background: #6364ff;
+  color: #fff;
 }

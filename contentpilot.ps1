@@ -7,6 +7,8 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+. (Join-Path $PSScriptRoot 'scripts\runtime-paths.ps1')
+$paths = Get-ContentPilotPaths
 $projectRoot = $PSScriptRoot
 $scripts = Join-Path $projectRoot 'scripts'
 
@@ -31,10 +33,10 @@ switch ($Action) {
   }
   'logs' {
     $logFiles = @(
-      (Join-Path $projectRoot 'logs\api.log'),
-      (Join-Path $projectRoot 'logs\api-error.log'),
-      (Join-Path $projectRoot 'logs\web.log'),
-      (Join-Path $projectRoot 'logs\web-error.log')
+      (Join-Path $paths.Logs 'api.log'),
+      (Join-Path $paths.Logs 'api-error.log'),
+      (Join-Path $paths.Logs 'web.log'),
+      (Join-Path $paths.Logs 'web-error.log')
     ) | Where-Object { Test-Path -LiteralPath $_ }
     if (-not $logFiles) {
       Write-Host 'No local runtime logs exist yet. Start ContentPilot first.' -ForegroundColor Yellow

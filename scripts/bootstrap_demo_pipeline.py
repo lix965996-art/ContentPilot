@@ -13,7 +13,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BACKEND = PROJECT_ROOT / "backend"
-CSV_PATH = PROJECT_ROOT / "sample-data" / "history" / "demo-account-history-SIMULATED.csv"
+CSV_PATH = PROJECT_ROOT / "examples" / "history" / "demo-account-history-SIMULATED.csv"
 PYTHON = BACKEND / ".venv" / "Scripts" / "python.exe"
 
 sys.path.insert(0, str(BACKEND))
@@ -66,7 +66,7 @@ def import_demo_history(db) -> int:
         records=records,
         mapping=mapping,
         user_id=operator.id if operator else None,
-        default_source_type="ACCOUNT_HISTORY",
+        default_source_type="SIMULATED",
         source_note="SIMULATED 演示账号历史（自动生成，非真实平台数据）",
     )
     db.commit()
@@ -112,6 +112,7 @@ def enrich_schedules_and_metrics(db) -> None:
                     engagement_rate=round(total / impressions, 6),
                     group_type="RECOMMENDED_TIME" if index % 2 == 0 else "FIXED_TIME",
                     data_source="SIMULATED",
+                    metric_basis="IMPRESSIONS",
                 )
             )
         print(f"[4/5] Created engagement metrics for {len(schedules)} schedules.")

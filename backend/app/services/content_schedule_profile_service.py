@@ -48,7 +48,7 @@ class ContentScheduleProfile(BaseModel):
     urgency: Urgency
     freshness_hours: int = Field(ge=1, le=24 * 30)
     cognitive_load: CognitiveLoad
-    platform_priority: list[str] = Field(min_length=1, max_length=5)
+    platform_priority: list[str] = Field(min_length=1, max_length=7)
     cross_platform_strategy: CrossPlatformStrategy
     minimum_cross_platform_gap_minutes: int = Field(ge=0, le=24 * 60)
     reason_evidence: list[str] = Field(min_length=1, max_length=8)
@@ -67,7 +67,7 @@ class ContentScheduleProfile(BaseModel):
     @field_validator("platform_priority")
     @classmethod
     def normalize_platforms(cls, value: list[str]) -> list[str]:
-        allowed = {"WEIBO", "XIAOHONGSHU", "WECHAT_OFFICIAL", "TOUTIAO", "X"}
+        allowed = {"WEIBO", "XIAOHONGSHU", "WECHAT_OFFICIAL", "TOUTIAO", "X", "BLUESKY", "MASTODON"}
         cleaned = [item.strip().upper() for item in value if item.strip().upper() in allowed]
         if not cleaned:
             raise ValueError("platform_priority 必须包含合法平台标识")
@@ -91,7 +91,8 @@ PROFILE_SYSTEM_PROMPT = f"""你是社交媒体内容排期分析师。阅读文�
 - urgency: IMMEDIATE / TIMELY / NORMAL / EVERGREEN
 - freshness_hours: 内容保鲜期（小时，1~720，需与 urgency 一致）
 - cognitive_load: LOW / MEDIUM / HIGH
-- platform_priority: 平台标识数组（WEIBO/XIAOHONGSHU/WECHAT_OFFICIAL/TOUTIAO/X），按建议发布先后排序
+- platform_priority: 平台标识数组（WEIBO/XIAOHONGSHU/WECHAT_OFFICIAL/TOUTIAO/X/BLUESKY/MASTODON）
+  按建议发布先后排序
 - cross_platform_strategy: SIMULTANEOUS（同时）/ STAGGERED（错峰）/ WATERFALL（瀑布式先后）
 - minimum_cross_platform_gap_minutes: 跨平台最小间隔分钟（0~1440）
 - reason_evidence: 1~8 条给出判断依据的短句数组

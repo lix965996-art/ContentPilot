@@ -1,3 +1,5 @@
+import type { MetricBasis } from '@/types/business'
+
 export type RateStatus = 'ok' | 'uncalculable' | 'anomaly'
 
 export type FieldStatus = 'ok' | 'missing' | 'anomaly'
@@ -25,6 +27,10 @@ export interface PublishReviewRecord {
   followers: number | null
   engagementTotal: number | null
   apiEngagementRate: number | null
+  metricBasis: MetricBasis
+  metricBasisLabel: string
+  rateAvailable: boolean
+  rateDenominator: number | null
   engagementRate: number | null
   rateStatus: RateStatus
   rateStatusLabel: string
@@ -46,6 +52,16 @@ export const DATA_SOURCE_META: Record<
   string,
   { label: string; participates: boolean; purpose: string }
 > = {
+  UNKNOWN: {
+    label: '来源未知',
+    participates: false,
+    purpose: '缺少数据来源，不参与效果结论',
+  },
+  MIXED: {
+    label: '混合来源',
+    participates: false,
+    purpose: '真实与演示数据混合，不参与效果结论',
+  },
   SIMULATED: {
     label: '演示数据 SIMULATED',
     participates: false,
@@ -79,11 +95,16 @@ export const TIME_SOURCE_LABEL: Record<string, string> = {
   CUSTOM: '自选时间',
 }
 
-const MAX_VALID_RATE = 100
+export const METRIC_BASIS_LABELS: Record<MetricBasis, string> = {
+  IMPRESSIONS: '曝光量',
+  FOLLOWERS: '粉丝数',
+  UNKNOWN: '分母未知',
+  MIXED: '混合分母',
+}
 
 function normalizeSource(source: string | undefined) {
-  const key = String(source || 'MANUAL').toUpperCase()
-  return DATA_SOURCE_META[key] ? key : 'MANUAL'
+  const key = String(source || 'UNKNOWN').toUpperCase()
+  return DATA_SOURCE_META[key] ? key : 'UNKNOWN'
 }
 
 function sourceMeta(source: string | undefined) {
@@ -138,6 +159,9 @@ export function evaluatePublishReviewRecord(input: {
   followers?: number | null
   engagementTotal?: number | null
   apiEngagementRate?: number | null
+  metricBasis?: string | null
+  rateAvailable?: boolean
+  rateDenominator?: number | null
 }): PublishReviewRecord {
   const source = sourceMeta(input.dataSource)
   const impressions = input.impressions ?? null
@@ -148,26 +172,41 @@ export function evaluatePublishReviewRecord(input: {
   const followers = input.followers ?? null
   const apiEngagementRate = input.apiEngagementRate ?? null
   const hasBreakdown = hasKnownInteraction({ likes, comments, collects, shares })
+  const requestedBasis = String(input.metricBasis || 'UNKNOWN').toUpperCase()
+  const metricBasis: MetricBasis =
+    requestedBasis in METRIC_BASIS_LABELS ? (requestedBasis as MetricBasis) : 'UNKNOWN'
+  const denominator =
+    input.rateDenominator ??
+    (metricBasis === 'IMPRESSIONS' ? impressions : metricBasis === 'FOLLOWERS' ? followers : null)
+  const engagementTotal =
+    input.engagementTotal ??
+    (hasBreakdown ? interactionSum({ likes, comments, collects, shares }) : null)
 
   let rateStatus: RateStatus = 'uncalculable'
   let engagementRate: number | null = null
   let anomalyReason: string | null = null
 
-  if (apiEngagementRate !== null && (apiEngagementRate > MAX_VALID_RATE || apiEngagementRate < 0)) {
-    rateStatus = 'anomaly'
-    anomalyReason = `后端互动率 ${apiEngagementRate}% 超出合理范围`
-  } else if (!hasBreakdown) {
-    rateStatus = 'uncalculable'
-    anomalyReason = '点赞/评论/收藏/转发均未录入，无法计算互动率'
-  } else if (!impressions || impressions <= 0) {
-    rateStatus = 'uncalculable'
-    anomalyReason = '缺少有效浏览量/曝光量'
-  } else {
-    const total = interactionSum({ likes, comments, collects, shares })
-    const computed = Number(((total / impressions) * 100).toFixed(2))
-    if (computed > MAX_VALID_RATE || computed < 0 || total > impressions) {
+  if (metricBasis === 'UNKNOWN' || metricBasis === 'MIXED') {
+    anomalyReason = `${METRIC_BASIS_LABELS[metricBasis]}，无法计算或比较互动率`
+  } else if (input.rateAvailable === false || input.apiEngagementRate === null) {
+    anomalyReason = 'API 标记互动率不可用'
+  } else if (input.apiEngagementRate !== undefined) {
+    if (!Number.isFinite(apiEngagementRate) || apiEngagementRate! < 0) {
       rateStatus = 'anomaly'
-      anomalyReason = '互动量与曝光量不匹配'
+      anomalyReason = '后端互动率无效'
+    } else {
+      rateStatus = 'ok'
+      engagementRate = apiEngagementRate
+    }
+  } else if (denominator === null || !Number.isFinite(denominator) || denominator <= 0) {
+    anomalyReason = `缺少有效${METRIC_BASIS_LABELS[metricBasis]}`
+  } else if (engagementTotal === null) {
+    anomalyReason = '缺少互动总量，无法计算互动率'
+  } else {
+    const computed = Number(((engagementTotal / denominator) * 100).toFixed(2))
+    if (!Number.isFinite(computed) || computed < 0) {
+      rateStatus = 'anomaly'
+      anomalyReason = '互动总量无效'
     } else {
       rateStatus = 'ok'
       engagementRate = computed
@@ -213,8 +252,12 @@ export function evaluatePublishReviewRecord(input: {
     collects,
     shares,
     followers,
-    engagementTotal: input.engagementTotal ?? null,
+    engagementTotal,
     apiEngagementRate,
+    metricBasis,
+    metricBasisLabel: METRIC_BASIS_LABELS[metricBasis],
+    rateAvailable: rateStatus === 'ok',
+    rateDenominator: denominator,
     engagementRate,
     rateStatus,
     rateStatusLabel:
@@ -245,26 +288,53 @@ export function median(values: number[]) {
   return sorted.length % 2 ? sorted[mid] : Number(((sorted[mid - 1] + sorted[mid]) / 2).toFixed(2))
 }
 
-export function groupStats(records: PublishReviewRecord[]) {
-  const validRates = records
-    .filter((record) => record.isRealValid && record.engagementRate !== null)
-    .map((record) => record.engagementRate as number)
+export function groupStats(
+  records: PublishReviewRecord[],
+  options: { includeSimulated?: boolean } = {},
+) {
+  const validRecords = records.filter(
+    (record) =>
+      record.engagementRate !== null &&
+      record.rateAvailable &&
+      (record.isRealValid || (options.includeSimulated && record.dataSource === 'SIMULATED')),
+  )
+  const bases = new Set(validRecords.map((record) => record.metricBasis))
+  const sources = new Set(
+    validRecords.map((record) => (record.dataSource === 'SIMULATED' ? 'SIMULATED' : 'REAL')),
+  )
+  const metricBasis: MetricBasis =
+    bases.size === 1 ? validRecords[0].metricBasis : bases.size ? 'MIXED' : 'UNKNOWN'
+  const sourceScope = sources.size === 1 ? [...sources][0] : sources.size ? 'MIXED' : 'UNKNOWN'
+  const validRates = validRecords.map((record) => record.engagementRate as number)
 
-  if (!validRates.length) {
+  if (!validRates.length || bases.size > 1 || sources.size > 1) {
     return {
       count: records.length,
-      validCount: 0,
+      validCount: validRates.length,
+      metricBasis,
+      sourceScope,
+      rateAvailable: false,
       avg: null,
       median: null,
       min: null,
       max: null,
-      status: records.length ? '无有效样本' : '暂无数据',
+      status:
+        bases.size > 1
+          ? '混合分母，无法合并比较'
+          : sources.size > 1
+            ? '混合真实与演示数据，无法比较'
+            : records.length
+              ? '无有效样本'
+              : '暂无数据',
     }
   }
 
   return {
     count: records.length,
     validCount: validRates.length,
+    metricBasis,
+    sourceScope,
+    rateAvailable: true,
     avg: Number((validRates.reduce((sum, value) => sum + value, 0) / validRates.length).toFixed(2)),
     median: median(validRates),
     min: Math.min(...validRates),

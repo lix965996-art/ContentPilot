@@ -37,7 +37,7 @@ test('studio desktop columns and platform tabs stay aligned', async ({ page }) =
   expect(new Set(layout.panelBottoms).size).toBe(1)
   expect(new Set(layout.tabTops).size).toBe(1)
   expect(new Set(layout.tabBottoms).size).toBe(1)
-  expect(layout.tabOverflow).toEqual([false, false, false, false, false])
+  expect(layout.tabOverflow.every((value) => value === false)).toBe(true)
 })
 
 test('studio automatically fits an existing illustrated Weibo draft to the publish limit', async ({
@@ -58,8 +58,26 @@ test('studio automatically fits an existing illustrated Weibo draft to the publi
   }
 })
 
-test('AI image transform reports measurable progress and completion', async ({ page }) => {
+test('AI image transform works during a slow search and waits for real completion', async ({
+  page,
+}) => {
   await login(page)
+  let releaseSearch!: () => void
+  let releaseTransform!: () => void
+  const searchGate = new Promise<void>((resolve) => {
+    releaseSearch = resolve
+  })
+  const transformGate = new Promise<void>((resolve) => {
+    releaseTransform = resolve
+  })
+  await page.route('**/api/media/search?**', async (route) => {
+    await searchGate
+    await route.fulfill({
+      status: 200,
+      contentType: 'application/json',
+      body: JSON.stringify({ code: 0, message: 'ok', data: { items: [], notice: '本地搜索结果' } }),
+    })
+  })
   await page.route('**/api/media/image-models', async (route) => {
     await route.fulfill({
       status: 200,
@@ -102,7 +120,7 @@ test('AI image transform reports measurable progress and completion', async ({ p
     })
   })
   await page.route('**/api/media/transform', async (route) => {
-    await new Promise((resolve) => setTimeout(resolve, 900))
+    await transformGate
     await route.fulfill({
       status: 200,
       contentType: 'application/json',
@@ -125,18 +143,26 @@ test('AI image transform reports measurable progress and completion', async ({ p
   })
 
   await page.goto('/studio')
-  const assistant = page.getByTestId('visual-assistant')
-  await assistant.getByText('AI 改造', { exact: true }).click()
-  await assistant.locator('textarea').fill('保留主体，改造成简洁的蓝色科技风插画')
-  const transformButton = page.getByTestId('visual-transform-button')
-  await expect(transformButton).toBeEnabled()
-  await transformButton.click()
+  try {
+    const assistant = page.getByTestId('visual-assistant')
+    await assistant.getByText('AI 改造', { exact: true }).click()
+    await assistant.locator('textarea').fill('保留主体，改造成简洁的蓝色科技风插画')
+    const transformButton = page.getByTestId('visual-transform-button')
+    await expect(transformButton).toBeEnabled()
+    await transformButton.click()
 
-  const progress = page.getByTestId('visual-operation-progress')
-  await expect(progress).toHaveAttribute('data-state', 'RUNNING')
-  await expect(progress).toContainText('预计进度')
-  await expect(progress).toHaveAttribute('data-state', 'SUCCESS', { timeout: 10_000 })
-  await expect(progress).toContainText('100%')
+    const progress = page.getByTestId('visual-operation-progress')
+    await expect(progress).toHaveAttribute('data-state', 'RUNNING')
+    await expect(progress).toContainText('等待模型响应')
+    await expect(progress).not.toContainText(/\d+%/)
+    await expect(transformButton).toBeDisabled()
+    releaseTransform()
+    await expect(progress).toHaveAttribute('data-state', 'SUCCESS', { timeout: 10_000 })
+    await expect(progress).toContainText('100%')
+  } finally {
+    releaseSearch()
+    releaseTransform()
+  }
 })
 
 test('studio displays independent real-time progress for all four platforms', async ({ page }) => {

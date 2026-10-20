@@ -46,6 +46,19 @@ const accounts = [
 const isRegister = computed(() => route.name === 'register')
 const allowRegistration = ref(true)
 const demoMode = ref(false)
+const reconnecting = ref(false)
+async function retrySession() {
+  reconnecting.value = true
+  try {
+    await auth.bootstrap()
+    if (auth.isAuthenticated) {
+      const redirect = String(route.query.redirect || '/')
+      await router.replace(redirect.startsWith('/') && !redirect.startsWith('//') ? redirect : '/')
+    }
+  } finally {
+    reconnecting.value = false
+  }
+}
 onMounted(async () => {
   try {
     const options = await fetchAuthOptions()
@@ -119,7 +132,9 @@ const rules: FormRules = {
 }
 const redirectPath = computed(() => {
   const redirect = route.query.redirect
-  return typeof redirect === 'string' && redirect.startsWith('/') ? redirect : '/'
+  return typeof redirect === 'string' && redirect.startsWith('/') && !redirect.startsWith('//')
+    ? redirect
+    : '/'
 })
 async function submit(): Promise<void> {
   if (!(await formRef.value?.validate().catch(() => false))) return
@@ -227,6 +242,10 @@ watch(isRegister, async (value) => {
               : '登录你的工作账号，继续内容运营之旅'
           }}
         </p>
+        <el-alert v-if="auth.connectionError" type="warning" :closable="false" class="mb-4">
+          <template #title>暂时无法连接服务，已保留你的登录资料。</template>
+          <el-button size="small" :loading="reconnecting" @click="retrySession">重试连接</el-button>
+        </el-alert>
         <el-form
           ref="formRef"
           :model="form"

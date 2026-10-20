@@ -1,6 +1,7 @@
 from datetime import datetime
+from typing import Any
 
-from sqlalchemy import func, select
+from sqlalchemy import func, select, update
 from sqlalchemy.orm import Session
 
 from app.core.config import settings
@@ -61,19 +62,35 @@ def register_user(
 
 def build_tokens(user: User) -> dict[str, str | int]:
     return {
-        "access_token": create_access_token(str(user.id)),
-        "refresh_token": create_refresh_token(str(user.id)),
+        "access_token": create_access_token(str(user.id), user.token_version),
+        "refresh_token": create_refresh_token(str(user.id), user.token_version),
         "token_type": "bearer",
         "expires_in": settings.jwt_expire_minutes * 60,
     }
 
 
-def refresh_tokens(db: Session, refresh_token: str) -> tuple[User, dict[str, str | int]]:
-    payload = decode_token(refresh_token, "refresh")
-    user = db.get(User, int(payload["sub"]))
+def get_token_user(db: Session, payload: dict[str, Any]) -> User:
+    try:
+        user_id = int(payload["sub"])
+    except (KeyError, TypeError, ValueError) as exc:
+        raise AppException(40101, "登录凭证无效", 401) from exc
+    user = db.get(User, user_id)
     if user is None or user.status != "ACTIVE":
         raise AppException(40101, "用户不存在或账号不可用", 401)
+    if payload.get("ver") != user.token_version:
+        raise AppException(40104, "登录会话已撤销，请重新登录", 401)
+    return user
+
+
+def refresh_tokens(db: Session, refresh_token: str) -> tuple[User, dict[str, str | int]]:
+    user = get_token_user(db, decode_token(refresh_token, "refresh"))
     return user, build_tokens(user)
+
+
+def revoke_user_tokens(db: Session, user: User) -> None:
+    """Revoke every access and refresh token issued for this account."""
+    db.execute(update(User).where(User.id == user.id).values(token_version=User.token_version + 1))
+    db.commit()
 
 
 def update_password(
@@ -86,5 +103,9 @@ def update_password(
         raise AppException(40003, "当前密码不正确")
     if current_password == new_password:
         raise AppException(40004, "新密码不能与当前密码相同")
-    user.password_hash = hash_password(new_password)
+    db.execute(
+        update(User)
+        .where(User.id == user.id)
+        .values(password_hash=hash_password(new_password), token_version=User.token_version + 1)
+    )
     db.commit()

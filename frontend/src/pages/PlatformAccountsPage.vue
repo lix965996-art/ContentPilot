@@ -69,6 +69,9 @@ const form = reactive({
   app_id: '',
   client_id: '',
   app_secret: '',
+  identifier: '',
+  instance_url: 'https://mastodon.social',
+  app_password: '',
   access_token: '',
   refresh_token: '',
   token_expires_at: '',
@@ -131,6 +134,8 @@ const publishModeNames: Record<string, string> = {
 function publishModeLabel(account: PlatformAccount): string {
   if (account.publishMode === 'REAL_API' && account.platform === 'WEIBO') return '微博官方 API'
   if (account.publishMode === 'REAL_API' && account.platform === 'X') return 'X 官方 API'
+  if (account.publishMode === 'REAL_API' && account.platform === 'BLUESKY') return 'Bluesky API'
+  if (account.publishMode === 'REAL_API' && account.platform === 'MASTODON') return 'Mastodon API'
   return publishModeNames[account.publishMode] || account.publishMode
 }
 
@@ -160,6 +165,8 @@ async function load() {
   loading.value = true
   try {
     accounts.value = await workflowApi.platformAccounts()
+  } catch (error) {
+    ElMessage.error(getApiErrorMessage(error, '平台账号加载失败'))
   } finally {
     loading.value = false
   }
@@ -176,20 +183,24 @@ function edit(account: PlatformAccount) {
             ? 'ContentPilot 今日头条'
             : account.platform === 'WECHAT_OFFICIAL'
               ? 'ContentPilot 公众号'
-              : account.platform === 'X'
-                ? 'ContentPilot X'
+              : ['X', 'BLUESKY', 'MASTODON'].includes(account.platform)
+                ? `ContentPilot ${account.platformName}`
                 : ''
         : account.accountName,
     auth_type:
-      account.platform === 'WEIBO' || account.platform === 'X'
-        ? 'OAUTH2'
-        : account.platform === 'TOUTIAO'
-          ? 'QR_LOGIN'
-          : account.platform === 'WECHAT_OFFICIAL'
-            ? account.publishMode === 'BROWSER_DRAFT'
+      account.platform === 'BLUESKY'
+        ? 'APP_PASSWORD'
+        : account.platform === 'MASTODON'
+          ? 'ACCESS_TOKEN'
+          : account.platform === 'WEIBO' || account.platform === 'X'
+            ? 'OAUTH2'
+            : account.platform === 'TOUTIAO'
               ? 'QR_LOGIN'
-              : 'APP_SECRET'
-            : 'NONE',
+              : account.platform === 'WECHAT_OFFICIAL'
+                ? account.publishMode === 'BROWSER_DRAFT'
+                  ? 'QR_LOGIN'
+                  : 'APP_SECRET'
+                : 'NONE',
     publish_mode:
       account.platform === 'TOUTIAO'
         ? 'BROWSER_PUBLISH'
@@ -203,6 +214,9 @@ function edit(account: PlatformAccount) {
     app_id: account.appId,
     client_id: account.clientId,
     app_secret: '',
+    identifier: account.config.identifier || '',
+    instance_url: account.instanceUrl || account.config.instanceUrl || 'https://mastodon.social',
+    app_password: '',
     access_token: '',
     refresh_token: '',
     token_expires_at: account.tokenExpiresAt?.slice(0, 16) || '',
@@ -218,7 +232,7 @@ function edit(account: PlatformAccount) {
     default_cover_media_id: account.config.default_cover_media_id || '',
     default_cover_url: account.config.default_cover_url || '',
     allow_submit_publish: Boolean(account.config.allow_submit_publish),
-    allow_public_publish: Boolean(account.config.allow_public_publish),
+    allow_public_publish: account.publicPublishEnabled,
     enabled: account.status !== 'DISABLED',
   })
   drawer.value = true
@@ -226,19 +240,63 @@ function edit(account: PlatformAccount) {
 
 async function save(closeDrawer = true): Promise<boolean> {
   if (!current.value) return false
+  if (current.value.platform === 'BLUESKY') {
+    if (!form.identifier.trim()) {
+      ElMessage.warning('请填写 Bluesky 账号')
+      return false
+    }
+    if (!current.value.appPasswordConfigured && !form.app_password.trim()) {
+      ElMessage.warning('请填写 Bluesky 应用密码')
+      return false
+    }
+  }
+  if (current.value.platform === 'MASTODON') {
+    try {
+      const instance = new URL(form.instance_url.trim())
+      if (
+        instance.protocol !== 'https:' ||
+        instance.username ||
+        instance.password ||
+        instance.search ||
+        instance.hash ||
+        !['', '/'].includes(instance.pathname)
+      )
+        throw new Error()
+      form.instance_url = instance.origin
+    } catch {
+      ElMessage.warning('请填写有效的 HTTPS 服务器网址，例如 https://mastodon.social')
+      return false
+    }
+    if (!current.value.accessTokenConfigured && !form.access_token.trim()) {
+      ElMessage.warning('请填写 Mastodon 访问令牌')
+      return false
+    }
+  }
   try {
     if (current.value.platform === 'WECHAT_OFFICIAL') {
       form.auth_type = form.publish_mode === 'BROWSER_DRAFT' ? 'QR_LOGIN' : 'APP_SECRET'
     }
     const payload: Record<string, unknown> = { ...form }
     if (!form.app_secret) delete payload.app_secret
-    if (!form.access_token) delete payload.access_token
+    if (current.value.platform !== 'BLUESKY') {
+      delete payload.identifier
+      delete payload.app_password
+    } else {
+      payload.identifier = form.identifier.trim().replace(/^@/, '')
+      if (!form.app_password.trim()) delete payload.app_password
+      else payload.app_password = form.app_password.trim()
+    }
+    if (current.value.platform !== 'MASTODON') delete payload.instance_url
+    if (!form.access_token.trim()) delete payload.access_token
+    else payload.access_token = form.access_token.trim()
     if (!form.refresh_token) delete payload.refresh_token
     if (!form.token_expires_at) delete payload.token_expires_at
     if (!form.redirect_uri) delete payload.redirect_uri
     if (!form.operation_ip) delete payload.operation_ip
     if (!form.default_cover_url) delete payload.default_cover_url
     await workflowApi.savePlatformAccount(current.value.platform, payload)
+    form.app_password = ''
+    form.access_token = ''
     ElMessage.success('平台账号配置已保存')
     if (closeDrawer) drawer.value = false
     await load()
@@ -579,8 +637,12 @@ function openOfficialPlatform() {
 
 async function showLogs(account: PlatformAccount) {
   current.value = account
-  logs.value = await workflowApi.platformAuthLogs(account.platform)
-  logDrawer.value = true
+  try {
+    logs.value = await workflowApi.platformAuthLogs(account.platform)
+    logDrawer.value = true
+  } catch (error) {
+    ElMessage.error(getApiErrorMessage(error, '授权日志加载失败'))
+  }
 }
 
 onMounted(async () => {
@@ -667,13 +729,13 @@ onBeforeUnmount(() => {
         </div>
         <div
           v-else-if="
-            account.platform === 'X' &&
+            ['X', 'BLUESKY', 'MASTODON'].includes(account.platform) &&
             account.status === 'CONNECTED' &&
             !account.publicPublishEnabled
           "
           class="account-notice account-notice--real"
         >
-          X OAuth 已连接，但真实发布开关仍为关闭状态；连接测试不会发送帖子。
+          {{ account.platformName }} 已连接，但真实发布开关仍为关闭状态；连接测试不会发送帖子。
         </div>
         <div v-else-if="account.status !== 'CONNECTED'" class="account-notice account-notice--real">
           尚未通过官方接口验证。保存真实平台凭证并完成授权前，系统不会创建发布任务。
@@ -733,13 +795,26 @@ onBeforeUnmount(() => {
             </dd>
           </div>
           <div v-else>
-            <dt>Token</dt>
+            <dt>{{ account.platform === 'BLUESKY' ? '应用密码' : 'Token' }}</dt>
             <dd>
-              {{ account.tokenHint || (account.accessTokenConfigured ? '已配置' : '未配置') }}
+              {{
+                account.platform === 'BLUESKY'
+                  ? account.appPasswordConfigured
+                    ? '已配置（不会回显）'
+                    : '未配置'
+                  : account.platform === 'MASTODON'
+                    ? account.accessTokenConfigured
+                      ? '已配置（不会回显）'
+                      : '未配置'
+                    : account.tokenHint || (account.accessTokenConfigured ? '已配置' : '未配置')
+              }}
             </dd>
           </div>
         </dl>
 
+        <p v-if="account.platform === 'MASTODON'" class="account-hint">
+          服务器：{{ account.instanceUrl || account.config.instanceUrl || '尚未配置' }}
+        </p>
         <p v-if="account.publishHint" class="account-hint">{{ account.publishHint }}</p>
 
         <section class="capability-list">
@@ -827,6 +902,8 @@ onBeforeUnmount(() => {
             "
             :disabled="
               !account.id ||
+              (account.platform === 'BLUESKY' && !account.appPasswordConfigured) ||
+              (account.platform === 'MASTODON' && !account.accessTokenConfigured) ||
               (['WEIBO', 'X'].includes(account.platform) && !account.accessTokenConfigured) ||
               (account.platform === 'XIAOHONGSHU' && account.publishMode !== 'MCP_PUBLISH')
             "
@@ -962,6 +1039,110 @@ onBeforeUnmount(() => {
           <el-alert
             class="mt-3"
             title="需要在 X Developer Portal 中启用 OAuth 2.0，并授予 tweet.read、tweet.write、users.read、offline.access。连接测试只读取账号信息，不会发送测试帖。"
+            type="info"
+            :closable="false"
+          />
+        </template>
+
+        <template v-else-if="current.platform === 'BLUESKY'">
+          <el-form-item label="Bluesky 账号" required>
+            <el-input
+              v-model="form.identifier"
+              autocomplete="username"
+              placeholder="例如 yourname.bsky.social，不含 @"
+              data-testid="bluesky-identifier"
+            />
+          </el-form-item>
+          <el-form-item label="应用密码" :required="!current.appPasswordConfigured">
+            <el-input
+              v-model="form.app_password"
+              type="password"
+              autocomplete="new-password"
+              :placeholder="
+                current.appPasswordConfigured ? '已配置；留空保持原值' : '输入项目专用应用密码'
+              "
+              data-testid="bluesky-app-password"
+            />
+            <small class="field-help">
+              使用应用密码，无需填写账号主密码。保存后不会回显。
+              <a
+                href="https://bsky.app/settings/app-passwords"
+                target="_blank"
+                rel="noopener noreferrer"
+              >
+                创建或撤销应用密码
+              </a>
+            </small>
+          </el-form-item>
+          <el-form-item label="发布方式">
+            <el-tag type="success">Bluesky API · 文字 / 图片</el-tag>
+          </el-form-item>
+          <el-checkbox v-model="form.allow_public_publish" data-testid="bluesky-allow-publish">
+            我已了解真实发布会将内容发送到 Bluesky，允许该共享账号创建真实帖子
+          </el-checkbox>
+          <el-alert
+            class="mt-4"
+            :title="
+              form.allow_public_publish
+                ? '公开发布已开启。定时排期到点后会自动发布；立即发布仍需再次确认。'
+                : '默认仅验证账号连接，不会发送测试帖。开启真实发布后才能创建发布排期。'
+            "
+            :type="form.allow_public_publish ? 'warning' : 'info'"
+            :closable="false"
+          />
+          <el-alert
+            class="mt-3"
+            title="支持最多 300 个文字字符和 4 张图片，标题、正文与话题合并计算。此接入暂不支持视频。"
+            type="info"
+            :closable="false"
+          />
+        </template>
+
+        <template v-else-if="current.platform === 'MASTODON'">
+          <el-form-item label="Mastodon 服务器网址" required>
+            <el-input
+              v-model="form.instance_url"
+              placeholder="https://mastodon.social"
+              data-testid="mastodon-instance-url"
+            />
+            <small class="field-help"
+              >填写注册账号所在的服务器网址，账号和访问令牌必须属于同一服务器。</small
+            >
+          </el-form-item>
+          <el-form-item label="访问令牌" :required="!current.accessTokenConfigured">
+            <el-input
+              v-model="form.access_token"
+              type="password"
+              autocomplete="new-password"
+              :placeholder="
+                current.accessTokenConfigured ? '已配置；留空保持原值' : '输入项目专用访问令牌'
+              "
+              data-testid="mastodon-access-token"
+            />
+            <small class="field-help"
+              >在服务器的「偏好设置 → 开发」中新建应用，勾选
+              read:accounts、write:statuses、write:media。令牌保存后不会回显，无需提供账号密码。</small
+            >
+          </el-form-item>
+          <el-form-item label="发布方式"
+            ><el-tag type="success">Mastodon API · 文字 / 图片</el-tag></el-form-item
+          >
+          <el-checkbox v-model="form.allow_public_publish" data-testid="mastodon-allow-publish">
+            我已了解真实发布会将内容发送到 Mastodon，允许该共享账号创建公开帖子
+          </el-checkbox>
+          <el-alert
+            class="mt-4"
+            :title="
+              form.allow_public_publish
+                ? '公开发布已开启。排期到点会自动发布；请先验证连接，再安排内容。'
+                : '当前仅验证连接，不发送测试帖。开启真实发布后才能创建发布排期。'
+            "
+            :type="form.allow_public_publish ? 'warning' : 'info'"
+            :closable="false"
+          />
+          <el-alert
+            class="mt-3"
+            title="默认最多 500 字符和 4 张图片；验证连接后以服务器限制为准。支持 JPEG、PNG、WebP，每张最多 8 MB，服务器可能要求更小。更换服务器或令牌后请重新验证连接。"
             type="info"
             :closable="false"
           />

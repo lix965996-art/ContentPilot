@@ -1,69 +1,137 @@
-from collections import defaultdict
+"""Measured analytics with explicit source scope and denominator provenance."""
 
-from sqlalchemy import select
+from collections import defaultdict
+from typing import Any, Literal
+
+from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from app.models.business import EngagementMetric, PublishSchedule
 
+DataScope = Literal["REAL", "SIMULATED", "ALL"]
+KNOWN_BASES = ("IMPRESSIONS", "FOLLOWERS")
+COUNTERS = (
+    "impressions",
+    "likes",
+    "comments",
+    "collects",
+    "shares",
+    "followers",
+    "engagementTotal",
+)
+
+
+def metric_scope(data_scope: DataScope = "REAL") -> tuple:
+    simulated = func.upper(EngagementMetric.data_source) == "SIMULATED"
+    return () if data_scope == "ALL" else (simulated if data_scope == "SIMULATED" else ~simulated,)
+
+
+def metric_denominator(row: EngagementMetric) -> int:
+    return {"IMPRESSIONS": row.impressions, "FOLLOWERS": row.followers}.get(
+        row.metric_basis, 0
+    ) or 0
+
 
 def metric_values(row: EngagementMetric) -> dict:
+    denominator = metric_denominator(row)
     return {
-        "impressions": row.impressions,
-        "likes": row.likes,
-        "comments": row.comments,
-        "collects": row.collects,
-        "shares": row.shares,
-        "engagementTotal": row.engagement_total,
-        "engagementRate": row.engagement_rate,
+        **{
+            key: getattr(row, "engagement_total" if key == "engagementTotal" else key)
+            for key in COUNTERS
+        },
+        "metricBasis": row.metric_basis or "UNKNOWN",
+        "rateAvailable": denominator > 0,
+        "engagementRate": round(row.engagement_total / denominator * 100, 2)
+        if denominator
+        else None,
+        "rateDenominator": denominator,
     }
 
 
-def summarize(db: Session) -> dict:
-    rows = db.scalars(select(EngagementMetric)).all()
-    total = {
-        key: 0
-        for key in ("impressions", "likes", "comments", "collects", "shares", "engagementTotal")
+def aggregate_metrics(metrics: list[EngagementMetric], *, by_source: bool = True) -> dict:
+    totals: dict[str, Any] = {
+        key: sum(
+            getattr(row, "engagement_total" if key == "engagementTotal" else key) for row in metrics
+        )
+        for key in COUNTERS
     }
-    for row in rows:
-        total["impressions"] += row.impressions
-        total["likes"] += row.likes
-        total["comments"] += row.comments
-        total["collects"] += row.collects
-        total["shares"] += row.shares
-        total["engagementTotal"] += row.engagement_total
-    total["engagementRate"] = (
-        round(total["engagementTotal"] / total["impressions"] * 100, 2)
-        if total["impressions"]
+    buckets: dict[str, list[EngagementMetric]] = defaultdict(list)
+    for row in metrics:
+        basis = row.metric_basis if row.metric_basis in KNOWN_BASES else "UNKNOWN"
+        buckets[basis].append(row)
+    by_basis: list[dict[str, Any]] = []
+    for basis, rows in sorted(buckets.items()):
+        valid = [row for row in rows if metric_denominator(row) > 0]
+        denominator = sum(metric_denominator(row) for row in valid)
+        engagement = sum(row.engagement_total for row in valid)
+        by_basis.append(
+            {
+                "metricBasis": basis,
+                "sampleCount": len(rows),
+                "validRateCount": len(valid),
+                "excludedRateCount": len(rows) - len(valid),
+                "rateDenominator": denominator,
+                "engagementTotal": sum(row.engagement_total for row in rows),
+                "ratedEngagementTotal": engagement,
+                "rateAvailable": bool(denominator),
+                "engagementRate": round(engagement / denominator * 100, 2) if denominator else None,
+            }
+        )
+    source_groups: dict[str, list[EngagementMetric]] = defaultdict(list)
+    for row in metrics:
+        source_groups["SIMULATED" if row.data_source.upper() == "SIMULATED" else "REAL"].append(row)
+    basis = next(iter(buckets)) if len(buckets) == 1 else "MIXED" if buckets else "UNKNOWN"
+    excluded = sum(item["excludedRateCount"] for item in by_basis)
+    available = basis in KNOWN_BASES and excluded == 0 and len(source_groups) == 1
+    totals.update(
+        {
+            "sampleCount": len(metrics),
+            "simulatedCount": len(source_groups.get("SIMULATED", [])),
+            "metricBasis": basis,
+            "rateAvailable": available,
+            "unknownBasisCount": len(buckets.get("UNKNOWN", [])),
+            "excludedRateCount": excluded,
+            "mixedDataSources": len(source_groups) > 1,
+            "byBasis": by_basis,
+            "rateDenominator": by_basis[0]["rateDenominator"] if available else None,
+            "engagementRate": by_basis[0]["engagementRate"] if available else None,
+        }
+    )
+    if by_source:
+        totals["bySource"] = [
+            {"dataScope": scope, **aggregate_metrics(rows, by_source=False)}
+            for scope, rows in sorted(source_groups.items())
+        ]
+    return totals
+
+
+def summarize(db: Session, *, data_scope: DataScope = "REAL") -> dict:
+    rows = list(db.scalars(select(EngagementMetric).where(*metric_scope(data_scope))).all())
+    excluded = (
+        int(
+            db.scalar(
+                select(func.count()).select_from(EngagementMetric).where(*metric_scope("SIMULATED"))
+            )
+            or 0
+        )
+        if data_scope == "REAL"
         else 0
     )
-    total["sampleCount"] = len(rows)
-    total["simulatedCount"] = sum(row.data_source == "SIMULATED" for row in rows)
-    return total
+    return {**aggregate_metrics(rows), "dataScope": data_scope, "excludedSimulatedCount": excluded}
 
 
-def grouped(db: Session, field: str) -> list[dict]:
-    rows = db.scalars(select(EngagementMetric)).all()
+def grouped(db: Session, field: str, *, data_scope: DataScope = "REAL") -> list[dict]:
+    rows = db.scalars(select(EngagementMetric).where(*metric_scope(data_scope))).all()
     groups = defaultdict(list)
     for row in rows:
         groups[getattr(row, field)].append(row)
-    result = []
-    for key, items in groups.items():
-        impressions = sum(x.impressions for x in items)
-        engagement = sum(x.engagement_total for x in items)
-        result.append(
-            {
-                "name": key,
-                "sampleCount": len(items),
-                "impressions": impressions,
-                "engagementTotal": engagement,
-                "engagementRate": round(engagement / impressions * 100, 2) if impressions else 0,
-                "likes": sum(x.likes for x in items),
-                "comments": sum(x.comments for x in items),
-                "collects": sum(x.collects for x in items),
-                "shares": sum(x.shares for x in items),
-            }
-        )
-    return sorted(result, key=lambda x: x["engagementRate"], reverse=True)
+    result = [
+        {"name": key, **aggregate_metrics(items), "dataScope": data_scope}
+        for key, items in groups.items()
+    ]
+    return sorted(
+        result, key=lambda item: (item["rateAvailable"], item["engagementRate"] or 0), reverse=True
+    )
 
 
 def _metric_payload(metric: EngagementMetric, schedule_id: int, platform: str) -> dict:
@@ -71,122 +139,77 @@ def _metric_payload(metric: EngagementMetric, schedule_id: int, platform: str) -
         "scheduleId": schedule_id,
         "platform": platform,
         "metricDate": metric.metric_date.isoformat(),
-        "impressions": metric.impressions,
-        "likes": metric.likes,
-        "comments": metric.comments,
-        "collects": metric.collects,
-        "shares": metric.shares,
-        "followers": metric.followers,
-        "engagementTotal": metric.engagement_total,
-        "engagementRate": round(metric.engagement_rate * 100, 2),
+        **metric_values(metric),
         "dataSource": metric.data_source,
     }
 
 
-def _aggregate_totals(metrics: list[EngagementMetric]) -> dict:
-    totals = {
-        "impressions": sum(item.impressions for item in metrics),
-        "likes": sum(item.likes for item in metrics),
-        "comments": sum(item.comments for item in metrics),
-        "collects": sum(item.collects for item in metrics),
-        "shares": sum(item.shares for item in metrics),
-        "engagementTotal": sum(item.engagement_total for item in metrics),
-    }
-    totals["engagementRate"] = (
-        round(totals["engagementTotal"] / totals["impressions"] * 100, 2)
-        if totals["impressions"]
-        else 0
-    )
-    return totals
-
-
 def latest_platform_metrics(
-    db: Session, article_id: int
+    db: Session, article_id: int, *, data_scope: DataScope = "REAL"
 ) -> dict[str, tuple[PublishSchedule, EngagementMetric]]:
     schedules = db.scalars(
         select(PublishSchedule).where(PublishSchedule.article_id == article_id)
     ).all()
-    if not schedules:
-        return {}
     schedule_map = {item.id: item for item in schedules}
+    if not schedule_map:
+        return {}
     metrics = db.scalars(
         select(EngagementMetric)
-        .where(EngagementMetric.schedule_id.in_(schedule_map.keys()))
-        .order_by(EngagementMetric.schedule_id, EngagementMetric.metric_date.desc())
+        .where(EngagementMetric.schedule_id.in_(schedule_map), *metric_scope(data_scope))
+        .order_by(EngagementMetric.metric_date.desc(), EngagementMetric.id.desc())
     ).all()
-    by_platform: dict[str, tuple[PublishSchedule, EngagementMetric]] = {}
+    by_platform = {}
     for metric in metrics:
-        schedule = schedule_map.get(metric.schedule_id)
-        if not schedule or schedule.platform in by_platform:
-            continue
-        by_platform[schedule.platform] = (schedule, metric)
+        schedule = schedule_map[metric.schedule_id]
+        by_platform.setdefault(schedule.platform, (schedule, metric))
     return by_platform
 
 
-def article_engagement(db: Session, article_id: int) -> dict:
-    by_platform = latest_platform_metrics(db, article_id)
-    if not by_platform:
-        return {
-            "articleId": article_id,
-            "hasData": False,
-            "platforms": [],
-            "totals": None,
-            "dataSources": [],
-            "simulated": False,
-        }
-    platforms = [
-        _metric_payload(metric, schedule.id, schedule.platform)
-        for schedule, metric in by_platform.values()
-    ]
-    data_sources = sorted({metric.data_source for _, metric in by_platform.values()})
+def article_engagement(db: Session, article_id: int, *, data_scope: DataScope = "REAL") -> dict:
+    by_platform = latest_platform_metrics(db, article_id, data_scope=data_scope)
+    metrics = [metric for _, metric in by_platform.values()]
     return {
         "articleId": article_id,
-        "hasData": True,
-        "platforms": platforms,
-        "totals": _aggregate_totals([metric for _, metric in by_platform.values()]),
-        "dataSources": data_sources,
-        "simulated": any(source == "SIMULATED" for source in data_sources),
+        "hasData": bool(metrics),
+        "dataScope": data_scope,
+        "platforms": [
+            _metric_payload(metric, schedule.id, schedule.platform)
+            for schedule, metric in by_platform.values()
+        ],
+        "totals": aggregate_metrics(metrics) if metrics else None,
+        "dataSources": sorted({metric.data_source for metric in metrics}),
+        "simulated": any(metric.data_source == "SIMULATED" for metric in metrics),
     }
 
 
-def articles_engagement_batch(db: Session, article_ids: list[int]) -> dict[int, dict]:
+def articles_engagement_batch(
+    db: Session, article_ids: list[int], *, data_scope: DataScope = "REAL"
+) -> dict[int, dict]:
     if not article_ids:
         return {}
     schedules = db.scalars(
         select(PublishSchedule).where(PublishSchedule.article_id.in_(article_ids))
     ).all()
-    schedules_by_article: dict[int, list[PublishSchedule]] = defaultdict(list)
-    schedule_map: dict[int, PublishSchedule] = {}
-    for schedule in schedules:
-        schedules_by_article[schedule.article_id].append(schedule)
-        schedule_map[schedule.id] = schedule
+    schedule_map = {item.id: item for item in schedules}
     if not schedule_map:
         return {}
     metrics = db.scalars(
         select(EngagementMetric)
-        .where(EngagementMetric.schedule_id.in_(schedule_map.keys()))
-        .order_by(EngagementMetric.schedule_id, EngagementMetric.metric_date.desc())
+        .where(EngagementMetric.schedule_id.in_(schedule_map), *metric_scope(data_scope))
+        .order_by(EngagementMetric.metric_date.desc(), EngagementMetric.id.desc())
     ).all()
-    latest_by_schedule: dict[int, EngagementMetric] = {}
+    by_article = defaultdict(dict)
     for metric in metrics:
-        if metric.schedule_id not in latest_by_schedule:
-            latest_by_schedule[metric.schedule_id] = metric
-    result: dict[int, dict] = {}
-    for article_id in article_ids:
-        article_schedules = schedules_by_article.get(article_id, [])
-        by_platform: dict[str, EngagementMetric] = {}
-        for schedule in article_schedules:
-            metric = latest_by_schedule.get(schedule.id)
-            if metric and schedule.platform not in by_platform:
-                by_platform[schedule.platform] = metric
-        if not by_platform:
-            continue
-        data_sources = sorted({metric.data_source for metric in by_platform.values()})
-        result[article_id] = {
+        schedule = schedule_map[metric.schedule_id]
+        by_article[schedule.article_id].setdefault(schedule.platform, metric)
+    return {
+        article_id: {
             "articleId": article_id,
             "hasData": True,
-            "totals": _aggregate_totals(list(by_platform.values())),
-            "dataSources": data_sources,
-            "simulated": any(source == "SIMULATED" for source in data_sources),
+            "dataScope": data_scope,
+            "totals": aggregate_metrics(list(platforms.values())),
+            "dataSources": sorted({metric.data_source for metric in platforms.values()}),
+            "simulated": any(metric.data_source == "SIMULATED" for metric in platforms.values()),
         }
-    return result
+        for article_id, platforms in by_article.items()
+    }

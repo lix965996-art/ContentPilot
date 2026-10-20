@@ -1,9 +1,11 @@
 <script setup lang="ts">
-import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
-import { Bell, ChevronDown, FileText, LogOut, Menu, Plus, Search } from 'lucide-vue-next'
+import { Bell, ChevronDown, FileText, KeyRound, LogOut, Menu, Plus, Search } from 'lucide-vue-next'
+import { ElMessage } from 'element-plus'
 import UserAvatar from '@/components/UserAvatar.vue'
 import { workflowApi } from '@/api/workflow'
+import { getApiErrorMessage } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
 import { NAV_ITEMS } from '@/config/navigation'
 import type { Article } from '@/types/business'
@@ -17,6 +19,10 @@ const searchOpen = ref(false)
 const searchQuery = ref('')
 const searchLoading = ref(false)
 const searchArticles = ref<Article[]>([])
+const passwordOpen = ref(false)
+const passwordSaving = ref(false)
+const passwordError = ref('')
+const passwordForm = reactive({ current: '', next: '', confirm: '' })
 const notificationLoading = ref(false)
 const notifications = ref<Array<{ label: string; count: number; route: string }>>([])
 const navigation = computed(() =>
@@ -77,10 +83,49 @@ function handleShortcut(event: globalThis.KeyboardEvent) {
 }
 async function command(value: string) {
   if (value === 'logout') {
-    await auth.signOut()
-    await router.replace('/login')
+    try {
+      await auth.signOut()
+      await router.replace('/login')
+    } catch (error) {
+      ElMessage.error(getApiErrorMessage(error, '退出失败，请稍后重试'))
+    }
+  }
+  if (value === 'password') {
+    Object.assign(passwordForm, { current: '', next: '', confirm: '' })
+    passwordError.value = ''
+    passwordOpen.value = true
   }
   if (value === 'settings') await router.push({ name: 'settings' })
+}
+async function changePassword() {
+  if (passwordSaving.value) return
+  passwordError.value = ''
+  if (
+    passwordForm.current.length < 8 ||
+    passwordForm.next.length < 8 ||
+    passwordForm.next.length > 128 ||
+    !/[A-Za-z]/.test(passwordForm.next) ||
+    !/\d/.test(passwordForm.next)
+  ) {
+    passwordError.value = '新密码须为8至128位，并同时包含字母和数字，请填写当前密码'
+    return
+  }
+  if (passwordForm.next !== passwordForm.confirm) {
+    passwordError.value = '两次输入的新密码不一致'
+    return
+  }
+  passwordSaving.value = true
+  try {
+    await auth.changePassword(passwordForm.current, passwordForm.next)
+    passwordOpen.value = false
+    Object.assign(passwordForm, { current: '', next: '', confirm: '' })
+    ElMessage.success('密码已修改，全部登录会话已退出，请重新登录')
+    await router.replace('/login')
+  } catch (error) {
+    passwordError.value = getApiErrorMessage(error, '密码修改失败，请稍后重试')
+  } finally {
+    passwordSaving.value = false
+  }
 }
 onMounted(() => {
   window.addEventListener('keydown', handleShortcut)
@@ -140,6 +185,8 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleShortcut))
           ><el-dropdown-menu
             ><el-dropdown-item v-if="auth.canManageSystem" command="settings"
               >系统设置</el-dropdown-item
+            ><el-dropdown-item command="password"
+              ><KeyRound :size="14" class="mr-2" />修改密码</el-dropdown-item
             ><el-dropdown-item divided command="logout"
               ><LogOut :size="14" class="mr-2" />退出登录</el-dropdown-item
             ></el-dropdown-menu
@@ -148,6 +195,56 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleShortcut))
       >
     </div>
   </header>
+  <el-dialog
+    v-model="passwordOpen"
+    title="修改密码"
+    width="min(420px, 92vw)"
+    :close-on-click-modal="false"
+  >
+    <p class="mb-4 text-sm text-slate-500">修改成功后，当前账号的全部登录会话都会退出。</p>
+    <el-alert
+      v-if="passwordError"
+      :title="passwordError"
+      type="error"
+      :closable="false"
+      class="mb-4"
+    />
+    <el-form label-position="top" @submit.prevent="changePassword">
+      <el-form-item label="当前密码">
+        <el-input
+          v-model="passwordForm.current"
+          type="password"
+          show-password
+          autocomplete="current-password"
+          :maxlength="128"
+        />
+      </el-form-item>
+      <el-form-item label="新密码">
+        <el-input
+          v-model="passwordForm.next"
+          type="password"
+          show-password
+          autocomplete="new-password"
+          :maxlength="128"
+        />
+      </el-form-item>
+      <el-form-item label="确认新密码">
+        <el-input
+          v-model="passwordForm.confirm"
+          type="password"
+          show-password
+          autocomplete="new-password"
+          :maxlength="128"
+        />
+      </el-form-item>
+      <div class="flex justify-end gap-2">
+        <el-button :disabled="passwordSaving" @click="passwordOpen = false">取消</el-button>
+        <el-button type="primary" native-type="submit" :loading="passwordSaving"
+          >修改并重新登录</el-button
+        >
+      </div>
+    </el-form>
+  </el-dialog>
   <el-dialog v-model="searchOpen" title="搜索" width="min(620px, 92vw)" class="command-dialog">
     <el-input v-model="searchQuery" size="large" clearable autofocus placeholder="搜索页面或内容">
       <template #prefix><Search :size="17" /></template>

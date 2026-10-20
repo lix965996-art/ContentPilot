@@ -1,29 +1,35 @@
 param([ValidateSet('Start','Stop','Status')][string]$Action = 'Start', [switch]$NoBrowser)
 $ErrorActionPreference = 'Stop'
-$projectRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+. (Join-Path $PSScriptRoot 'runtime-paths.ps1')
+$paths = Get-ContentPilotPaths
+$projectRoot = $paths.Project
 $backend = Join-Path $projectRoot 'backend'
 $frontend = Join-Path $projectRoot 'frontend'
-$runtime = Join-Path $projectRoot '.runtime'
-$logs = Join-Path $projectRoot 'logs'
+$runtime = $paths.Run
+$logs = $paths.Logs
 $apiState = Join-Path $runtime 'api.json'
 $webState = Join-Path $runtime 'web.json'
+$legacyApiState = Join-Path $paths.LegacyRun 'api.json'
+$legacyWebState = Join-Path $paths.LegacyRun 'web.json'
 $venvPython = Join-Path $backend '.venv\Scripts\python.exe'
 $nodeCommand = Get-Command node.exe -ErrorAction SilentlyContinue
 $node = if ($nodeCommand) { $nodeCommand.Source } else { $null }
 $vite = Join-Path $frontend 'node_modules\vite\bin\vite.js'
-New-Item -ItemType Directory -Force -Path $runtime,$logs | Out-Null
 
 function Read-State([string]$path) {
   if (-not (Test-Path -LiteralPath $path)) { return $null }
   try { return Get-Content -Raw -LiteralPath $path | ConvertFrom-Json } catch { return $null }
 }
-function Get-TrackedProcess([string]$path) {
-  $state = Read-State $path
-  if (-not $state) { return $null }
-  $process = Get-Process -Id $state.pid -ErrorAction SilentlyContinue
-  if (-not $process) { return $null }
-  if ($process.StartTime.ToUniversalTime().Ticks -ne [int64]$state.startTicks) { return $null }
-  return $process
+function Get-TrackedProcess([string[]]$statePaths) {
+  foreach ($path in $statePaths) {
+    $state = Read-State $path
+    if (-not $state) { continue }
+    $process = Get-Process -Id $state.pid -ErrorAction SilentlyContinue
+    if (-not $process) { continue }
+    if ($process.StartTime.ToUniversalTime().Ticks -ne [int64]$state.startTicks) { continue }
+    return $process
+  }
+  return $null
 }
 function Save-State([string]$path, $process) {
   @{ pid=$process.Id; startTicks=$process.StartTime.ToUniversalTime().Ticks } |
@@ -50,8 +56,8 @@ function Wait-Url([string]$url,[int]$seconds) {
 }
 
 if ($Action -eq 'Status') {
-  $api = Get-TrackedProcess $apiState
-  $web = Get-TrackedProcess $webState
+  $api = Get-TrackedProcess @($apiState, $legacyApiState)
+  $web = Get-TrackedProcess @($webState, $legacyWebState)
   $apiText = if($api -and (Test-Url 'http://127.0.0.1:8000/api/health')){"RUNNING (PID $($api.Id))"}else{'STOPPED'}
   $webText = if($web -and (Test-Url 'http://127.0.0.1:5173')){"RUNNING (PID $($web.Id))"}else{'STOPPED'}
   Write-Host "API : $apiText"
@@ -60,14 +66,24 @@ if ($Action -eq 'Status') {
 }
 
 if ($Action -eq 'Stop') {
-  foreach($item in @(@($apiState,'API'),@($webState,'Web'))){
-    $process=Get-TrackedProcess $item[0]
-    if($process){ Stop-ProcessTree $process.Id; Write-Host "Stopped $($item[1]) (PID $($process.Id))" }
-    else { Write-Host "$($item[1]) is not running" }
-    Remove-Item -LiteralPath $item[0] -Force -ErrorAction SilentlyContinue
+  foreach($item in @(@($apiState,$legacyApiState,'API'),@($webState,$legacyWebState,'Web'))){
+    $stopped = $false
+    foreach ($statePath in @($item[0], $item[1])) {
+      $process = Get-TrackedProcess @($statePath)
+      if ($process) {
+        Stop-ProcessTree $process.Id
+        Write-Host "Stopped $($item[2]) (PID $($process.Id))"
+        $stopped = $true
+      }
+      Remove-Item -LiteralPath $statePath -Force -ErrorAction SilentlyContinue
+    }
+    if (-not $stopped) { Write-Host "$($item[2]) is not running" }
   }
   exit 0
 }
+
+Set-ContentPilotPythonEnvironment $paths
+New-Item -ItemType Directory -Force -Path $runtime,$logs | Out-Null
 
 if (-not (Test-Path -LiteralPath $venvPython) -or -not (Test-Path -LiteralPath $vite)) {
   Write-Host 'Dependencies are missing. Running first-time setup...' -ForegroundColor Yellow
@@ -83,7 +99,7 @@ try {
   Pop-Location
 }
 
-$existingApi = Get-TrackedProcess $apiState
+$existingApi = Get-TrackedProcess @($apiState, $legacyApiState)
 if (-not $existingApi) {
   if (Get-NetTCPConnection -LocalPort 8000 -State Listen -ErrorAction SilentlyContinue) {
     throw 'Port 8000 is already used by an untracked process.'
@@ -93,17 +109,17 @@ if (-not $existingApi) {
   Write-Host "API started (PID $($api.Id))"
 }
 
-$existingWeb = Get-TrackedProcess $webState
+$existingWeb = Get-TrackedProcess @($webState, $legacyWebState)
 if (-not $existingWeb) {
   if (Get-NetTCPConnection -LocalPort 5173 -State Listen -ErrorAction SilentlyContinue) {
     throw 'Port 5173 is already used by an untracked process.'
   }
-  $web = Start-Process -FilePath $node -ArgumentList @($vite,'--host','127.0.0.1','--port','5173') -WorkingDirectory $frontend -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logs 'web.log') -RedirectStandardError (Join-Path $logs 'web-error.log') -PassThru
+  $web = Start-Process -FilePath $node -ArgumentList @(('"' + $vite + '"'),'--host','127.0.0.1','--port','5173') -WorkingDirectory $frontend -WindowStyle Hidden -RedirectStandardOutput (Join-Path $logs 'web.log') -RedirectStandardError (Join-Path $logs 'web-error.log') -PassThru
   Save-State $webState $web
   Write-Host "Web started (PID $($web.Id))"
 }
 
-if (-not (Wait-Url 'http://127.0.0.1:8000/api/health' 30)) { throw 'API failed. See logs\api-error.log.' }
-if (-not (Wait-Url 'http://127.0.0.1:5173' 30)) { throw 'Web failed. See logs\web-error.log.' }
+if (-not (Wait-Url 'http://127.0.0.1:8000/api/health' 30)) { throw "API failed. See $(Join-Path $logs 'api-error.log')." }
+if (-not (Wait-Url 'http://127.0.0.1:5173' 30)) { throw "Web failed. See $(Join-Path $logs 'web-error.log')." }
 Write-Host 'ContentPilot is ready: http://127.0.0.1:5173' -ForegroundColor Green
 if (-not $NoBrowser) { Start-Process 'http://127.0.0.1:5173' }

@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session
 from app.core.exceptions import AppException
 from app.models.business import EngagementHistory, HistoryImportBatch, PlatformAccount
 from app.services.activity_service import (
+    SIMULATED_HISTORY_NOTE,
     SOURCE_TYPE_LABELS,
     compute_metrics,
     content_type_name,
@@ -111,7 +112,12 @@ FIELD_ALIASES: dict[str, tuple[str, ...]] = {
     "source_type": ("source_type", "sourcetype", "数据来源", "source", "dataset"),
 }
 
-SOURCE_TYPE_CHOICES = list(SOURCE_TYPE_LABELS.keys())
+SOURCE_TYPE_CHOICES = [source for source in SOURCE_TYPE_LABELS if source != "MIXED"]
+
+
+def history_source_type_options() -> list[dict[str, str]]:
+    """Input choices exclude MIXED, which only describes an imported batch."""
+    return [{"value": key, "label": SOURCE_TYPE_LABELS[key]} for key in SOURCE_TYPE_CHOICES]
 
 
 def _normalize_header(value: str) -> str:
@@ -139,6 +145,7 @@ def read_table(raw: bytes, filename: str) -> tuple[list[str], list[dict[str, Any
     else:
         workbook = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
         sheet = workbook.active
+        assert sheet is not None
         rows = list(sheet.iter_rows(values_only=True))
         headers = [str(item) if item is not None else "" for item in (rows[0] if rows else [])]
         records = [dict(zip(headers, values, strict=False)) for values in rows[1:]]
@@ -182,7 +189,11 @@ def _to_int(value: Any) -> int:
 
 
 def row_hash(
-    platform: str, account_ref: str, publish_time: datetime, metrics: dict[str, int]
+    platform: str,
+    account_ref: str,
+    publish_time: datetime,
+    metrics: dict[str, int],
+    source_type: str = "ACCOUNT_HISTORY",
 ) -> str:
     payload = "|".join(
         [
@@ -192,7 +203,14 @@ def row_hash(
             *[f"{key}={metrics.get(key, 0)}" for key in sorted(NUMERIC_FIELDS)],
         ]
     )
-    return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    digest = hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    # Preserve existing real-import deduplication, while a demo cannot occupy
+    # the same hash as an independently imported real observation.
+    return (
+        hashlib.sha256(f"{digest}|SIMULATED".encode()).hexdigest()
+        if source_type == "SIMULATED"
+        else digest
+    )
 
 
 def parse_rows(
@@ -204,6 +222,8 @@ def parse_rows(
     default_content_type: str = "",
 ) -> dict[str, Any]:
     """Validate and normalise every record; never raises on a single bad row."""
+    if default_source_type not in SOURCE_TYPE_CHOICES:
+        raise AppException(40048, "无效的数据来源")
     missing_required = [
         field
         for field in REQUIRED_FIELDS
@@ -246,7 +266,7 @@ def parse_rows(
                 .replace(" ", "_")
             )
             if source_type not in SOURCE_TYPE_CHOICES:
-                source_type = default_source_type
+                raise ValueError(f"无效的数据来源：{source_type}")
             computed = compute_metrics(
                 views=metrics["views"],
                 impressions=metrics["impressions"],
@@ -258,7 +278,7 @@ def parse_rows(
             )
             if computed["reach"] == 0:
                 missing_value_rows += 1
-            digest = row_hash(platform, account_ref, publish_time, metrics)
+            digest = row_hash(platform, account_ref, publish_time, metrics, source_type)
             duplicate_in_file = digest in seen
             if duplicate_in_file:
                 duplicate_rows += 1
@@ -370,9 +390,7 @@ def build_preview(
         "importableRows": importable,
         "errors": result["errors"][:50],
         "preview": [_serialize_preview(item) for item in result["rows"][:MAX_PREVIEW_ROWS]],
-        "sourceTypes": [
-            {"value": key, "label": value} for key, value in SOURCE_TYPE_LABELS.items()
-        ],
+        "sourceTypes": history_source_type_options(),
     }
 
 
@@ -389,6 +407,14 @@ def commit_import(
     default_content_type: str = "",
     source_note: str = "",
 ) -> HistoryImportBatch:
+    # Only this exact, known demo-script provenance overrides legacy columns.
+    if source_note == SIMULATED_HISTORY_NOTE:
+        default_source_type = "SIMULATED"
+        records = [
+            dict(record, **{mapping.get("source_type") or "source_type": "SIMULATED"})
+            for record in records
+        ]
+        mapping = dict(mapping, source_type=mapping.get("source_type") or "source_type")
     result = parse_rows(
         records,
         mapping,
@@ -399,9 +425,13 @@ def commit_import(
     accounts = {
         account.platform: account.id for account in db.scalars(select(PlatformAccount)).all()
     }
+    sources = {item["sourceType"] for item in result["rows"]}
+    batch_source = (
+        next(iter(sources)) if len(sources) == 1 else "MIXED" if sources else default_source_type
+    )
     batch = HistoryImportBatch(
         filename=filename[:255],
-        source_type=default_source_type,
+        source_type=batch_source,
         source_note=(source_note or SOURCE_TYPE_LABELS.get(default_source_type, ""))[:255],
         platform_hint=default_platform or None,
         total_rows=result["totalRows"],
@@ -412,13 +442,17 @@ def commit_import(
     db.add(batch)
     db.flush()
 
-    existing = set(
-        db.scalars(
-            select(EngagementHistory.row_hash).where(
-                EngagementHistory.row_hash.in_([item["rowHash"] for item in result["rows"]])
-            )
-        ).all()
-    )
+    row_hashes = [item["rowHash"] for item in result["rows"]]
+    existing: set[str] = set()
+    # Keep the IN list under SQLite's/MySQL's bound-parameter limits for large imports.
+    for start in range(0, len(row_hashes), 500):
+        existing.update(
+            db.scalars(
+                select(EngagementHistory.row_hash).where(
+                    EngagementHistory.row_hash.in_(row_hashes[start : start + 500])
+                )
+            ).all()
+        )
     inserted = 0
     duplicates = 0
     for item in result["rows"]:
@@ -459,6 +493,7 @@ def commit_import(
                     "title": item.get("title", ""),
                     "summary": item.get("summary", ""),
                     "tags": item.get("tags", ""),
+                    "dataSource": "SIMULATED" if item["sourceType"] == "SIMULATED" else "IMPORTED",
                 },
                 source_type=item["sourceType"],
                 source_note=(source_note or SOURCE_TYPE_LABELS.get(item["sourceType"], ""))[:255],
@@ -482,29 +517,43 @@ def commit_import(
 def build_template() -> bytes:
     workbook = Workbook()
     sheet = workbook.active
+    assert sheet is not None
     sheet.title = "历史互动数据"
     sheet.append([item["field"] for item in CANONICAL_FIELDS])
-    sheet.append(
-        [
-            "WEIBO",
-            "demo-account",
-            "KNOWLEDGE",
-            "2026-07-01 20:00",
-            12000,
-            15000,
-            320,
-            48,
-            26,
-            64,
-            8600,
-            "ACCOUNT_HISTORY",
-        ]
-    )
+    example = {
+        "platform": "WEIBO",
+        "account_id": "demo-account",
+        "content_type": "KNOWLEDGE",
+        "title": "演示：内容运营方法",
+        "summary": "仅供模板字段演示，请替换为真实数据。",
+        "tags": "演示 内容运营",
+        "publish_time": "2026-07-01 20:00",
+        "views": 12000,
+        "impressions": 15000,
+        "likes": 320,
+        "comments": 48,
+        "shares": 26,
+        "favorites": 64,
+        "followers": 8600,
+        "source_type": "SIMULATED",
+    }
+    sheet.append([example.get(item["field"], "") for item in CANONICAL_FIELDS])
     notes = workbook.create_sheet("字段说明")
     notes.append(["字段", "含义", "是否必填"])
     for item in CANONICAL_FIELDS:
         notes.append([item["field"], item["label"], "必填" if item["required"] else "可选"])
     notes.append(["source_type", "可选值：" + " / ".join(SOURCE_TYPE_CHOICES), "可选"])
+    notes.append(
+        [
+            "platform",
+            "支持 WEIBO / X / BLUESKY / MASTODON / XIAOHONGSHU / WECHAT_OFFICIAL / TOUTIAO",
+            "必填",
+        ]
+    )
+    notes.append(
+        ["publish_time", "带时区时间会换算为项目业务时区；不带时区按业务当地时间解释。", ""]
+    )
+    notes.append(["示例", "示例行已标为 SIMULATED，仅用于演示，不参与真实发布推荐。", ""])
     notes.append(
         [
             "说明",

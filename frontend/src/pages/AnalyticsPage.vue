@@ -13,14 +13,15 @@ import Skeleton from '@/components/Skeleton.vue'
 import { workflowApi } from '@/api/workflow'
 import { apiClient, getApiErrorMessage } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
-import type { ActivityAnalysis, RecommendationEffect } from '@/types/business'
+import type { ActivityAnalysis, DataScope, RecommendationEffect } from '@/types/business'
 
 const router = useRouter()
 const auth = useAuthStore()
 const canOperate = computed(() => auth.canManageBusiness)
 const activeTab = ref<'history' | 'publish' | 'chain'>('history')
 
-const overview = ref<Record<string, number>>({})
+const overview = ref<Record<string, any>>({})
+const dataScope = ref<DataScope>('REAL')
 const ranking = ref<Array<Record<string, any>>>([])
 const importing = ref(false)
 const manualOpen = ref(false)
@@ -29,15 +30,22 @@ const historyTotal = ref(0)
 const historyAnalysis = ref<ActivityAnalysis>()
 const historyLoading = ref(false)
 const effect = ref<RecommendationEffect>()
+const publishLoading = ref(false)
+let loadRevision = 0
 
 const publishSampleCount = computed(() => overview.value.sampleCount || 0)
 const hasPublishData = computed(() => publishSampleCount.value > 0)
 const hasHistoryData = computed(() => historyTotal.value > 0)
 
+function localDateString(date = new Date()) {
+  const pad = (value: number) => String(value).padStart(2, '0')
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}`
+}
+
 const metric = ref<Record<string, any>>({
   schedule_id: 0,
   platform: 'WEIBO',
-  metric_date: new Date().toISOString().slice(0, 10),
+  metric_date: localDateString(),
   impressions: 0,
   likes: 0,
   comments: 0,
@@ -46,6 +54,7 @@ const metric = ref<Record<string, any>>({
   followers: 0,
   group_type: 'RECOMMENDED_TIME',
   data_source: 'MANUAL',
+  metric_basis: 'IMPRESSIONS',
 })
 
 async function loadHistoryAnalysis() {
@@ -64,25 +73,40 @@ async function loadHistoryAnalysis() {
 }
 
 async function load() {
-  const [overviewData, rankingData, scheduleData, effectData, historyData] = await Promise.all([
-    workflowApi.analyticsOverview(),
-    workflowApi.analyticsRanking(),
-    workflowApi.schedules(),
-    workflowApi.recommendationEffect(),
-    workflowApi.historyBatches(),
-  ])
-  overview.value = overviewData
-  ranking.value = rankingData
-  schedules.value = scheduleData
-  effect.value = effectData
-  historyTotal.value = historyData.totalRecords || 0
+  const revision = ++loadRevision
+  const scope = dataScope.value
+  publishLoading.value = true
+  overview.value = {}
+  ranking.value = []
+  effect.value = undefined
+  try {
+    const [overviewData, rankingData, scheduleData, effectData, historyData] = await Promise.all([
+      workflowApi.analyticsOverview({ data_scope: scope }),
+      workflowApi.analyticsRanking({ data_scope: scope }),
+      workflowApi.schedules(),
+      workflowApi.recommendationEffect({ data_scope: scope }),
+      workflowApi.historyBatches(),
+    ])
+    if (revision !== loadRevision || scope !== dataScope.value) return
+    overview.value = overviewData
+    ranking.value = rankingData
+    schedules.value = scheduleData
+    effect.value = effectData
+    historyTotal.value = historyData.totalRecords || 0
 
-  if (historyTotal.value) {
-    await loadHistoryAnalysis()
-  }
+    if (historyTotal.value) {
+      await loadHistoryAnalysis()
+    }
 
-  if (!hasHistoryData.value && hasPublishData.value) {
-    activeTab.value = 'publish'
+    if (revision !== loadRevision || scope !== dataScope.value) return
+    if (!hasHistoryData.value && hasPublishData.value) {
+      activeTab.value = 'publish'
+    }
+  } catch (error) {
+    if (revision === loadRevision && scope === dataScope.value)
+      ElMessage.error(getApiErrorMessage(error))
+  } finally {
+    if (revision === loadRevision) publishLoading.value = false
   }
 }
 
@@ -105,7 +129,10 @@ async function upload(options: UploadRequestOptions) {
 
 async function download(path: string) {
   try {
-    const response = await apiClient.get(path, { responseType: 'blob' })
+    const response = await apiClient.get(path, {
+      responseType: 'blob',
+      params: { data_scope: dataScope.value },
+    })
     const url = URL.createObjectURL(response.data)
     const anchor = document.createElement('a')
     anchor.href = url
@@ -167,6 +194,20 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
         </el-button>
       </el-upload>
     </PageHeader>
+    <div class="mt-4 flex flex-wrap items-center gap-3">
+      <span class="text-sm text-muted">发布数据范围</span>
+      <el-select v-model="dataScope" class="!w-44" aria-label="发布数据范围" @change="load">
+        <el-option label="真实数据" value="REAL" />
+        <el-option label="演示数据" value="SIMULATED" />
+        <el-option label="全部（按来源区分）" value="ALL" />
+      </el-select>
+      <span v-if="dataScope !== 'REAL'" class="text-xs text-muted"
+        >含演示数据，不代表线上发布效果。</span
+      >
+      <span v-else-if="overview.excludedSimulatedCount" class="text-xs text-muted"
+        >已排除 {{ overview.excludedSimulatedCount }} 条演示指标。</span
+      >
+    </div>
 
     <div class="analytics-segment">
       <button
@@ -213,11 +254,13 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
     </div>
 
     <div v-show="activeTab === 'publish'" class="analytics-pane">
+      <Skeleton v-if="publishLoading" :lines="6" />
       <PublishReviewPanel
-        v-if="hasPublishData"
+        v-else-if="hasPublishData"
         :overview="overview"
         :ranking="ranking"
         :effect="effect"
+        :data-scope="dataScope"
       />
       <EmptyState v-else title="还没有发布复盘数据" description="导入或手工录入互动指标后查看">
         <template #icon><FileSpreadsheet :size="23" /></template>
@@ -233,7 +276,8 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
     </div>
 
     <div v-if="activeTab === 'chain'" class="analytics-pane">
-      <DecisionChainPanel v-if="hasPublishData" :effect="effect" />
+      <Skeleton v-if="publishLoading" :lines="6" />
+      <DecisionChainPanel v-else-if="hasPublishData" :effect="effect" />
       <EmptyState
         v-else
         title="还没有可追溯的发布记录"
@@ -272,6 +316,19 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
             <el-select v-model="metric.group_type" class="w-full">
               <el-option label="按推荐时间发" value="RECOMMENDED_TIME" />
               <el-option label="按平时时间发" value="FIXED_TIME" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="互动率分母" required>
+            <el-select v-model="metric.metric_basis" class="w-full">
+              <el-option label="曝光量" value="IMPRESSIONS" />
+              <el-option label="粉丝数" value="FOLLOWERS" />
+              <el-option label="尚未确认" value="UNKNOWN" />
+            </el-select>
+          </el-form-item>
+          <el-form-item label="数据来源" required>
+            <el-select v-model="metric.data_source" class="w-full">
+              <el-option label="真实数据（手工录入）" value="MANUAL" />
+              <el-option label="演示数据" value="SIMULATED" />
             </el-select>
           </el-form-item>
           <el-form-item

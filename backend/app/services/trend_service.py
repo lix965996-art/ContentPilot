@@ -43,7 +43,7 @@ def parse_baidu_html(raw_html: str, limit: int = 20) -> list[dict[str, Any]]:
                 "summary": str(item.get("desc") or "").strip(),
                 "url": url,
                 "imageUrl": item.get("img") or None,
-                "heat": int(score) if str(score).isdigit() else None,
+                "heat": int(score) if score is not None and str(score).isdigit() else None,
                 "heatLabel": f"{score} 热度" if score else "实时上榜",
                 "fetchedAt": fetched_at,
                 "tags": [str(item.get("hotTag"))] if item.get("hotTag") else [],
@@ -101,7 +101,10 @@ async def fetch_hacker_news(limit: int) -> list[dict[str, Any]]:
 async def _cached(source: str, limit: int, refresh: bool) -> list[dict[str, Any]]:
     cached = _cache.get(source)
     if not refresh and cached and time.monotonic() - cached[0] < CACHE_SECONDS:
-        return cached[1][:limit]
+        if len(cached[1]) >= limit:
+            return cached[1][:limit]
+        # The cached list was fetched for a smaller limit; refetch instead of
+        # silently returning fewer items than the caller asked for.
     fetcher = fetch_baidu if source == "BAIDU" else fetch_hacker_news
     items = await fetcher(limit)
     _cache[source] = (time.monotonic(), items)

@@ -1,5 +1,6 @@
 import hashlib
 import uuid
+from urllib.parse import urlsplit
 
 import httpx
 from fastapi import APIRouter, Depends, File, Form, Query, Request, UploadFile
@@ -9,6 +10,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user, require_roles
 from app.core.config import settings
 from app.core.exceptions import AppException
+from app.core.paths import MEDIA_UPLOAD_DIR, local_media_path
 from app.core.responses import success_response
 from app.db.session import get_db
 from app.models.business import ContentArticle, MediaAsset
@@ -24,8 +26,10 @@ from app.schemas.business import (
 from app.services.audit_service import record_audit
 from app.services.generation_service import extract_keywords_with_llm, load_llm_runtime
 from app.services.image_service import (
-    MEDIA_UPLOAD_DIR,
+    _download_generated_image,
     generate_provider_image,
+    image_content_suffix,
+    image_model_capabilities,
     list_image_models,
     save_generated_asset,
 )
@@ -87,6 +91,30 @@ def _select_generated_asset(db: Session, asset: MediaAsset) -> None:
     db.flush()
 
 
+async def _localize_media_image(value: str, request: Request) -> tuple[str, str]:
+    """Cache selected public images so all publishers use the same durable bytes."""
+    parsed = urlsplit(value)
+    request_host = urlsplit(str(request.base_url)).netloc
+    local = local_media_path(
+        value,
+        local_hosts_only=bool(parsed.netloc and parsed.netloc != request_host),
+    )
+    if local:
+        if local.stat().st_size > 12 * 1024 * 1024:
+            raise AppException(40043, "图片不能超过 12MB")
+        content = local.read_bytes()
+        image_content_suffix(content)
+        return value, hashlib.sha256(content).hexdigest()
+    suffix, content = await _download_generated_image(value)
+    file_hash = hashlib.sha256(content).hexdigest()
+    MEDIA_UPLOAD_DIR.mkdir(parents=True, exist_ok=True)
+    filename = f"{file_hash}{suffix}"
+    path = MEDIA_UPLOAD_DIR / filename
+    if not path.exists():
+        path.write_bytes(content)
+    return f"/uploads/media/{filename}", file_hash
+
+
 @router.get("/media/image-models")
 async def image_models(
     request: Request,
@@ -102,8 +130,8 @@ async def image_models(
         request,
         {
             "models": models,
-            "textToImage": [model for model in models if "Edit" not in model],
-            "imageToImage": [model for model in models if "Edit" in model],
+            "textToImage": [model for model in models if image_model_capabilities(model)[0]],
+            "imageToImage": [model for model in models if image_model_capabilities(model)[1]],
             "provider": runtime.provider,
         },
     )
@@ -274,6 +302,10 @@ async def upload_media(
     content = await file.read(5 * 1024 * 1024 + 1)
     if len(content) > 5 * 1024 * 1024:
         raise AppException(40043, "图片不能超过 5MB")
+    try:
+        suffix = image_content_suffix(content, max_bytes=5 * 1024 * 1024)
+    except AppException as exc:
+        raise AppException(40042, "图片内容无效，请上传真实的 JPG、PNG、WebP 或 GIF 文件") from exc
     file_hash = hashlib.sha256(content).hexdigest()
     duplicate = db.scalar(
         select(MediaAsset).where(
@@ -313,7 +345,7 @@ async def upload_media(
 
 
 @router.post("/media/select")
-def select_media(
+async def select_media(
     payload: MediaSelectRequest,
     request: Request,
     db: Session = Depends(get_db),
@@ -322,6 +354,9 @@ def select_media(
     if not db.get(ContentArticle, payload.article_id):
         raise AppException(40401, "文章不存在", 404)
     values = _normalized_select_values(payload)
+    original_url = values["image_url"]
+    local_url, file_hash = await _localize_media_image(original_url, request)
+    values.update(image_url=local_url, thumbnail_url=local_url, file_hash=file_hash)
     if payload.usage_type == "COVER":
         db.query(MediaAsset).filter(
             MediaAsset.article_id == payload.article_id, MediaAsset.usage_type == "COVER"
@@ -344,7 +379,14 @@ def select_media(
         action = "SELECT"
     db.flush()
     record_audit(
-        db, request, user, action, "MEDIA", "MEDIA_ASSET", asset.id, {"source": asset.source}
+        db,
+        request,
+        user,
+        action,
+        "MEDIA",
+        "MEDIA_ASSET",
+        asset.id,
+        {"source": asset.source, "originalImageUrl": original_url},
     )
     db.commit()
     db.refresh(asset)
@@ -461,6 +503,8 @@ def list_media_assets(
     collection: str = Query(default="", max_length=100),
     favorite: bool | None = None,
     article_id: int | None = None,
+    limit: int | None = Query(default=None, ge=1, le=1000),
+    offset: int = Query(default=0, ge=0),
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ) -> dict:
@@ -481,11 +525,14 @@ def list_media_assets(
         filters.append(MediaAsset.favorite == favorite)
     if article_id is not None:
         filters.append(MediaAsset.article_id == article_id)
-    rows = db.scalars(
+    statement = (
         select(MediaAsset)
         .where(*filters)
         .order_by(MediaAsset.created_at.desc(), MediaAsset.id.desc())
-    ).all()
+    )
+    if limit is not None:
+        statement = statement.offset(offset).limit(limit)
+    rows = db.scalars(statement).all()
     collections = sorted({row.collection for row in rows if row.collection})
     return success_response(
         request,
@@ -520,7 +567,7 @@ def update_media_asset(
 
 
 @router.post("/media/{asset_id}/attach")
-def attach_media_asset(
+async def attach_media_asset(
     asset_id: int,
     payload: MediaAttachRequest,
     request: Request,
@@ -533,6 +580,7 @@ def attach_media_asset(
         raise AppException(40404, "图片资源不存在", 404)
     if not article:
         raise AppException(40401, "文章不存在", 404)
+    local_url, file_hash = await _localize_media_image(source.image_url, request)
     if payload.usage_type == "COVER":
         db.query(MediaAsset).filter(
             MediaAsset.article_id == article.id, MediaAsset.usage_type == "COVER"
@@ -540,7 +588,7 @@ def attach_media_asset(
     existing = db.scalar(
         select(MediaAsset).where(
             MediaAsset.article_id == article.id,
-            MediaAsset.image_url == source.image_url,
+            MediaAsset.image_url == local_url,
             MediaAsset.usage_type == payload.usage_type,
         )
     )
@@ -553,8 +601,8 @@ def attach_media_asset(
         variant_id=None,
         source=source.source,
         source_id=source.source_id,
-        image_url=source.image_url,
-        thumbnail_url=source.thumbnail_url,
+        image_url=local_url,
+        thumbnail_url=local_url,
         photographer_name=source.photographer_name,
         photographer_url=source.photographer_url,
         alt_text=source.alt_text,
@@ -567,7 +615,7 @@ def attach_media_asset(
         favorite=source.favorite,
         license_type=source.license_type,
         license_note=source.license_note,
-        file_hash=source.file_hash,
+        file_hash=file_hash,
     )
     db.add(asset)
     db.flush()

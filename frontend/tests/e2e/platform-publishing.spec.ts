@@ -124,7 +124,13 @@ test('real platform modes never report a simulated connection or publish result'
   })
   const articles = (await articlesResponse.json()).data.items
   let articleId = 0
-  let variants: Array<{ platform: string; id: number }> = []
+  let variants: Array<{
+    platform: string
+    id: number
+    contentFingerprint: string
+    reviewFingerprint?: string
+    reviewStatus: string
+  }> = []
   for (const article of articles) {
     const response = await request.get(`${api}/articles/${article.id}/variants`, {
       headers: operatorHeaders,
@@ -138,6 +144,18 @@ test('real platform modes never report a simulated connection or publish result'
     }
   }
   expect(articleId).toBeGreaterThan(0)
+  for (const variant of variants) {
+    if (
+      variant.reviewStatus === 'APPROVED' &&
+      variant.reviewFingerprint === variant.contentFingerprint
+    )
+      continue
+    const approved = await request.post(`${api}/variants/${variant.id}/approve`, {
+      headers: operatorHeaders,
+      data: { expected_fingerprint: variant.contentFingerprint },
+    })
+    expect(approved.ok(), await approved.text()).toBeTruthy()
+  }
   const variantByPlatform = Object.fromEntries(
     variants.map((item: { platform: string; id: number }) => [item.platform, item.id]),
   )
@@ -173,18 +191,29 @@ test('real platform modes never report a simulated connection or publish result'
     },
   )
   expect(normalizedXhsVariant.ok(), await normalizedXhsVariant.text()).toBeTruthy()
+  const normalizedVariant = (await normalizedXhsVariant.json()).data
+  const approvedXhsVariant = await request.post(
+    `${api}/variants/${variantByPlatform.XIAOHONGSHU}/approve`,
+    {
+      headers: operatorHeaders,
+      data: { expected_fingerprint: normalizedVariant.contentFingerprint },
+    },
+  )
+  expect(approvedXhsVariant.ok(), await approvedXhsVariant.text()).toBeTruthy()
 
-  const cover = await request.post(`${api}/media/select`, {
+  const cover = await request.post(`${api}/media/upload`, {
     headers: operatorHeaders,
-    data: {
-      article_id: articleId,
-      variant_id: variantByPlatform.XIAOHONGSHU,
-      source: 'E2E',
-      source_id: 'xhs-cover',
-      image_url: 'https://example.com/e2e-xhs-cover.jpg',
-      thumbnail_url: 'https://example.com/e2e-xhs-cover.jpg',
-      title: '小红书发布流程测试封面',
+    multipart: {
+      article_id: String(articleId),
       usage_type: 'COVER',
+      file: {
+        name: 'xhs-cover.png',
+        mimeType: 'image/png',
+        buffer: Buffer.from(
+          'iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAwMCAO+a7GQAAAAASUVORK5CYII=',
+          'base64',
+        ),
+      },
     },
   })
   expect(cover.ok(), await cover.text()).toBeTruthy()

@@ -35,13 +35,13 @@ class ResolveRequest(BaseModel):
     """New soft constraints the reviewer wants applied on the next solve."""
 
     minimum_cross_platform_gap_minutes: int | None = Field(default=None, ge=0, le=24 * 60)
-    platform_order: list[str] = Field(default_factory=list, max_length=5)
+    platform_order: list[str] = Field(default_factory=list, max_length=7)
     note: str = Field(default="", max_length=300)
 
     @field_validator("platform_order")
     @classmethod
     def normalize(cls, value: list[str]) -> list[str]:
-        allowed = {"WEIBO", "XIAOHONGSHU", "WECHAT_OFFICIAL", "TOUTIAO", "X"}
+        allowed = {"WEIBO", "XIAOHONGSHU", "WECHAT_OFFICIAL", "TOUTIAO", "X", "BLUESKY", "MASTODON"}
         return [item.strip().upper() for item in value if item.strip().upper() in allowed]
 
 

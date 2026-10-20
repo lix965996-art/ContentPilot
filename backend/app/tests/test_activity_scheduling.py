@@ -31,6 +31,12 @@ def build_history_csv(platform: str = "WEIBO", account: str = "history-account")
     anchor = (now - timedelta(days=days_since_tuesday)).replace(
         hour=20, minute=0, second=0, microsecond=0
     )
+    # The fixture also creates a Thursday 03:00 sample from each Tuesday.
+    # Early in the week that final sample would otherwise lie in the future
+    # and be correctly excluded by the analysis endpoint, making this test
+    # depend on the weekday/time at which it runs.
+    if anchor.replace(hour=3) + timedelta(days=2) > now:
+        anchor -= timedelta(days=7)
     base = anchor - timedelta(days=7 * (WEEKS - 1))
     for week in range(WEEKS):
         peak = base + timedelta(days=7 * week)
@@ -181,6 +187,12 @@ def test_schedule_records_recommendation_basis_and_effect(client: TestClient, lo
         "data"
     ]["variants"]
     variant = next(item for item in task_variants if item["platform"] == "XIAOHONGSHU")
+    approved = client.post(
+        f"/api/variants/{variant['id']}/approve",
+        headers=auth,
+        json={"expected_fingerprint": variant["contentFingerprint"]},
+    )
+    assert approved.status_code == 200, approved.text
 
     recommendation = client.post(
         "/api/recommendations/publish-time",
@@ -303,6 +315,13 @@ def test_batch_recommendation_and_schedule(client: TestClient, login_as) -> None
         "data"
     ]["variants"]
     variant_by_platform = {item["platform"]: item for item in task_variants}
+    for variant in task_variants:
+        approved = client.post(
+            f"/api/variants/{variant['id']}/approve",
+            headers=auth,
+            json={"expected_fingerprint": variant["contentFingerprint"]},
+        )
+        assert approved.status_code == 200, approved.text
 
     batch = client.post(
         "/api/recommendations/publish-time/batch",

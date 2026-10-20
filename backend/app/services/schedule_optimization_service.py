@@ -32,6 +32,8 @@ from __future__ import annotations
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
+from typing import Any
+from zoneinfo import ZoneInfo
 
 from app.core.config import settings
 
@@ -80,6 +82,19 @@ class PlatformTarget:
     priority_rank: int = 0
     data_confidence: float = 0.0
     skippable: bool = False
+
+    def __post_init__(self) -> None:
+        # The API accepts ISO datetimes with an offset (the frontend sends
+        # ``toISOString()``). Candidate slots are naive business-wall time, so
+        # normalise every target anchor before any arithmetic happens.
+        for name in ("original_best_time", "locked_time", "preferred_time"):
+            value = getattr(self, name)
+            if value is not None and value.tzinfo is not None:
+                setattr(
+                    self,
+                    name,
+                    value.astimezone(ZoneInfo(settings.app_timezone)).replace(tzinfo=None),
+                )
 
 
 @dataclass
@@ -273,41 +288,14 @@ def _strategy_bonus(
     return max(0.0, 100.0 - (minutes_from_first - minimum_gap_minutes) * 0.25)
 
 
-def optimize(
+def _prepare_candidates(
+    model: Any,
     targets: list[PlatformTarget],
     candidates_by_platform: dict[str, list[Candidate]],
-    context: SolveContext,
-    *,
-    extra_min_gap_minutes: int | None = None,
-) -> dict:
-    """Solve the joint cross-platform scheduling problem.
-
-    ``extra_min_gap_minutes`` lets the LLM plan reviewer request a re-solve with
-    a stricter separation requirement without ever choosing a time itself.
-    """
-    started = time.perf_counter()
-    if not ORTOOLS_AVAILABLE:
-        return {
-            "solverStatus": "ORTOOLS_UNAVAILABLE",
-            "optimizerVersion": OPTIMIZER_VERSION,
-            "assignments": [],
-            "solveDurationMs": 0,
-            "hardConstraints": [],
-            "softObjectiveBreakdown": {},
-            "message": "OR-Tools 不可用，已回退到 hybrid-v2 单平台推荐",
-        }
-
-    minimum_gap = max(
-        context.minimum_gap_minutes,
-        extra_min_gap_minutes or 0,
-    )
-
-    model = cp_model.CpModel()
-    # x[(platform, index)] == 1 means that platform publishes at that candidate.
-    x: dict[tuple[str, int], object] = {}
+    hard_constraints: list[dict],
+) -> tuple[dict[tuple[str, int], Any], dict[str, list[Candidate]]]:
+    x: dict[tuple[str, int], Any] = {}
     eligible: dict[str, list[Candidate]] = {}
-
-    hard_constraints: list[dict] = []
     for target in targets:
         pool = [
             item
@@ -354,19 +342,17 @@ def optimize(
                     ),
                 }
             )
+    return x, eligible
 
-    solvable = [target for target in targets if eligible.get(target.platform)]
-    if not solvable:
-        return {
-            "solverStatus": "NO_CANDIDATE",
-            "optimizerVersion": OPTIMIZER_VERSION,
-            "assignments": [],
-            "solveDurationMs": int((time.perf_counter() - started) * 1000),
-            "hardConstraints": hard_constraints,
-            "softObjectiveBreakdown": {},
-            "message": "所有候选时段都被硬约束排除",
-        }
 
+def _add_same_account_constraints(
+    model: Any,
+    x: dict[tuple[str, int], Any],
+    solvable: list[PlatformTarget],
+    eligible: dict[str, list[Candidate]],
+    context: SolveContext,
+    hard_constraints: list[dict],
+) -> None:
     # H5: same-account minimum interval between two scheduled platforms.
     for i, left in enumerate(solvable):
         for right in solvable[i + 1 :]:
@@ -391,6 +377,8 @@ def optimize(
                 }
             )
 
+
+def _append_static_hard_constraints(hard_constraints: list[dict], context: SolveContext) -> None:
     hard_constraints.extend(
         [
             {
@@ -429,7 +417,15 @@ def optimize(
         ]
     )
 
-    # ---- Soft objective ------------------------------------------------------
+
+def _add_soft_objective(
+    model: Any,
+    x: dict[tuple[str, int], Any],
+    solvable: list[PlatformTarget],
+    eligible: dict[str, list[Candidate]],
+    context: SolveContext,
+    minimum_gap: int,
+) -> None:
     priority_index = {platform: rank for rank, platform in enumerate(context.platform_priority)}
     reference = min(candidate.at for target in solvable for candidate in eligible[target.platform])
 
@@ -491,24 +487,15 @@ def optimize(
         else sum(terms)
     )
 
-    solver = cp_model.CpSolver()
-    solver.parameters.max_time_in_seconds = SOLVER_TIME_LIMIT_SECONDS
-    solver.parameters.num_search_workers = 4
-    status = solver.Solve(model)
-    duration_ms = int((time.perf_counter() - started) * 1000)
-    status_name = solver.StatusName(status)
 
-    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
-        return {
-            "solverStatus": status_name,
-            "optimizerVersion": OPTIMIZER_VERSION,
-            "assignments": [],
-            "solveDurationMs": duration_ms,
-            "hardConstraints": hard_constraints,
-            "softObjectiveBreakdown": {},
-            "message": f"CP-SAT 未找到可行解（{status_name}）",
-        }
-
+def _build_assignments(
+    solver: Any,
+    x: dict[tuple[str, int], Any],
+    solvable: list[PlatformTarget],
+    eligible: dict[str, list[Candidate]],
+    context: SolveContext,
+    minimum_gap: int,
+) -> tuple[list[dict], int]:
     assignments: list[dict] = []
     chosen_times: list[datetime] = []
     for target in solvable:
@@ -539,15 +526,14 @@ def optimize(
             continue
         chosen_times.append(picked.at)
         original = target.original_best_time
-        # H8: a locked slot is never treated as an optimisation adjustment.
-        adjusted = bool(
-            not target.locked_time
-            and original
-            and abs((picked.at - original).total_seconds()) >= SLOT_MINUTES * 60
+        drift_from_original = (
+            (picked.at - original).total_seconds() if original is not None else 0.0
         )
+        # H8: a locked slot is never treated as an optimisation adjustment.
+        adjusted = bool(not target.locked_time and abs(drift_from_original) >= SLOT_MINUTES * 60)
         if target.locked_time:
             reason = "用户锁定时间，未做优化调整"
-        elif adjusted:
+        elif adjusted and original is not None:
             drift = int((picked.at - original).total_seconds() // 60)
             reason = (
                 f"为满足跨平台约束（策略 {context.cross_platform_strategy}、"
@@ -579,7 +565,21 @@ def optimize(
                 < SIMULTANEOUS_TOLERANCE_MINUTES
             ):
                 overlap_count += 1
+    return assignments, overlap_count
 
+
+def _optimization_response(
+    *,
+    status_name: str,
+    solver: Any,
+    duration_ms: int,
+    assignments: list[dict],
+    hard_constraints: list[dict],
+    eligible: dict[str, list[Candidate]],
+    overlap_count: int,
+    context: SolveContext,
+    minimum_gap: int,
+) -> dict:
     return {
         "solverStatus": status_name,
         "optimizerVersion": OPTIMIZER_VERSION,
@@ -605,6 +605,87 @@ def optimize(
             ],
         },
     }
+
+
+def optimize(
+    targets: list[PlatformTarget],
+    candidates_by_platform: dict[str, list[Candidate]],
+    context: SolveContext,
+    *,
+    extra_min_gap_minutes: int | None = None,
+) -> dict:
+    """Solve the joint cross-platform scheduling problem.
+
+    ``extra_min_gap_minutes`` lets the LLM plan reviewer request a re-solve with
+    a stricter separation requirement without ever choosing a time itself.
+    """
+    started = time.perf_counter()
+    if not ORTOOLS_AVAILABLE:
+        return {
+            "solverStatus": "ORTOOLS_UNAVAILABLE",
+            "optimizerVersion": OPTIMIZER_VERSION,
+            "assignments": [],
+            "solveDurationMs": 0,
+            "hardConstraints": [],
+            "softObjectiveBreakdown": {},
+            "message": "OR-Tools 不可用，已回退到 hybrid-v2 单平台推荐",
+        }
+
+    minimum_gap = max(context.minimum_gap_minutes, extra_min_gap_minutes or 0)
+
+    assert cp_model is not None  # guarded by ORTOOLS_AVAILABLE above
+    model: Any = cp_model.CpModel()
+    hard_constraints: list[dict] = []
+    x, eligible = _prepare_candidates(model, targets, candidates_by_platform, hard_constraints)
+
+    solvable = [target for target in targets if eligible.get(target.platform)]
+    if not solvable:
+        return {
+            "solverStatus": "NO_CANDIDATE",
+            "optimizerVersion": OPTIMIZER_VERSION,
+            "assignments": [],
+            "solveDurationMs": int((time.perf_counter() - started) * 1000),
+            "hardConstraints": hard_constraints,
+            "softObjectiveBreakdown": {},
+            "message": "所有候选时段都被硬约束排除",
+        }
+
+    _add_same_account_constraints(model, x, solvable, eligible, context, hard_constraints)
+    _append_static_hard_constraints(hard_constraints, context)
+    _add_soft_objective(model, x, solvable, eligible, context, minimum_gap)
+
+    solver = cp_model.CpSolver()
+    solver.parameters.max_time_in_seconds = SOLVER_TIME_LIMIT_SECONDS
+    solver.parameters.num_search_workers = 4
+    status = solver.Solve(model)
+    duration_ms = int((time.perf_counter() - started) * 1000)
+    status_name = solver.StatusName(status)
+
+    if status not in (cp_model.OPTIMAL, cp_model.FEASIBLE):
+        return {
+            "solverStatus": status_name,
+            "optimizerVersion": OPTIMIZER_VERSION,
+            "assignments": [],
+            "solveDurationMs": duration_ms,
+            "hardConstraints": hard_constraints,
+            "softObjectiveBreakdown": {},
+            "message": f"CP-SAT 未找到可行解（{status_name}）",
+        }
+
+    assignments, overlap_count = _build_assignments(
+        solver, x, solvable, eligible, context, minimum_gap
+    )
+    return _optimization_response(
+        status_name=status_name,
+        solver=solver,
+        duration_ms=duration_ms,
+        assignments=assignments,
+        hard_constraints=hard_constraints,
+        eligible=eligible,
+        overlap_count=overlap_count,
+        context=context,
+        minimum_gap=minimum_gap,
+    )
 
 
 def default_context(

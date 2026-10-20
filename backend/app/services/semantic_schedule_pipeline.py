@@ -29,10 +29,10 @@ from app.services import (
     schedule_plan_review_service,
     semantic_history_retrieval_service,
 )
-from app.services.activity_service import content_type_name
+from app.services.activity_service import business_now, content_type_name
 
 PIPELINE_VERSION = "semantic-cpsat-v1"
-ACTIVE_SCHEDULE_STATUSES = ("PENDING", "RUNNING", "AWAITING_CONFIRM")
+ACTIVE_SCHEDULE_STATUSES = ("PENDING", "RUNNING", "WAITING_MANUAL_CONFIRM")
 
 
 def _active_schedules(
@@ -119,7 +119,7 @@ async def run_pipeline(
     is empty whenever the solver could not produce a plan, which is the caller's
     signal to keep the hybrid-v2 result untouched.
     """
-    now = datetime.now()
+    now = business_now()
     stage_status: dict[str, str] = {}
     platforms = [item["platform"] for item in targets]
 

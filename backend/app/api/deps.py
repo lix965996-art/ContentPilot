@@ -8,6 +8,7 @@ from app.core.exceptions import AppException
 from app.core.security import decode_token
 from app.db.session import get_db
 from app.models.user import User
+from app.services.auth_service import get_token_user
 
 bearer_scheme = HTTPBearer(auto_error=False)
 
@@ -19,14 +20,7 @@ def get_current_user(
     if credentials is None or credentials.scheme.lower() != "bearer":
         raise AppException(40101, "请先登录", 401)
     payload = decode_token(credentials.credentials, "access")
-    try:
-        user_id = int(payload["sub"])
-    except (TypeError, ValueError) as exc:
-        raise AppException(40101, "登录凭证无效", 401) from exc
-    user = db.get(User, user_id)
-    if user is None or user.status != "ACTIVE":
-        raise AppException(40101, "用户不存在或账号不可用", 401)
-    return user
+    return get_token_user(db, payload)
 
 
 def require_roles(*allowed_roles: str) -> Callable[..., User]:

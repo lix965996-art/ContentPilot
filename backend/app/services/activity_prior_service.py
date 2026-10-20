@@ -29,6 +29,13 @@ from __future__ import annotations
 PLATFORM_HOUR_PEAKS: dict[str, dict[int, float]] = {
     "WEIBO": {8: 78, 12: 82, 18: 88, 20: 96, 21: 91},
     "X": {8: 80, 12: 86, 17: 82, 20: 94, 22: 88},
+    # No Bluesky-specific audience measurements yet; use only the generic
+    # SIMULATED diurnal baseline until the user imports actual account history.
+    "BLUESKY": {},
+    # Federation-wide or instance-specific Mastodon audience measurements have
+    # not been imported. This is a generic SIMULATED human rule, not evidence
+    # about the connected instance's audience.
+    "MASTODON": {},
     "XIAOHONGSHU": {9: 74, 12: 80, 19: 90, 20: 98, 21: 94, 22: 86},
     "WECHAT_OFFICIAL": {7: 83, 8: 90, 12: 76, 18: 82, 20: 88},
     "TOUTIAO": {7: 76, 8: 82, 12: 88, 18: 92, 20: 86, 22: 78},

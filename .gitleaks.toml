@@ -1,0 +1,13 @@
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Generated dependencies, local runtime state and build output"
+paths = [
+  '''(^|/)node_modules/''',
+  '''(^|/)backend/\.venv/''',
+  '''(^|/)frontend/dist/''',
+  '''(^|/)var/''',
+  '''(^|/)\.git/''',
+  '''(^|/)package-lock\.json$''',
+]

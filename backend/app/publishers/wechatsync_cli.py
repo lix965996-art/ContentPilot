@@ -15,6 +15,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from app.core.paths import TMP_DIR, ensure_directory
 from app.publishers.base import PublishResult
 
 
@@ -108,7 +109,11 @@ class WechatsyncPublisher:
 
         started = time.perf_counter()
         with tempfile.NamedTemporaryFile(
-            mode="w", suffix=".md", encoding="utf-8", delete=False
+            mode="w",
+            suffix=".md",
+            encoding="utf-8",
+            delete=False,
+            dir=ensure_directory(TMP_DIR),
         ) as output:
             output.write(markdown)
             temporary_path = output.name

@@ -19,7 +19,6 @@ import UserAvatar from '@/components/UserAvatar.vue'
 import { workflowApi } from '@/api/workflow'
 import { getApiErrorMessage } from '@/api/client'
 import type { LlmConfig, LlmUsage } from '@/types/business'
-import { platformNames } from '@/types/business'
 
 const EMPTY_USAGE: LlmUsage = {
   days: 30,
@@ -87,7 +86,8 @@ const apiKeyState = computed(() => {
   return '未配置'
 })
 
-function formatNumber(value: number) {
+function formatNumber(value: number | null) {
+  if (value === null) return '未知'
   return new Intl.NumberFormat('zh-CN').format(value || 0)
 }
 
@@ -235,7 +235,7 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
               <div class="pricing-heading">
                 <div>
                   <h3>Token 价格</h3>
-                  <p>按服务商价格填写，系统会记录每次生成的预估费用。</p>
+                  <p>按服务商价格填写，每次模型调用保存当时的价格快照。</p>
                 </div>
               </div>
               <div class="pricing-grid">
@@ -265,7 +265,7 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
                 </el-form-item>
               </div>
               <div class="budget-grid">
-                <el-form-item label="月度预算（0 表示不限制）">
+                <el-form-item label="本地月度预算（0 表示关闭限制）">
                   <el-input-number
                     v-model="llm.monthlyBudget"
                     :min="0"
@@ -285,6 +285,11 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
                   />
                 </el-form-item>
               </div>
+              <p class="text-sm text-slate-500">
+                启用后按已知费用和并发调用的预估费用拦截新请求；须先填写文本单价。
+                图片或向量调用缺少计价规则时会被阻止。费用未知的调用需核对后再继续。
+                预估不能替代服务商的账户限额，单次实际费用仍可能超过预留。
+              </p>
 
               <div class="model-actions">
                 <el-button
@@ -343,7 +348,7 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
           <header class="usage-toolbar">
             <div>
               <h2>模型用量</h2>
-              <p>根据模型接口返回的 Token 数量计算。</p>
+              <p>包含生成、评审、关键词、推荐等调用及重试；删除内容不会删除调用账本。</p>
             </div>
             <div>
               <el-select v-model="usageDays" class="!w-28" @change="loadUsage">
@@ -363,13 +368,23 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
               {{ usage.budgetUsedPercent.toFixed(1) }}%。</span
             >
           </div>
+          <div v-if="usage.monthlyUnknownCalls" class="usage-alert is-warning">
+            <AlertTriangle :size="16" />
+            <span
+              >本月
+              {{ usage.monthlyUnknownCalls }} 次调用费用未知，不能将费用小计视为完整账单。</span
+            >
+          </div>
+          <p v-if="usage.otherCurrencyCalls" class="text-sm text-slate-500">
+            {{ usage.otherCurrencyCalls }} 次其他币种调用仍保留在明细中，未折算进当前币种费用。
+          </p>
           <div v-else-if="!usage.priceConfigured" class="usage-alert">
             <AlertTriangle :size="16" />
             <span>尚未配置 Token 单价，已有 Token 会保留，但费用暂不显示为 0 元。</span>
           </div>
           <div class="usage-metrics">
             <div>
-              <span>生成次数</span><strong>{{ formatNumber(usage.generations) }}</strong>
+              <span>调用次数（含重试）</span><strong>{{ formatNumber(usage.generations) }}</strong>
             </div>
             <div>
               <span>输入 Token</span><strong>{{ formatNumber(usage.promptTokens) }}</strong>
@@ -378,8 +393,8 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
               <span>输出 Token</span><strong>{{ formatNumber(usage.completionTokens) }}</strong>
             </div>
             <div class="is-cost">
-              <span>按当前单价估算</span>
-              <strong v-if="usage.priceConfigured"
+              <span>已知费用小计（{{ usage.currency }}）</span>
+              <strong v-if="usage.pricedGenerations"
                 >{{ currencySymbol }}{{ usage.estimatedCost.toFixed(4) }}</strong
               >
               <strong v-else>未计价</strong>
@@ -407,7 +422,7 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
                 <article v-for="item in usage.byModel" :key="item.model">
                   <div>
                     <b>{{ item.model }}</b
-                    ><small>{{ item.generations }} 次生成</small>
+                    ><small>{{ item.generations }} 次调用</small>
                   </div>
                   <div>
                     <strong>{{ formatNumber(item.tokens) }}</strong
@@ -424,21 +439,21 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
           </div>
           <div class="usage-detail">
             <header>
-              <h3>最近生成明细</h3>
-              <span>费用使用当前配置的单价重新估算</span>
+              <h3>最近调用明细</h3>
+              <span>历史费用保留调用时价格，未知费用单独标示</span>
             </header>
             <div v-if="usage.recent.length" class="usage-detail-table">
               <article v-for="item in usage.recent" :key="item.id">
                 <div>
                   <b>{{ item.articleTitle }}</b>
-                  <small>{{ platformNames[item.platform] }} · {{ item.model }}</small>
+                  <small>{{ item.status || '历史记录' }} · {{ item.model }}</small>
                 </div>
                 <span
                   >输入 {{ formatNumber(item.promptTokens) }} / 输出
                   {{ formatNumber(item.completionTokens) }}</span
                 >
                 <strong v-if="item.cost !== null"
-                  >{{ currencySymbol }}{{ item.cost.toFixed(4) }}</strong
+                  >{{ item.currency || usage.currency }} {{ item.cost.toFixed(4) }}</strong
                 >
                 <strong v-else class="unpriced">未计价</strong>
               </article>
@@ -448,7 +463,7 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
           <p class="usage-disclaimer">
             <CircleDollarSign
               :size="14"
-            />保存单价后刷新即可重算历史费用；最终账单以模型服务商为准。
+            />历史导入仅能恢复旧版本已保存的用量。未返回用量、图片和中断调用的费用可能未知；最终账单以模型服务商为准。
           </p>
         </section>
       </el-tab-pane>

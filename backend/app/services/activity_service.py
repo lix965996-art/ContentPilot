@@ -12,10 +12,12 @@ import math
 import re
 from collections import defaultdict
 from datetime import date, datetime, time, timedelta
+from zoneinfo import ZoneInfo
 
 from sqlalchemy import Select, func, select
 from sqlalchemy.orm import Session
 
+from app.core.config import settings
 from app.models.business import EngagementHistory
 
 WEEKDAY_NAMES = ["周一", "周二", "周三", "周四", "周五", "周六", "周日"]
@@ -51,7 +53,47 @@ SOURCE_TYPE_LABELS = {
     "PUBLIC_BASELINE": "公开数据基线",
     "YOUTUBE_PUBLIC_SAMPLE": "YouTube 公开样本（非国内平台数据）",
     "RESEARCH_DATASET": "公开研究数据集",
+    "SIMULATED": "演示模拟数据（不参与真实推荐）",
+    "MIXED": "混合来源（按记录查看）",
 }
+
+# This exact marker was written by the project's former demo bootstrap script.
+SIMULATED_HISTORY_NOTE = "SIMULATED 演示账号历史（自动生成，非真实平台数据）"
+
+
+def normalize_business_time(value: datetime) -> datetime:
+    """Store local business-wall time; naive spreadsheet times already use it."""
+    if value.tzinfo is not None:
+        value = value.astimezone(ZoneInfo(settings.app_timezone))
+    return value.replace(tzinfo=None)
+
+
+def business_now() -> datetime:
+    return normalize_business_time(datetime.now(ZoneInfo(settings.app_timezone)))
+
+
+def real_history_conditions() -> tuple:
+    """Reject only explicit simulation provenance, including legacy feedback."""
+    return (
+        EngagementHistory.source_type != "SIMULATED",
+        func.upper(
+            func.coalesce(EngagementHistory.metric_detail_json["dataSource"].as_string(), "")
+        )
+        != "SIMULATED",
+        func.coalesce(EngagementHistory.source_note, "") != SIMULATED_HISTORY_NOTE,
+        func.coalesce(EngagementHistory.metric_detail_json["metricBasis"].as_string(), "").not_in(
+            ("UNKNOWN", "NONE")
+        ),
+    )
+
+
+def history_is_simulated(row: EngagementHistory) -> bool:
+    return (
+        row.source_type == "SIMULATED"
+        or str((row.metric_detail_json or {}).get("dataSource", "")).upper() == "SIMULATED"
+        or row.source_note == SIMULATED_HISTORY_NOTE
+    )
+
 
 CONTENT_TYPE_NAMES = {
     "KNOWLEDGE": "知识科普",
@@ -133,7 +175,7 @@ def resolve_window(
     ``start``/``end`` are ``None`` for the unbounded "ALL" window; otherwise they
     are concrete datetimes ready to filter ``EngagementHistory.publish_time``.
     """
-    now = now or datetime.now()
+    now = normalize_business_time(now) if now else business_now()
     window = (window or DEFAULT_WINDOW).upper()
     if window not in WINDOW_CHOICES:
         raise ValueError("时间范围只能是 30D / 90D / ALL / CUSTOM")
@@ -197,9 +239,16 @@ def compute_metrics(
     shares: int,
     favorites: int,
     followers: int,
+    metric_basis: str | None = None,
 ) -> dict:
     """Derive interaction rates and the saturated rate component for one record."""
-    reach, basis = reach_of(views, impressions, followers)
+    if metric_basis is None:
+        reach, basis = reach_of(views, impressions, followers)
+    else:
+        basis = metric_basis.upper()
+        reach = {"IMPRESSIONS": impressions, "VIEWS": views, "FOLLOWERS": followers}.get(basis, 0)
+        if basis not in {"IMPRESSIONS", "VIEWS", "FOLLOWERS"}:
+            basis = "UNKNOWN"
     total = likes + comments + shares + favorites
     rates = {
         "like": likes / reach if reach else 0.0,
@@ -256,8 +305,11 @@ def history_query(
     source_types: tuple[str, ...] | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
+    include_simulated: bool = False,
 ) -> Select:
     query = select(EngagementHistory)
+    if not include_simulated:
+        query = query.where(*real_history_conditions())
     if platform:
         query = query.where(EngagementHistory.platform == platform)
     if account_id:
@@ -267,9 +319,9 @@ def history_query(
     if source_types:
         query = query.where(EngagementHistory.source_type.in_(source_types))
     if start:
-        query = query.where(EngagementHistory.publish_time >= start)
+        query = query.where(EngagementHistory.publish_time >= normalize_business_time(start))
     if end:
-        query = query.where(EngagementHistory.publish_time <= end)
+        query = query.where(EngagementHistory.publish_time <= normalize_business_time(end))
     return query
 
 
@@ -282,6 +334,7 @@ def load_rows(
     source_types: tuple[str, ...] | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
+    include_simulated: bool = False,
 ) -> list[EngagementHistory]:
     return list(
         db.scalars(
@@ -292,6 +345,7 @@ def load_rows(
                 source_types=source_types,
                 start=start,
                 end=end,
+                include_simulated=include_simulated,
             )
         ).all()
     )
@@ -306,6 +360,7 @@ def count_rows(
     source_types: tuple[str, ...] | None = None,
     start: datetime | None = None,
     end: datetime | None = None,
+    include_simulated: bool = False,
 ) -> int:
     query = history_query(
         platform=platform,
@@ -314,6 +369,7 @@ def count_rows(
         source_types=source_types,
         start=start,
         end=end,
+        include_simulated=include_simulated,
     )
     return int(db.scalar(select(func.count()).select_from(query.subquery())) or 0)
 
@@ -591,13 +647,15 @@ def summarize_import_window(rows: list[EngagementHistory]) -> dict:
 def parse_publish_time(value: object) -> datetime:
     """Accept the common spreadsheet date formats used by platform exports."""
     if isinstance(value, datetime):
-        return value.replace(tzinfo=None)
+        return normalize_business_time(value)
     text = str(value or "").strip()
     if not text:
         raise ValueError("publish_time 不能为空")
     text = text.replace("/", "-").replace("T", " ").strip()
-    if text.endswith("Z"):
-        text = text[:-1]
+    try:
+        return normalize_business_time(datetime.fromisoformat(text.replace("Z", "+00:00")))
+    except ValueError:
+        pass
     candidates = (
         "%Y-%m-%d %H:%M:%S",
         "%Y-%m-%d %H:%M",

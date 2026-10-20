@@ -25,7 +25,7 @@ from __future__ import annotations
 import hashlib
 from datetime import datetime
 
-from sqlalchemy import select
+from sqlalchemy import and_, or_, select
 from sqlalchemy.orm import Session
 
 from app.models.business import (
@@ -39,6 +39,7 @@ from app.models.business import (
 from app.services.activity_service import (
     classify_content_type,
     compute_metrics,
+    normalize_business_time,
     normalize_content_type,
 )
 
@@ -55,7 +56,17 @@ def feedback_row_hash(schedule_id: int) -> str:
 def _latest_metric(db: Session, schedule_id: int) -> EngagementMetric | None:
     return db.scalar(
         select(EngagementMetric)
-        .where(EngagementMetric.schedule_id == schedule_id)
+        .where(
+            EngagementMetric.schedule_id == schedule_id,
+            EngagementMetric.data_source.in_(("REAL", "MANUAL", "IMPORTED")),
+            EngagementMetric.metric_basis.in_(("IMPRESSIONS", "FOLLOWERS")),
+            or_(
+                and_(
+                    EngagementMetric.metric_basis == "IMPRESSIONS", EngagementMetric.impressions > 0
+                ),
+                and_(EngagementMetric.metric_basis == "FOLLOWERS", EngagementMetric.followers > 0),
+            ),
+        )
         .order_by(EngagementMetric.metric_date.desc(), EngagementMetric.id.desc())
         .limit(1)
     )
@@ -85,6 +96,7 @@ def sync_schedule_feedback(db: Session, schedule_id: int) -> EngagementHistory |
     published_at = schedule.actual_publish_at or schedule.scheduled_at
     if not published_at:
         return None
+    published_at = normalize_business_time(published_at)
     metric = _latest_metric(db, schedule_id)
     if not metric:
         return None
@@ -97,6 +109,7 @@ def sync_schedule_feedback(db: Session, schedule_id: int) -> EngagementHistory |
         shares=metric.shares,
         favorites=metric.collects,
         followers=metric.followers,
+        metric_basis=metric.metric_basis,
     )
     if computed["reach"] <= 0:
         return None

@@ -18,6 +18,7 @@ from app.models.business import (
 )
 from app.models.user import User
 from app.schemas.business import ExperimentCreate, ExperimentSampleGroupUpdate, ExperimentUpdate
+from app.services.analytics_service import DataScope, aggregate_metrics, metric_scope
 from app.services.audit_service import record_audit
 from app.services.recommendation_service import classify_schedule_group
 from app.services.serializers import model_dict
@@ -25,50 +26,118 @@ from app.services.serializers import model_dict
 router = APIRouter(tags=["实验管理"])
 # Schedules in these terminal states have a settled outcome and are safe to
 # fold into an experiment comparison.
-MEASURED_SCHEDULE_STATUSES = ("SUCCESS", "MANUAL_PUBLISHED")
+MEASURED_SCHEDULE_STATUSES = ("SUCCESS", "PUBLISHED", "MANUAL_PUBLISHED")
 
 
-def _data(row: Experiment, include_samples: bool = False) -> dict:
+def _data(row: Experiment, include_samples: bool = False, data_scope: DataScope = "REAL") -> dict:
     data = model_dict(row, camel=True)
     data["metrics"] = data.pop("metricsJson", {})
     data["result"] = data.pop("resultJson", {})
     if include_samples:
         data["samples"] = [model_dict(x, camel=True) for x in row.samples]
     data["sampleCount"] = len(row.samples)
-    data["statistics"] = _results(row)
+    data["statistics"] = _results(row, data_scope)
+    data["dataScope"] = data_scope
     data["hasSimulatedData"] = any(
-        str(sample.metric_value_json.get("dataSource", "")).upper() == "SIMULATED"
-        or str(sample.metric_value_json.get("dataNotice", "")).upper() == "SIMULATED"
-        for sample in row.samples
+        _sample_is_simulated(sample.metric_value_json) for sample in row.samples
     )
     return data
 
 
-def _results(row: Experiment) -> dict:
+def _sample_is_simulated(item: dict) -> bool:
+    return (
+        "SIMULATED" in str(item.get("dataSource", "")).upper().split("/")
+        or str(item.get("dataNotice", "")).upper() == "SIMULATED"
+    )
+
+
+def _results(row: Experiment, data_scope: DataScope = "REAL") -> dict:
     groups: dict[str, list[dict]] = {}
     for sample in row.samples:
         groups.setdefault(sample.group_type, []).append(sample.metric_value_json)
     output = {}
-    for name, samples in groups.items():
+    for name, all_samples in groups.items():
+        samples = [
+            item
+            for item in all_samples
+            if data_scope == "ALL" or _sample_is_simulated(item) == (data_scope == "SIMULATED")
+        ]
         keys = {
-            key for item in samples for key, value in item.items() if isinstance(value, int | float)
+            key
+            for item in samples
+            for key, value in item.items()
+            if isinstance(value, int | float)
+            and not isinstance(value, bool)
+            and key != "engagementRate"
         }
         output[name] = {
             key: round(sum(float(item.get(key, 0)) for item in samples) / len(samples), 4)
             for key in keys
         }
         output[name]["sampleCount"] = len(samples)
+        output[name]["excludedSimulatedCount"] = (
+            sum(_sample_is_simulated(item) for item in all_samples) if data_scope == "REAL" else 0
+        )
+        buckets: dict[str, list[dict]] = {}
+        for item in samples:
+            basis = item.get("metricBasis", "UNKNOWN")
+            basis = basis if basis in {"IMPRESSIONS", "FOLLOWERS", "VIEWS"} else "UNKNOWN"
+            buckets.setdefault(basis, []).append(item)
+        by_basis = []
+        for basis, items in sorted(buckets.items()):
+            values = [
+                item["engagementRate"]
+                for item in items
+                if basis != "UNKNOWN"
+                and item.get("rateAvailable", True)
+                and isinstance(item.get("engagementRate"), int | float)
+            ]
+            by_basis.append(
+                {
+                    "metricBasis": basis,
+                    "sampleCount": len(items),
+                    "validRateCount": len(values),
+                    "engagementRate": round(sum(values) / len(values), 4) if values else None,
+                }
+            )
+        available = (
+            len(by_basis) == 1
+            and by_basis[0]["validRateCount"] == len(samples)
+            and bool(samples)
+            and not (
+                data_scope == "ALL"
+                and any(_sample_is_simulated(item) for item in samples)
+                and not all(_sample_is_simulated(item) for item in samples)
+            )
+        )
+        output[name].update(
+            {
+                "dataScope": data_scope,
+                "byBasis": by_basis,
+                "metricBasis": next(iter(buckets))
+                if len(buckets) == 1
+                else "MIXED"
+                if buckets
+                else "UNKNOWN",
+                "rateAvailable": available,
+                "engagementRate": by_basis[0]["engagementRate"] if available else None,
+                "unknownBasisCount": len(buckets.get("UNKNOWN", [])),
+            }
+        )
     return output
 
 
 @router.get("/experiments")
 def list_experiments(
-    request: Request, db: Session = Depends(get_db), _: User = Depends(get_current_user)
+    request: Request,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+    data_scope: DataScope = "REAL",
 ) -> dict:
     return success_response(
         request,
         [
-            _data(row)
+            _data(row, data_scope=data_scope)
             for row in db.scalars(select(Experiment).order_by(Experiment.updated_at.desc())).all()
         ],
     )
@@ -95,13 +164,14 @@ def create_experiment(
 def get_experiment(
     experiment_id: int,
     request: Request,
+    data_scope: DataScope = "REAL",
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ) -> dict:
     row = db.get(Experiment, experiment_id)
     if not row:
         raise AppException(40411, "实验不存在", 404)
-    return success_response(request, _data(row, True))
+    return success_response(request, _data(row, True, data_scope))
 
 
 @router.put("/experiments/{experiment_id}")
@@ -184,6 +254,7 @@ def sync_schedules(
     experiment_id: int,
     request: Request,
     platform: str = "",
+    data_scope: DataScope = "REAL",
     db: Session = Depends(get_db),
     user: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
@@ -220,7 +291,10 @@ def sync_schedules(
         if schedule.id in already_linked:
             continue
         metrics = db.scalars(
-            select(EngagementMetric).where(EngagementMetric.schedule_id == schedule.id)
+            select(EngagementMetric)
+            .where(EngagementMetric.schedule_id == schedule.id, *metric_scope(data_scope))
+            .order_by(EngagementMetric.metric_date.desc(), EngagementMetric.id.desc())
+            .limit(1)
         ).all()
         if not metrics:
             # No measured engagement yet: never fabricate a sample value.
@@ -232,7 +306,7 @@ def sync_schedules(
             else None
         )
         group_type, reason = classify_schedule_group(schedule, recommendation)
-        avg_rate = sum(m.engagement_rate for m in metrics) / len(metrics)
+        totals = aggregate_metrics(list(metrics))
         article = db.get(ContentArticle, schedule.article_id)
         data_sources = sorted({m.data_source for m in metrics})
         db.add(
@@ -242,7 +316,10 @@ def sync_schedules(
                 group_type=group_type,
                 sample_label=f"{article.title if article else '未知文章'} · 排期#{schedule.id}",
                 metric_value_json={
-                    "engagementRate": round(avg_rate * 100, 3),
+                    "engagementRate": totals["engagementRate"],
+                    "metricBasis": totals["metricBasis"],
+                    "rateAvailable": totals["rateAvailable"],
+                    "byBasis": totals["byBasis"],
                     "dataSource": "/".join(data_sources),
                     "metricCount": len(metrics),
                 },
@@ -265,7 +342,12 @@ def sync_schedules(
     db.refresh(row)
     return success_response(
         request,
-        {"experiment": _data(row, True), "created": created, "skippedNoMetric": skipped_no_metric},
+        {
+            "experiment": _data(row, True, data_scope),
+            "created": created,
+            "skippedNoMetric": skipped_no_metric,
+            "dataScope": data_scope,
+        },
         f"已自动同步 {created} 条排期样本" if created else "没有新的可同步排期样本",
     )
 
@@ -315,6 +397,7 @@ def override_sample_group(
 def experiment_report(
     experiment_id: int,
     request: Request,
+    data_scope: DataScope = "REAL",
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ) -> dict:
@@ -324,8 +407,8 @@ def experiment_report(
     return success_response(
         request,
         {
-            "experiment": _data(row, True),
-            "statistics": _results(row),
+            "experiment": _data(row, True, data_scope),
+            "statistics": _results(row, data_scope),
             "disclaimer": "SIMULATED 样本仅用于功能演示，不代表真实研究结论。",
         },
     )

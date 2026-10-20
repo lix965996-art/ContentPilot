@@ -1,203 +1,187 @@
-# ContentPilot 运维与操作手册
+# ContentPilot 运维
 
-> 本文合并自原 DEPLOYMENT_WINDOWS / PLATFORM_CONNECTION / DEFENSE_DEMO 三份文档（2026-07-31），原件见 git 历史。
+## 本地配置与启动
 
-## 1. 启动与部署
+本地需要 Python 3.12、Node.js 20+。MySQL 配置来自 `backend/.env`；没有可用 MySQL 时可使用已配置的 SQLite 回退。
 
-### 正式环境：Docker Compose
+首次准备环境：
 
-正式环境使用 `compose.yaml` 管理三个服务：
+```powershell
+Copy-Item backend\.env.example backend\.env
+# 修改数据库连接、JWT_SECRET、PLATFORM_CREDENTIAL_KEY
+.\contentpilot.ps1 setup
+.\contentpilot.ps1 start
+```
 
-- `web`：Nginx 提供前端静态文件，并反向代理 `/api` 与 `/uploads`；
-- `backend`：FastAPI API、数据库迁移、初始化和任务调度；
-- `db`：MySQL 8.4，数据写入命名卷 `mysql_data`。
+不要覆盖已有 `backend/.env`。模型通常在管理员“设置 → 模型服务”中配置：填写兼容服务地址、密钥和模型，测试连接后保存。文本兼容接口不代表图片请求也已适配，图片协议限制见 [ROADMAP](ROADMAP.md)。
 
-首次部署：
+本地 Web 为 `http://127.0.0.1:5173`，API 为 `http://127.0.0.1:8000`，健康接口为 `/api/health`。管理命令统一使用 `contentpilot.ps1`：
+
+```powershell
+.\contentpilot.ps1 status
+.\contentpilot.ps1 logs
+.\contentpilot.ps1 logs -Follow
+.\contentpilot.ps1 stop
+.\contentpilot.ps1 db
+.\contentpilot.ps1 test
+```
+
+`db` 用于 MySQL 初始化；SQLite 环境使用已有配置、迁移和启动流程。启动器执行迁移、启动后台进程、记录 PID 与启动时间，等待健康检查后打开浏览器。停止命令只处理本入口记录的进程。
+
+2026-10 的兼容更新新增指标分母口径和令牌撤销版本。更新前备份数据库；已有指标的分母无法确认时标为 `UNKNOWN`，保留原数据但不比较互动率。旧应用令牌需重新登录，平台扫码资料仍使用原会话目录。退出或改密会撤销该用户全部现有应用令牌。
+
+重启会把已错过执行时间的任务标为“已错过排期”，把停止时正在发布的任务标为“执行中断”，保留日志并提供重新排期入口。执行中断后先核实平台结果，再重新排期。账号、权限或内容预检失败会停止自动重试，修正后可由运营者重试。
+
+## 运行数据目录
+
+默认数据根目录为项目的 `var/`。可在启动前设置环境变量，或在后端配置中指定同一 `CONTENTPILOT_VAR_DIR`：
+
+```powershell
+$env:CONTENTPILOT_VAR_DIR = 'F:\ContentPilot-data'
+.\contentpilot.ps1 start
+```
+
+自定义相对路径按项目根解析。已有数据变更位置时，先停止对应服务并迁移实际数据，再让 API、启动器和测试使用相同目录；仅修改配置不会复制旧数据。
+
+| 子目录      | 用途                                       |
+| ----------- | ------------------------------------------ |
+| `run/`      | PID、启动时间及服务状态                    |
+| `logs/`     | API、前端与本机连接运行日志                |
+| `uploads/`  | 系统上传及生成图片，供 `/uploads` 提供服务 |
+| `sessions/` | 本机扫码和浏览器登录会话                   |
+| `tools/`    | 已安装的本机连接程序                       |
+| `cache/`    | 可再生成的工具缓存                         |
+| `reports/`  | 测试报告与截图                             |
+| `tmp/`      | 临时文件                                   |
+| `db/`       | 本地 SQLite 数据库                         |
+| `tests/`    | 隔离测试数据，避免触及业务媒体与数据库     |
+
+上传、会话和数据库是业务数据，不能按缓存删除。`backend/.venv` 和 `frontend/node_modules` 是开发依赖；`frontend/dist` 是前端构建输出。`.env`、运行数据和登录资料不进入 Git，Docker 构建也应排除它们。
+
+模型调用账本独立于文章与版本，删除文案不会删除历史费用。MySQL 的账本和月度预留表由 Alembic 管理。
+SQLite 为避免模型调用期间与业务写事务争锁，在业务数据库同目录创建 `<业务数据库文件名>.llm-usage.sqlite`；
+例如 `var/db/app.db` 对应 `var/db/app.db.llm-usage.sqlite`。该文件只保存调用、价格、币种、预算和未知费用状态，
+不保存 API Key 或原文。它属于受保护业务数据；备份、迁移和恢复必须与主数据库一起覆盖，不能当作缓存清理。
+伴随账本首次使用时建立结构版本并校验列集合；结构不匹配时拒绝使用，不能通过删库重建来绕过错误。
+
+本地月度预算按当前币种的已知费用和并发预留进行准入检查。预留为估算，不能替代服务商的硬额度或账单；
+缺少计价规则的图片/向量调用在预算启用时不会外发。未返回用量、网络中断和进程崩溃的费用保留为未知；
+超过调用超时且至少 15 分钟仍未完成的请求标为 `UNCERTAIN` 并释放预留，但不会将其实际费用归零，
+预算模式继续阻止新调用。应核对服务商账单；如选择关闭本地预算限制，未知费用告警和历史记录仍会保留。
+
+## Docker 部署
 
 ```powershell
 Copy-Item .env.example .env
-# 修改 .env 中的数据库密码、JWT_SECRET 和 PLATFORM_CREDENTIAL_KEY
+# 设置 MYSQL_PASSWORD、MYSQL_ROOT_PASSWORD、JWT_SECRET、PLATFORM_CREDENTIAL_KEY
+# 设置管理员初始密码，关闭演示模式和不需要的注册/发布能力
 docker compose up -d --build
 docker compose ps
 ```
 
-`backend` 每次启动都会幂等执行 Alembic migration 和基础数据 seed。`web` 只会在 API 健康检查通过后启动。MySQL 数据与用户上传文件保存在 Docker 卷中，普通的 `docker compose down` 不会删除它们。
-
-更新与排障：
+默认入口是 `http://127.0.0.1:8080`，API 端口是 `8000`，可以通过 `CONTENTPILOT_PORT`、`CONTENTPILOT_API_PORT` 修改。容器内运行数据使用 `/app/var`。`mysql_data` 保存 MySQL 数据，`uploads` 保留媒体，`runtime_data` 保存其他运行数据；具体挂载以 `compose.yaml` 为准。
 
 ```powershell
-docker compose up -d --build
 docker compose logs -f backend
 docker compose logs -f web
-docker compose logs -f db
+docker compose up -d --build
 docker compose down
 ```
 
-不要在生产环境提交 `.env`，不要使用示例密钥，也不要轻易执行 `docker compose down --volumes`。
+普通停止保留数据卷。`docker compose down --volumes` 会删除持久化数据，不能作为普通清理步骤。更新前备份数据库和业务数据，恢复验证应覆盖登录、已保存文章及图片访问。
 
-### Windows 本地开发
-
-本地模式需要 Python 3.12、Node.js 20+ 和 MySQL 8。所有用户操作统一通过根目录的 `contentpilot.ps1`：
-
-```powershell
-.\contentpilot.ps1 setup
-.\contentpilot.ps1 start
-.\contentpilot.ps1 status
-.\contentpilot.ps1 logs -Follow
-.\contentpilot.ps1 stop
-```
-
-启动器会：
-
-1. 检查后端虚拟环境和前端依赖；
-2. 执行 Alembic migration；
-3. 分别启动 API 与 Vite 开发服务器；
-4. 将 PID 和启动时间写入 `.runtime/`；
-5. 将日志写入 `logs/`；
-6. 等待健康检查通过后打开浏览器。
-
-本地 Web 为 `http://127.0.0.1:5173`，API 文档为 `http://127.0.0.1:8000/docs`。
-
-### 常见问题
-
-- PowerShell 拒绝执行脚本：先运行 `Set-ExecutionPolicy -Scope Process Bypass`；
-- 端口 5173/8000 被占用：运行 `.\contentpilot.ps1 status`，不要直接结束未知进程；
-- MySQL 连接失败：检查 `backend/.env`，需要时运行 `.\contentpilot.ps1 db`；
-- 本地启动失败：运行 `.\contentpilot.ps1 logs`；
-- Docker 启动失败：运行 `docker compose ps` 和 `docker compose logs` 查看具体服务。
-
-## 2. 客户交付：一个客户一套实例
-
-给客户交付时不共用实例：每个客户一个独立的 Docker Compose 项目，各自拥有数据库卷、上传卷、端口和密钥，数据天然隔离。
-
-### 开通一个新客户
+客户独立部署可使用现有工具：
 
 ```powershell
 .\scripts\new-customer.ps1 -Name acme -Port 8081 -ApiPort 8001
-cd ..\contentpilot-customers\acme
+cd .\var\deployments\customers\acme
 .\start.ps1
 ```
 
-脚本会在输出目录生成该客户专属的 `.env`（随机 MySQL 密码、`JWT_SECRET`、`PLATFORM_CREDENTIAL_KEY`、管理员初始密码）和启动脚本。多个客户实例可同时运行在同一台服务器上，只要端口不冲突。
+默认输出到运行数据目录的 deployments/customers；自定义运行目录或 OutputRoot 时，以脚本显示的位置为准。脚本生成独立 Compose 项目配置、端口和初始密码，部署后检查实际项目名与数据卷隔离。客户实例关闭演示模式，配置自己的模型服务，修改默认密码，并备份该实例的数据库和运行数据卷。
 
-### 客户实例的安全默认值
+## 操作流程
 
-| 变量 | 客户实例取值 | 效果 |
-| --- | --- | --- |
-| `ALLOW_REGISTRATION` | `false` | 登录页不显示注册入口，注册接口直接返回 403；账号由管理员在“设置 → 用户管理”中创建 |
-| `APP_DEMO_MODE` | `false` | 不创建 operator/viewer 演示账号，不写入演示业务数据，登录页不显示演示账号快捷方式 |
-| `ADMIN_INITIAL_PASSWORD` | 随机生成 | 首次初始化时管理员使用该密码，而不是公开的演示密码 |
+1. 管理员配置模型服务与需要使用的平台账号。
+2. 运营者创建原文，选择平台和 QUICK/DEEP 模式。
+3. 对照原文检查事实、质量来源和失败原因，编辑并审核；公众号稿件可使用排版预览。
+4. 选择素材或上传图片，核对来源及许可。
+5. 导入公开历史，或使用明确标注的演示历史，确认批次、日期范围和时区。
+6. 检查候选时间、依据与约束，创建排期并查看日志或交付包。
+7. 按实际来源录入指标或查看离线报告，保持演示与公开数据结论分离。
 
-### 交付检查清单
+发布复盘与实验页默认选择真实数据，可明确切换演示数据；录入时选择曝光量或粉丝数作为分母。未知、混合分母或真假来源混合时不生成整体互动率对比结论。
 
-1. 通过安全渠道把管理员密码交给客户，并要求首次登录后修改；
-2. 客户管理员在“设置 → 模型服务”配置自己的 LLM Key（各实例独立加密存储）；
-3. 平台账号（微博/X/公众号）由客户管理员自行授权，不同客户互不可见；
-4. 升级：在客户目录执行 `.\start.ps1`（拉取新代码后重新构建），数据保存在卷中不受影响；
-5. 备份：备份该 compose 项目的 `mysql_data` 与 `uploads` 卷即可，不同客户的卷相互独立。
+完整的跨平台“演示执行”选项还在 [待办](ROADMAP.md) 中，不应把现有人工确认当成已经实现的通用演示执行。
 
-> 本地开发（`backend/.env`）保持 `ALLOW_REGISTRATION=true`、`APP_DEMO_MODE` 按需开启，开发体验不变。
+### 历史样例与工具
 
-## 3. 真实平台连接指南
+历史数据集中在 `examples/history/`，合成样例必须保持 `SIMULATED` 来源说明。相关脚本从项目根运行：
 
-ContentPilot 不提供模拟连接或模拟发布成功。微博、X 与微信公众号只有在官方接口实际返回成功后才显示“已连接”；小红书在没有获批的官方内容发布接口时只显示“仅人工交付”。
+```powershell
+backend\.venv\Scripts\python.exe examples\history\generate_demo_history.py
+backend\.venv\Scripts\python.exe scripts\bootstrap_demo_pipeline.py
+backend\.venv\Scripts\python.exe scripts\import_youtube_public_sample.py
+```
 
-### 微博：开放平台应用 + OAuth2
+前两项用于生成或填充演示数据，导入工具会写入配置指向的数据库；不要把演示填充命令当成普通启动步骤。公开数据导入器读取 `examples/history/YouTubeDurationData/`，并保留来源说明。其当前实验是样本内描述性分析，按时间留出的评估仍待完成。
 
-准备工作：
+## 可选平台连接
 
-1. 登录[微博开放平台应用管理](https://open.weibo.com/apps)，创建网页应用并完成平台要求的审核。
-2. 在应用信息中取得 `App Key` 和 `App Secret`。
-3. 在应用的 OAuth2 回调设置中加入 ContentPilot 显示的回调地址，必须逐字一致：
-   - 本地开发：`http://127.0.0.1:8000/api/platform-accounts/WEIBO/oauth/callback`
-   - Docker 本地：可使用 `http://127.0.0.1:8080/api/platform-accounts/WEIBO/oauth/callback`
-   - 正式环境：`https://你的域名/api/platform-accounts/WEIBO/oauth/callback`
-4. 在 ContentPilot“平台账号 → 微博 → 编辑配置”中填写 App Key、App Secret 和同一个回调地址。
-5. 点击“保存并前往微博官方授权”，使用真正要发布内容的微博账号登录并同意授权。
-6. 返回 ContentPilot 后点击“验证真实连接”。系统会调用微博官方 `account/get_uid` 接口，取得 UID 后才显示“已连接”。
+不使用外部平台发布也能进行内容生成、历史分析和排期研究。启用真实发送前应检查账号权限、发布开关和已知发布缺陷；“配置已保存”“连接检测通过”“草稿创建成功”“公开发布成功”是不同结果。
 
-相关官方接口：[OAuth2 authorize](https://open.weibo.com/wiki/Oauth2/authorize)、[OAuth2 access_token](https://open.weibo.com/wiki/Oauth2/access_token)。发布能力还取决于应用审核状态和获批接口权限。
+| 平台       | 配置与操作                                                    | 实际边界                                         |
+| ---------- | ------------------------------------------------------------- | ------------------------------------------------ |
+| 微博       | 开放平台应用 App Key/App Secret，OAuth 回调地址与配置完全一致 | 连接检测取得账号标识不代表具备发布权限           |
+| X          | 官方 OAuth 2.0 + PKCE，配置应用回调和所需授权范围             | 当前发送文字；平台额度与权限需要账号实际验证     |
+| 微信公众号 | 本机 Chrome 扫码保存草稿；可选 AppID/AppSecret 与官方接口     | 草稿不是公开发布，正式分支及终态查询存在已知问题 |
+| 小红书     | 人工下载发布包并回填结果；可选本机 MCP                        | MCP 是实验性本机能力，不能包装为官方连接         |
+| 今日头条   | 本机 Chrome 扫码会话与账号真实发布开关                        | 登录过期、验证码和页面变化需要人工处理           |
 
-#### 错误码 21324
+本地 OAuth 回调分别为：
 
-`21324 client_id或client_secret参数无效` 是微博官方返回的错误，不是 ContentPilot 本地错误。常见原因：
+- 微博：`http://127.0.0.1:8000/api/platform-accounts/WEIBO/oauth/callback`。
+- X：`http://127.0.0.1:8000/api/platform-accounts/X/oauth/callback`。
 
-- 把微博登录账号、模型 API Key 或其他平台 Key 填进了 App Key；
-- App Key 与 App Secret 不属于同一个微博开放平台应用；
-- 复制时带入空格，或者密钥已被重置；
-- 应用类型、审核状态或 OAuth 回调配置不满足当前授权要求。
+正式域名与反向代理部署时，使用系统显示的对应回调地址，平台后台与应用配置必须一致。微博 `21324` 通常需要检查同一应用的 App Key/App Secret；微信 `40013/40125/40164` 分别涉及 AppID、AppSecret 与出口 IP 白名单。不要把模型密钥填到平台凭证中。
 
-应回到微博开放平台应用后台重新复制同一应用的 App Key/App Secret。截图中出现该错误时，ContentPilot 必须保持“连接无效/待授权”，不能显示连接成功。
+按需配置本机连接：
 
-### X：官方 OAuth 2.0 + PKCE
+```dotenv
+EXPERIMENTAL_BROWSER_PUBLISHING_ENABLED=true
+XHS_MCP_BASE_URL=http://127.0.0.1:18060/mcp
+TOUTIAO_BROWSER_PUBLISHING_ENABLED=true
+TOUTIAO_BROWSER_HEADLESS=true
+WECHAT_BROWSER_PUBLISHING_ENABLED=true
+WECHAT_BROWSER_HEADLESS=true
+WECHATSYNC_CLI_ENABLED=false
+```
 
-1. 登录 [X Developer Portal](https://developer.x.com/en/portal/dashboard)，创建 Project 和 Web App。
-2. 在应用认证设置中启用 OAuth 2.0，选择 Read and write 权限。
-3. 配置最小授权范围：`tweet.read`、`tweet.write`、`users.read`、`offline.access`。
-4. 将回调地址逐字加入应用的 Callback URI / Redirect URL：
-   - 本地开发：`http://127.0.0.1:8000/api/platform-accounts/X/oauth/callback`
-   - 正式环境：`https://你的域名/api/platform-accounts/X/oauth/callback`
-5. 管理员在“平台账号 → X → 编辑配置”填写 Client ID、Client Secret 和同一回调地址。
-6. 先保存配置并前往 X 官方页面授权，再点击“验证真实连接”。系统只调用 `/2/users/me`，不会发送测试帖。
-7. 确认账号和应用权限无误后，管理员显式开启“允许真实公开发布”；运营者才可用该共享账号排期。
+开关只启用相应能力，真实发送仍受任务模式与账号级设置约束。浏览器会话保存在本机 `var/sessions`；如果显式配置旧的自定义浏览器目录，以该配置为准。Wechatsync 是可选草稿后备，需要独立安装及登录。Docker 要使用本机扫码能力，需要额外提供浏览器环境。
 
-X 发帖调用官方 `POST /2/tweets`，成功后保存真实 Post ID 和公开链接。Access Token 到期时系统会使用加密保存的 Refresh Token 自动刷新；解除连接时会请求 X 官方撤销 Token 并清除本地密文。
+## 单实例调度边界（D-01）
 
-注意：X API 的可用能力和费用取决于 Developer Console 中的套餐、余额、应用环境与审核状态。OAuth 成功不等于一定拥有发帖额度。当前版本只发布文字；图片和视频不会被伪装成已上传。
+当前调度器、启动恢复和持久化派发扫描都在同一个后端进程中运行。启动时后端会尝试获取 `var/run/scheduler.lock` 的操作系统文件锁：
 
-### 微信公众号：AppID/AppSecret + IP 白名单
+- 获取成功的实例标记为 `schedulerRole=active`，执行启动恢复、APScheduler 和派发扫描。
+- 未获取到的实例以 `schedulerRole=standby` 启动，仅提供 API，不参与恢复或派发，并在日志中说明原因。`/api/health` 会返回当前角色。
+- 锁随进程退出自动释放，正常重启不会留下陈旧锁。
 
-1. 登录[微信公众平台](https://mp.weixin.qq.com/)，进入开发接口相关设置。
-2. 获取公众号真实 `AppID` 和 `AppSecret`。不要填写微信号、原始 ID、小程序 AppID 或模型服务 Key。
-3. 将运行 ContentPilot 的服务器出口公网 IP 加入公众号 IP 白名单。
-4. 在 ContentPilot 中选择：
-   - “真实创建公众号草稿”：调用草稿接口，结果只进入草稿箱；
-   - “真实提交发布”：先创建草稿，再调用发布接口，需要公众号具备相应权限，并勾选允许提交发布。
-5. 保存后点击“验证真实连接”。系统会向微信官方接口获取 Access Token；只有取得真实 Token 才显示“已连接”。
+**部署约束**：这套机制只保护同一主机/同一共享运行目录下的多进程。不要在同一运行目录之外启动第二个参与调度的后端，也不要让两个容器各自持有独立的 `var/` 同时连接同一个业务库来执行恢复。需要多主机/多实例时，必须改为数据库租约 + owner/心跳 + 原子接管，并单独验收“活跃任务不被误判、接管后不重复外发”。
 
-官方文档：[获取 Access Token](https://developers.weixin.qq.com/doc/offiaccount/Basic_Information/Get_access_token.html)、[新增草稿](https://developers.weixin.qq.com/doc/offiaccount/Draft_Box/Add_draft.html)、[发布能力](https://developers.weixin.qq.com/doc/offiaccount/Publish/Publish.html)。
+派发扫描周期由 `DISPATCH_POLL_SECONDS`（默认 15 秒）控制，单个派发意图最多尝试 `DISPATCH_MAX_ATTEMPTS`（默认 10）次。派发失败会记录在 `task_dispatch.last_error`，业务任务本身不会被删除。
 
-常见错误：
+## 排障与验证
 
-- `40013`：AppID 无效；
-- `40125`：AppSecret 无效；
-- `40164`：服务器出口 IP 不在白名单；
-- `48001/48002`：公众号没有相应接口权限；
-- `40001/40014/42001`：Token 无效或过期，需要重新验证。
+| 现象                        | 检查步骤                                                             |
+| --------------------------- | -------------------------------------------------------------------- |
+| 无法识别 `contentpilot.ps1` | 进入项目根，确认后缀为 `.ps1`，用 Tab 补全                           |
+| 脚本执行被禁止              | 当前 PowerShell 窗口设置 `Set-ExecutionPolicy -Scope Process Bypass` |
+| 端口占用或启动失败          | 先 `status`，再查看 `logs`；确认占用者后处理                         |
+| 数据库连接失败              | 检查 `backend/.env`、服务与凭证；按所选数据库执行迁移                |
+| 模型生成失败                | 检查服务商、模型和服务错误，按任务终态处理                           |
+| 登录或平台连接失败          | 分开检查本地会话、官方授权、权限和账号开关                           |
+| 上传图无法访问              | 检查运行目录配置与文件、`/uploads` 映射、反向代理                    |
+| Mastodon 连接超时           | 确认服务器网址可达；无法直连时在 `backend/.env` 设置 `OUTBOUND_HTTP_PROXY` 并重启后端；Docker 部署需填容器可达地址（如 `http://host.docker.internal:7892`） |
 
-### 小红书：人工交付边界
-
-当前项目没有获批、可供普通账号使用的小红书官方笔记发布接口。小红书开放平台公开能力主要面向获准的业务场景，不能把账号密码、Cookie 或浏览器自动化包装成“官方连接”。
-
-因此 ContentPilot 只做以下真实动作：
-
-1. 生成小红书版本文案、标签、封面和图片顺序；
-2. 到点生成 ZIP 交付包；
-3. 打开[小红书创作中心](https://creator.xiaohongshu.com/)人工发布；
-4. 发布完成后回填真实公开链接，任务才进入“人工发布完成”。
-
-如果以后获得小红书书面批准的合作方接口，应新增独立官方适配器和接口验签测试，不能复用 Cookie、Selenium 或 Playwright 登录发布。
-
-### 如何判断是不是真连接
-
-- “保存配置”只代表密钥已加密保存，不代表连接成功；
-- “验证真实连接”必须调用平台官方域名并取得真实账号标识或 Access Token；
-- 微博/公众号状态不是 `CONNECTED` 时，后端会拒绝创建真实发布任务；
-- 小红书始终显示 `MANUAL_ONLY`，不会显示“已连接”；
-- 测试代码可以拦截外部 HTTP 边界，但产品运行代码没有模拟成功发布器。
-
-## 4. 答辩演示流程（8–12 分钟）
-
-1. 运行 `.\contentpilot.ps1 start`，说明本地依赖只在首次安装，并打开登录页（30 秒）；
-2. 用 operator 登录，展示工作台真实业务摘要（30 秒）；
-3. 内容管理新建一篇原文（45 秒）；
-4. AI 工作室选择多平台并生成，展示 Prompt 版本、耗时、质量、编辑比例和审核（90 秒）；
-5. 配图推荐展示中英文关键词、本地降级和署名信息（45 秒）；
-6. 时间推荐展示曲线、贡献分、置信度和备选时段（60 秒）；
-7. 展示未授权账号的发布拦截；使用小红书人工交付包演示排期、下载和确认（90 秒）；
-8. 数据复盘下载模板、导入样例、展示平台/时间组图表和摘要（90 秒）；
-9. 实验管理展示分组、样本和汇总结果（60 秒）；
-10. admin 查看配置脱敏、用户角色和审计日志（45 秒）；
-11. 强调官方授权边界、`SIMULATED` 互动样本与真实数据采集计划（30 秒）。
-
-演示前运行全量测试并保留 [docs/archive/TEST_REPORT.md](archive/TEST_REPORT.md)；外部网络不可用时不演示微博或公众号发布成功，直接展示明确的连接失败与授权引导。
+检查入口为 `.\contentpilot.ps1 test`。浏览器测试使用隔离服务/数据，不能用现有页面截图或只断言页面宽度替代业务验证。部署与演示验收重点是实际保存内容、任务终态、错误、幂等以及重启后的状态；已知边界见 [ROADMAP](ROADMAP.md)。

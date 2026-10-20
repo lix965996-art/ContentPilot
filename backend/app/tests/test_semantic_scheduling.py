@@ -106,6 +106,13 @@ def semantic_setup(client: TestClient, login_as):
     variants = client.get(f"/api/generation/tasks/{task['taskId']}", headers=auth).json()["data"][
         "variants"
     ]
+    for variant in variants:
+        approved = client.post(
+            f"/api/variants/{variant['id']}/approve",
+            headers=auth,
+            json={"expected_fingerprint": variant["contentFingerprint"]},
+        )
+        assert approved.status_code == 200, approved.text
     return {
         "auth": auth,
         "accounts": accounts,

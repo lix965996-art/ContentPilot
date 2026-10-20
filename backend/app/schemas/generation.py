@@ -1,6 +1,8 @@
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
+
+from app.services.platform_content import validate_platform_publish
 
 Hashtag = Annotated[str, Field(min_length=1, max_length=40, pattern=r"^#?[^#\s][^#]*#?$")]
 
@@ -17,6 +19,46 @@ class XGenerationOutput(BaseModel):
     content: str = Field(min_length=1, max_length=280)
     hashtags: list[Hashtag] = Field(default_factory=list, max_length=4)
     warnings: list[str] = Field(default_factory=list, max_length=10)
+
+
+class BlueskyGenerationOutput(BaseModel):
+    title: str = Field(min_length=1, max_length=255)
+    content: str = Field(min_length=1, max_length=3000)
+    hashtags: list[Hashtag] = Field(default_factory=list, max_length=4)
+    warnings: list[str] = Field(default_factory=list, max_length=10)
+
+    @model_validator(mode="after")
+    def require_publishable_text(self) -> "BlueskyGenerationOutput":
+        errors = validate_platform_publish(
+            platform="BLUESKY",
+            title=self.title,
+            content=self.content,
+            hashtags=self.hashtags,
+            images=[],
+        )
+        if errors:
+            raise ValueError("；".join(errors))
+        return self
+
+
+class MastodonGenerationOutput(BaseModel):
+    title: str = Field(min_length=1, max_length=255)
+    content: str = Field(min_length=1, max_length=10_000)
+    hashtags: list[Hashtag] = Field(default_factory=list, max_length=4)
+    warnings: list[str] = Field(default_factory=list, max_length=10)
+
+    @model_validator(mode="after")
+    def require_publishable_text(self) -> "MastodonGenerationOutput":
+        errors = validate_platform_publish(
+            platform="MASTODON",
+            title=self.title,
+            content=self.content,
+            hashtags=self.hashtags,
+            images=[],
+        )
+        if errors:
+            raise ValueError("；".join(errors))
+        return self
 
 
 class XiaohongshuGenerationOutput(BaseModel):
@@ -109,6 +151,16 @@ class XDeepDraftOutput(BaseModel):
     candidates: list[XGenerationOutput] = Field(min_length=2, max_length=2)
 
 
+class BlueskyDeepDraftOutput(BaseModel):
+    strategy: CreativeStrategyOutput
+    candidates: list[BlueskyGenerationOutput] = Field(min_length=2, max_length=2)
+
+
+class MastodonDeepDraftOutput(BaseModel):
+    strategy: CreativeStrategyOutput
+    candidates: list[MastodonGenerationOutput] = Field(min_length=2, max_length=2)
+
+
 class XiaohongshuDeepDraftOutput(BaseModel):
     strategy: CreativeStrategyOutput
     candidates: list[XiaohongshuGenerationOutput] = Field(min_length=2, max_length=2)
@@ -130,6 +182,14 @@ class WeiboDeepFinalOutput(DeepReviewOutput):
 
 class XDeepFinalOutput(DeepReviewOutput):
     final: XGenerationOutput
+
+
+class BlueskyDeepFinalOutput(DeepReviewOutput):
+    final: BlueskyGenerationOutput
+
+
+class MastodonDeepFinalOutput(DeepReviewOutput):
+    final: MastodonGenerationOutput
 
 
 class XiaohongshuDeepFinalOutput(DeepReviewOutput):
@@ -157,15 +217,21 @@ class KeywordExtractionOutput(BaseModel):
 GenerationOutput = (
     WeiboGenerationOutput
     | XGenerationOutput
+    | BlueskyGenerationOutput
+    | MastodonGenerationOutput
     | XiaohongshuGenerationOutput
     | WechatGenerationOutput
     | ToutiaoGenerationOutput
 )
-PlatformName = Literal["WEIBO", "X", "XIAOHONGSHU", "WECHAT_OFFICIAL", "TOUTIAO"]
+PlatformName = Literal[
+    "WEIBO", "X", "BLUESKY", "MASTODON", "XIAOHONGSHU", "WECHAT_OFFICIAL", "TOUTIAO"
+]
 
 OUTPUT_MODELS: dict[str, type[BaseModel]] = {
     "WEIBO": WeiboGenerationOutput,
     "X": XGenerationOutput,
+    "BLUESKY": BlueskyGenerationOutput,
+    "MASTODON": MastodonGenerationOutput,
     "XIAOHONGSHU": XiaohongshuGenerationOutput,
     "WECHAT_OFFICIAL": WechatGenerationOutput,
     "TOUTIAO": ToutiaoGenerationOutput,
@@ -174,6 +240,8 @@ OUTPUT_MODELS: dict[str, type[BaseModel]] = {
 DEEP_DRAFT_MODELS: dict[str, type[BaseModel]] = {
     "WEIBO": WeiboDeepDraftOutput,
     "X": XDeepDraftOutput,
+    "BLUESKY": BlueskyDeepDraftOutput,
+    "MASTODON": MastodonDeepDraftOutput,
     "XIAOHONGSHU": XiaohongshuDeepDraftOutput,
     "WECHAT_OFFICIAL": WechatDeepDraftOutput,
     "TOUTIAO": ToutiaoDeepDraftOutput,
@@ -182,6 +250,8 @@ DEEP_DRAFT_MODELS: dict[str, type[BaseModel]] = {
 DEEP_FINAL_MODELS: dict[str, type[BaseModel]] = {
     "WEIBO": WeiboDeepFinalOutput,
     "X": XDeepFinalOutput,
+    "BLUESKY": BlueskyDeepFinalOutput,
+    "MASTODON": MastodonDeepFinalOutput,
     "XIAOHONGSHU": XiaohongshuDeepFinalOutput,
     "WECHAT_OFFICIAL": WechatDeepFinalOutput,
     "TOUTIAO": ToutiaoDeepFinalOutput,

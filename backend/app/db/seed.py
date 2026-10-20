@@ -24,6 +24,7 @@ from app.services.activity_prior_service import (
     prior_platforms,
     prior_rules,
 )
+from app.services.review_fingerprint import content_fingerprint
 
 ROLE_DEFINITIONS = {
     "ADMIN": ("系统管理员", "只管理系统：平台账号、用户、大模型与全局配置；不参与内容运营"),
@@ -42,9 +43,13 @@ def user_definitions() -> tuple[tuple[str, str, str, str, str], ...]:
     """Demo mode keeps the three walkthrough accounts; production seeds a single admin."""
     if settings.app_demo_mode:
         return DEMO_USERS
+    if not settings.admin_initial_password:
+        raise RuntimeError(
+            "ADMIN_INITIAL_PASSWORD is required when APP_DEMO_MODE=false. "
+            "Set it in backend/.env before seeding the database."
+        )
     admin = DEMO_USERS[0]
-    password = settings.admin_initial_password or admin[1]
-    return ((admin[0], password, admin[2], admin[3], admin[4]),)
+    return ((admin[0], settings.admin_initial_password, admin[2], admin[3], admin[4]),)
 
 
 def seed_database(db: Session) -> None:
@@ -57,19 +62,24 @@ def seed_database(db: Session) -> None:
             db.flush()
         roles[code] = role
 
-    for username, password, display_name, email, role_code in user_definitions():
-        user = db.scalar(select(User).where(User.username == username))
-        if user is None:
-            user = User(
-                username=username,
-                password_hash=hash_password(password),
-                display_name=display_name,
-                email=email,
-                status="ACTIVE",
-            )
-            db.add(user)
-        if roles[role_code] not in user.roles:
-            user.roles = [roles[role_code]]
+    existing_admin = db.scalar(select(User).where(User.username == "admin"))
+    should_seed_users = (
+        settings.app_demo_mode or bool(settings.admin_initial_password) or existing_admin is None
+    )
+    if should_seed_users:
+        for username, password, display_name, email, role_code in user_definitions():
+            user = db.scalar(select(User).where(User.username == username))
+            if user is None:
+                user = User(
+                    username=username,
+                    password_hash=hash_password(password),
+                    display_name=display_name,
+                    email=email,
+                    status="ACTIVE",
+                )
+                db.add(user)
+            if roles[role_code] not in user.roles:
+                user.roles = [roles[role_code]]
     db.commit()
     seed_system_settings(db)
     if settings.app_demo_mode:
@@ -226,26 +236,33 @@ def seed_demo_business_data(db: Session, roles: dict[str, Role]) -> None:
                 ("WECHAT_OFFICIAL", "深度整理"),
             ):
                 content = f"{title}\n\n{text}\n\n这是本地示例版本，发布前请人工核验。"
-                db.add(
-                    ContentVariant(
-                        article_id=article.id,
-                        platform=platform,
-                        version_no=1,
-                        title=f"{title}｜{suffix}",
-                        content_text=content,
-                        hashtags_json=[f"#{topic}", "#校园新媒体"],
-                        emoji_count=0,
-                        word_count=len(content),
-                        model_name="demo-baseline-v1",
-                        prompt_version="1.0.0",
-                        generation_duration_ms=320 + index * 7,
-                        token_usage=180 + index * 5,
-                        quality_score=82 + index % 8,
-                        manual_edit_ratio=index % 5,
-                        review_status="APPROVED" if index < 6 else "PENDING",
-                        original_generated_text=content,
-                    )
+                variant = ContentVariant(
+                    article_id=article.id,
+                    platform=platform,
+                    version_no=1,
+                    title=f"{title}｜{suffix}",
+                    content_text=content,
+                    hashtags_json=[f"#{topic}", "#校园新媒体"],
+                    emoji_count=0,
+                    word_count=len(content),
+                    model_name="demo-baseline-v1",
+                    prompt_version="1.0.0",
+                    generation_duration_ms=320 + index * 7,
+                    token_usage=180 + index * 5,
+                    quality_score=82 + index % 8,
+                    manual_edit_ratio=index % 5,
+                    review_status="APPROVED" if index < 6 else "PENDING",
+                    original_generated_text=content,
                 )
+                if variant.review_status in {"APPROVED", "REJECTED"}:
+                    variant.review_fingerprint = content_fingerprint(
+                        platform=variant.platform,
+                        title=variant.title,
+                        content=variant.content_text,
+                        hashtags=variant.hashtags_json,
+                        source_text=article.source_text,
+                    )
+                db.add(variant)
         db.commit()
 
     account_defaults = {
@@ -286,12 +303,11 @@ def seed_demo_business_data(db: Session, roles: dict[str, Role]) -> None:
     if (db.scalar(select(func.count()).select_from(PublishSchedule)) or 0) == 0:
         now = datetime.now().replace(second=0, microsecond=0)
         for index, variant in enumerate(variants):
+            account = accounts.get(variant.platform)
             schedule = PublishSchedule(
                 article_id=variant.article_id,
                 variant_id=variant.id,
-                account_id=accounts.get(variant.platform).id
-                if accounts.get(variant.platform)
-                else None,
+                account_id=account.id if account else None,
                 platform=variant.platform,
                 scheduled_at=now + timedelta(hours=index + 2),
                 publish_mode=(
@@ -324,6 +340,7 @@ def seed_demo_business_data(db: Session, roles: dict[str, Role]) -> None:
             total = 70 + index * 9
             db.add(
                 EngagementMetric(
+                    metric_basis="IMPRESSIONS",
                     schedule_id=schedule.id,
                     platform=schedule.platform,
                     metric_date=date.today() - timedelta(days=13 - index),

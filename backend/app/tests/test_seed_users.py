@@ -1,5 +1,7 @@
 """Seed account policy: production only gets an admin with configurable password."""
 
+import pytest
+
 from app.core.config import settings
 from app.db.seed import user_definitions
 
@@ -22,3 +24,11 @@ def test_demo_seed_creates_three_demo_accounts(monkeypatch) -> None:
 
     assert [u[0] for u in users] == ["admin", "operator", "viewer"]
     assert users[0][1] == "Admin@123456"
+
+
+def test_production_seed_requires_an_explicit_admin_password(monkeypatch) -> None:
+    monkeypatch.setattr(settings, "app_demo_mode", False)
+    monkeypatch.setattr(settings, "admin_initial_password", "")
+
+    with pytest.raises(RuntimeError, match="ADMIN_INITIAL_PASSWORD"):
+        user_definitions()

@@ -20,8 +20,11 @@ import { platformNames } from '@/types/business'
 import type { Platform } from '@/types/business'
 import { presentOperationError } from '@/utils/operation-error'
 import { useAuthStore } from '@/stores/auth'
+import { useRouter } from 'vue-router'
+import { publishOutcome } from '@/utils/task-outcome'
 
 const auth = useAuthStore()
+const router = useRouter()
 const isAdmin = computed(() => auth.canManageSystem)
 const rows = ref<Schedule[]>([])
 const loading = ref(false)
@@ -37,9 +40,18 @@ const publishModeNames: Record<string, string> = {
   MCP_PUBLISH: '本机自动发布',
   BROWSER_DRAFT: '本机浏览器保存草稿',
 }
+const retryableStatuses = new Set([
+  'FAILED',
+  'LOGIN_REQUIRED',
+  'NEED_USER_ACTION',
+  'VERIFICATION_REQUIRED',
+  'TOKEN_EXPIRED',
+])
 function publishModeLabel(platform: string, mode: string): string {
   if (platform === 'WEIBO' && mode === 'REAL_API') return '微博官方 API'
   if (platform === 'X' && mode === 'REAL_API') return 'X 官方 API（真实发布）'
+  if (platform === 'BLUESKY' && mode === 'REAL_API') return 'Bluesky API（真实发布）'
+  if (platform === 'MASTODON' && mode === 'REAL_API') return 'Mastodon API（真实发布）'
   return publishModeNames[mode] || mode
 }
 const statusTabs = [
@@ -49,6 +61,7 @@ const statusTabs = [
   ['等待确认', 'WAITING_MANUAL_CONFIRM'],
   ['已完成', 'PUBLISHED,DRAFT_CREATED,PUBLISH_SUBMITTED,MANUAL_PUBLISHED'],
   ['失败', 'FAILED'],
+  ['待核实 / 已过期', 'INTERRUPTED,EXPIRED'],
 ]
 async function load() {
   loading.value = true
@@ -67,25 +80,30 @@ async function open(row: Schedule) {
   drawer.value = true
 }
 async function action(row: Schedule, name: string) {
+  if (row.status === 'INTERRUPTED' && ['retry', 'publish-now'].includes(name)) {
+    ElMessage.warning('发布曾中断，请先到平台核实是否已发布，再决定如何处理')
+    return
+  }
   try {
     if (name === 'publish-now') {
       await ElMessageBox.confirm(
         `将使用“${row.accountName || '未命名账号'}”立即执行${publishModeLabel(row.platform, row.publishMode)}。${
           row.platform === 'XIAOHONGSHU' && row.publishMode === 'MCP_PUBLISH'
             ? '当前发布范围为“仅自己可见”。'
-            : row.platform === 'X'
-              ? '这会通过 X 官方 API 发送真实帖子，内容可能立即公开可见。'
+            : ['X', 'BLUESKY', 'MASTODON'].includes(row.platform)
+              ? `这会通过 ${platformNames[row.platform]} API 发送真实帖子，内容可能立即公开可见。`
               : ''
         }是否继续？`,
         '确认立即发布',
       )
-      if (row.platform === 'X') {
+      if (['X', 'BLUESKY', 'MASTODON'].includes(row.platform)) {
+        const confirmation = `发布到${platformNames[row.platform]}`
         await ElMessageBox.prompt(
-          `请再次确认发布账号“${row.accountName || '未命名账号'}”。输入“发布到X”后才能继续。`,
+          `请再次确认发布账号“${row.accountName || '未命名账号'}”。输入“${confirmation}”后才能继续。`,
           '真实发布二次确认',
           {
-            inputPlaceholder: '发布到X',
-            inputValidator: (value) => value === '发布到X' || '请输入“发布到X”',
+            inputPlaceholder: confirmation,
+            inputValidator: (value) => value === confirmation || `请输入“${confirmation}”`,
             confirmButtonText: '确认真实发布',
             type: 'warning',
           },
@@ -106,12 +124,12 @@ async function action(row: Schedule, name: string) {
       )
       data = { published_url: answer.value }
     }
-    await workflowApi.scheduleAction(row.id, name, data)
-    ElMessage.success('操作成功')
+    const result = await workflowApi.scheduleAction(row.id, name, data)
+    ElMessage(publishOutcome(result))
     await load()
     if (drawer.value) await open(row)
   } catch (e) {
-    if (e !== 'cancel') ElMessage.error(getApiErrorMessage(e))
+    if (e !== 'cancel' && e !== 'close') ElMessage.error(getApiErrorMessage(e))
   }
 }
 async function copyPackage() {
@@ -122,7 +140,11 @@ async function copyPackage() {
 }
 async function downloadPackage() {
   if (!detail.value) return
-  await workflowApi.downloadPublishPackage(detail.value.id)
+  try {
+    await workflowApi.downloadPublishPackage(detail.value.id)
+  } catch (error) {
+    ElMessage.error(getApiErrorMessage(error, '发布包下载失败，请检查配图后重试'))
+  }
 }
 function openCreator() {
   if (publishPackage.value?.creatorUrl)
@@ -133,7 +155,12 @@ function platformLabel(value: string): string {
   return platformNames[value as Platform] || value
 }
 function rowClassName({ row }: { row: Schedule }) {
-  return row.status === 'FAILED' ? 'failed-row' : ''
+  return ['FAILED', 'EXPIRED', 'INTERRUPTED', ...retryableStatuses].includes(row.status)
+    ? 'failed-row'
+    : ''
+}
+function reschedule(row: Schedule) {
+  return router.push({ name: 'calendar', query: { schedule: row.id } })
 }
 function selectStatus(value: string) {
   status.value = value
@@ -200,7 +227,10 @@ function logStatusLabel(value: unknown) {
             ><button class="text-left" @click="open(row)">
               <span class="block text-xs text-muted"
                 >#{{ row.id }} · {{ platformLabel(row.platform) }}</span
-              ><span class="mt-1 block font-medium text-ink">{{ row.articleTitle }}</span>
+              ><span class="mt-1 block font-medium text-ink">{{ row.articleTitle }}</span
+              ><span v-if="row.errorMessage" class="mt-1 block text-xs text-red-600">{{
+                row.errorMessage
+              }}</span>
             </button></template
           ></el-table-column
         ><el-table-column label="计划时间" width="175"
@@ -220,9 +250,17 @@ function logStatusLabel(value: unknown) {
           ><template #default="{ row }"
             ><StatusBadge :status="row.status" /></template></el-table-column
         ><el-table-column label="重试" width="80"
-          ><template #default="{ row }">{{ row.retryCount }}/3</template></el-table-column
+          ><template #default="{ row }"
+            >{{ row.retryCount }}/{{ row.maxRetryCount }}</template
+          ></el-table-column
         ><el-table-column label="操作" width="230"
           ><template #default="{ row }"
+            ><el-button
+              v-if="['EXPIRED', 'INTERRUPTED', 'FAILED'].includes(row.status)"
+              link
+              type="primary"
+              @click="reschedule(row)"
+              >{{ row.status === 'INTERRUPTED' ? '核实后处理' : '重新排期' }}</el-button
             ><el-button
               v-if="row.status === 'PENDING'"
               link
@@ -230,7 +268,7 @@ function logStatusLabel(value: unknown) {
               @click="action(row, 'publish-now')"
               ><Rocket :size="14" class="mr-1" />立即发布</el-button
             ><el-button
-              v-if="row.status === 'FAILED'"
+              v-if="retryableStatuses.has(row.status)"
               link
               type="danger"
               @click="action(row, 'retry')"
@@ -260,6 +298,20 @@ function logStatusLabel(value: unknown) {
             </div>
             <StatusBadge :status="detail.status" />
           </div>
+          <el-alert
+            v-if="['FAILED', 'EXPIRED', 'INTERRUPTED'].includes(detail.status)"
+            :title="
+              detail.errorMessage ||
+              (detail.status === 'INTERRUPTED'
+                ? '发布已中断，结果需到平台核实；请勿直接重复发送。'
+                : detail.status === 'EXPIRED'
+                  ? '已错过计划时间，请重新排期。'
+                  : '发布失败，请查看执行日志。')
+            "
+            type="warning"
+            :closable="false"
+            show-icon
+          />
           <dl class="info-list">
             <div>
               <dt>平台</dt>

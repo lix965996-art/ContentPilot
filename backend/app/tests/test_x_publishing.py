@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from urllib.parse import parse_qs, urlparse
 
 import httpx
@@ -14,10 +14,20 @@ from app.db.session import SessionLocal
 from app.models.business import ContentVariant, PlatformAccount
 from app.publishers.base import PublishResult
 from app.publishers.x_official import XPublisher
+from app.services import platform_account_service
+from app.services.review_fingerprint import variant_fingerprint
 
 
 def _headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+def test_x_token_expiry_is_compared_in_utc() -> None:
+    account = PlatformAccount(platform="X", user_id=1, account_name="x")
+    account.status = "CONNECTED"
+    account.token_expires_at = datetime.now(UTC).replace(tzinfo=None) + timedelta(hours=1)
+
+    assert platform_account_service.effective_status(account) == "CONNECTED"
 
 
 def _admin_auth(login_as) -> dict[str, str]:
@@ -265,6 +275,8 @@ def test_x_schedule_requires_authorization_and_uses_shared_account(
         account.status = "CONNECTED"
         account.access_token_encrypted = encrypt_secret("x-access-token")
         account.capabilities_json = ["TEXT_PUBLISH", "STATUS_READ"]
+        db.flush()
+        variant.review_fingerprint = variant_fingerprint(variant)
         db.commit()
         db.refresh(variant)
         variant_id = variant.id

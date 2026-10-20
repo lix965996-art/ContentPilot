@@ -2,6 +2,7 @@ import base64
 import hashlib
 import secrets
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from urllib.parse import urlencode, urlparse
 
 import httpx
@@ -19,6 +20,8 @@ from app.core.responses import success_response
 from app.db.session import get_db
 from app.models.business import PlatformAccount, PlatformAuthLog
 from app.models.user import User
+from app.publishers.bluesky import BlueskyPublisher
+from app.publishers.mastodon import MastodonPublisher
 from app.publishers.toutiao_browser import get_login_qrcode
 from app.publishers.toutiao_browser import logout as toutiao_logout
 from app.publishers.wechat_browser import get_login_qrcode as get_wechat_login_qrcode
@@ -46,6 +49,7 @@ from app.services.platform_account_service import (
     public_account,
     record_toutiao_session,
     record_wechat_session,
+    require_account_enabled,
     test_account,
     upsert_account,
 )
@@ -99,6 +103,115 @@ def _pkce_challenge(verifier: str) -> str:
     return base64.urlsafe_b64encode(digest).decode("ascii").rstrip("=")
 
 
+def _validate_mastodon_settings(
+    payload: PlatformAccountUpsert, existing: PlatformAccount | None
+) -> None:
+    if payload.auth_type != "ACCESS_TOKEN" or payload.publish_mode != "REAL_API":
+        raise AppException(40062, "Mastodon 只支持访问令牌登录与官方 API 发布")
+    stored_config = decrypt_json(existing.credentials_encrypted) if existing else {}
+    if not payload.instance_url or not (
+        payload.access_token or (existing and existing.access_token_encrypted)
+    ):
+        raise AppException(40063, "请填写 Mastodon 服务器网址和访问令牌")
+    if (
+        existing
+        and payload.instance_url != stored_config.get("instance_url")
+        and not payload.access_token
+    ):
+        raise AppException(40063, "更换 Mastodon 服务器时，请填写新服务器的访问令牌")
+    if payload.refresh_token or payload.app_secret or payload.app_password:
+        raise AppException(40062, "Mastodon 请仅填写服务器网址和访问令牌")
+    if payload.token_expires_at:
+        raise AppException(40062, "Mastodon 访问令牌不使用手工设置的过期时间")
+
+
+def _validate_bluesky_settings(
+    payload: PlatformAccountUpsert, existing: PlatformAccount | None
+) -> None:
+    if payload.auth_type != "APP_PASSWORD" or payload.publish_mode != "REAL_API":
+        raise AppException(40062, "Bluesky 只支持应用密码登录与官方 API 发布")
+    stored_config = decrypt_json(existing.credentials_encrypted) if existing else {}
+    if not payload.identifier or not (payload.app_password or stored_config.get("app_password")):
+        raise AppException(40063, "请填写 Bluesky 完整账号名和应用密码")
+    if payload.access_token or payload.refresh_token:
+        raise AppException(40062, "Bluesky 会通过应用密码获取会话，请勿手动提交访问令牌")
+
+
+def _validate_xhs_settings(payload: PlatformAccountUpsert) -> None:
+    if payload.publish_mode not in {"MANUAL_CONFIRM", "MCP_PUBLISH"}:
+        raise AppException(40062, "小红书仅支持本地 MCP 发布或人工确认")
+    if (
+        payload.publish_mode == "MCP_PUBLISH"
+        and not settings.experimental_browser_publishing_enabled
+    ):
+        raise AppException(40064, "本地 MCP 发布默认关闭，请使用人工交付模式")
+
+
+def _validate_weibo_settings(
+    payload: PlatformAccountUpsert, existing: PlatformAccount | None
+) -> None:
+    if payload.publish_mode != "REAL_API":
+        raise AppException(40062, "微博只允许使用真实 OAuth 官方接口")
+    if not payload.client_id or not _secret_is_available(existing, payload.app_secret):
+        raise AppException(40063, "请填写微博开放平台真实 App Key 和 App Secret")
+
+
+def _validate_x_settings(payload: PlatformAccountUpsert, existing: PlatformAccount | None) -> None:
+    if payload.auth_type != "OAUTH2" or payload.publish_mode != "REAL_API":
+        raise AppException(40062, "X 只允许使用 OAuth2 官方接口")
+    if not payload.client_id or not _secret_is_available(existing, payload.app_secret):
+        raise AppException(40063, "请填写 X Developer Portal 的 Client ID 和 Client Secret")
+
+
+def _validate_toutiao_settings(payload: PlatformAccountUpsert) -> None:
+    if payload.auth_type != "QR_LOGIN" or payload.publish_mode != "BROWSER_PUBLISH":
+        raise AppException(40062, "今日头条只支持本机扫码登录与浏览器发布")
+    if not settings.toutiao_browser_publishing_enabled:
+        raise AppException(40064, "今日头条本机浏览器发布功能已关闭")
+
+
+def _validate_wechat_settings(
+    payload: PlatformAccountUpsert, existing: PlatformAccount | None
+) -> None:
+    if payload.publish_mode == "REAL_API":
+        payload.publish_mode = "SUBMIT_PUBLISH"
+    if payload.publish_mode == "BROWSER_DRAFT":
+        if payload.auth_type != "QR_LOGIN":
+            raise AppException(40062, "公众号本机草稿模式必须使用扫码登录")
+        if not settings.wechat_browser_publishing_enabled:
+            raise AppException(40064, "微信公众号本机扫码登录功能已关闭")
+        return
+    if payload.publish_mode not in {"DRAFT_ONLY", "SUBMIT_PUBLISH"}:
+        raise AppException(40062, "微信公众号只允许真实草稿或真实提交发布")
+    if payload.auth_type != "APP_SECRET":
+        raise AppException(40062, "公众号官方 API 必须使用 AppID/AppSecret")
+    if not payload.app_id or not _secret_is_available(existing, payload.app_secret):
+        raise AppException(40063, "请填写微信公众号后台真实 AppID 和 AppSecret")
+
+
+def _validate_platform_settings(
+    platform: Platform, payload: PlatformAccountUpsert, existing: PlatformAccount | None
+) -> None:
+    if payload.auth_type == "APP_PASSWORD" and platform != "BLUESKY":
+        raise AppException(40062, "应用密码登录仅适用于 Bluesky")
+    if payload.auth_type == "ACCESS_TOKEN" and platform != "MASTODON":
+        raise AppException(40062, "访问令牌登录仅适用于 Mastodon")
+    if platform == "MASTODON":
+        _validate_mastodon_settings(payload, existing)
+    elif platform == "BLUESKY":
+        _validate_bluesky_settings(payload, existing)
+    elif platform == "XIAOHONGSHU":
+        _validate_xhs_settings(payload)
+    elif platform == "WEIBO":
+        _validate_weibo_settings(payload, existing)
+    elif platform == "X":
+        _validate_x_settings(payload, existing)
+    elif platform == "TOUTIAO":
+        _validate_toutiao_settings(payload)
+    elif platform == "WECHAT_OFFICIAL":
+        _validate_wechat_settings(payload, existing)
+
+
 @router.get("")
 def list_accounts(
     request: Request,
@@ -130,45 +243,7 @@ def save_account(
     if payload.redirect_uri and not _allowed_redirect(str(payload.redirect_uri)):
         raise AppException(40061, "Redirect URI 必须属于当前系统允许的前端来源")
     existing = get_platform_account(db, platform)
-    xhs_modes = {"MANUAL_CONFIRM", "MCP_PUBLISH"}
-    if platform == "XIAOHONGSHU" and payload.publish_mode not in xhs_modes:
-        raise AppException(40062, "小红书仅支持本地 MCP 发布或人工确认")
-    if (
-        platform == "XIAOHONGSHU"
-        and payload.publish_mode == "MCP_PUBLISH"
-        and not settings.experimental_browser_publishing_enabled
-    ):
-        raise AppException(40064, "本地 MCP 发布默认关闭，请使用人工交付模式")
-    if platform == "WEIBO":
-        if payload.publish_mode != "REAL_API":
-            raise AppException(40062, "微博只允许使用真实 OAuth 官方接口")
-        if not payload.client_id or not _secret_is_available(existing, payload.app_secret):
-            raise AppException(40063, "请填写微博开放平台真实 App Key 和 App Secret")
-    if platform == "X":
-        if payload.auth_type != "OAUTH2" or payload.publish_mode != "REAL_API":
-            raise AppException(40062, "X 只允许使用 OAuth2 官方接口")
-        if not payload.client_id or not _secret_is_available(existing, payload.app_secret):
-            raise AppException(40063, "请填写 X Developer Portal 的 Client ID 和 Client Secret")
-    if platform == "TOUTIAO":
-        if payload.auth_type != "QR_LOGIN" or payload.publish_mode != "BROWSER_PUBLISH":
-            raise AppException(40062, "今日头条只支持本机扫码登录与浏览器发布")
-        if not settings.toutiao_browser_publishing_enabled:
-            raise AppException(40064, "今日头条本机浏览器发布功能已关闭")
-    if platform == "WECHAT_OFFICIAL" and payload.publish_mode == "REAL_API":
-        payload.publish_mode = "SUBMIT_PUBLISH"
-    if platform == "WECHAT_OFFICIAL":
-        if payload.publish_mode == "BROWSER_DRAFT":
-            if payload.auth_type != "QR_LOGIN":
-                raise AppException(40062, "公众号本机草稿模式必须使用扫码登录")
-            if not settings.wechat_browser_publishing_enabled:
-                raise AppException(40064, "微信公众号本机扫码登录功能已关闭")
-        else:
-            if payload.publish_mode not in {"DRAFT_ONLY", "SUBMIT_PUBLISH"}:
-                raise AppException(40062, "微信公众号只允许真实草稿或真实提交发布")
-            if payload.auth_type != "APP_SECRET":
-                raise AppException(40062, "公众号官方 API 必须使用 AppID/AppSecret")
-            if not payload.app_id or not _secret_is_available(existing, payload.app_secret):
-                raise AppException(40063, "请填写微信公众号后台真实 AppID 和 AppSecret")
+    _validate_platform_settings(platform, payload, existing)
     account = upsert_account(db, user, platform, payload)
     record_audit(db, request, user, "CONFIGURE", "PLATFORM_ACCOUNT", "ACCOUNT", account.id)
     db.commit()
@@ -214,10 +289,14 @@ async def test_connection(
 @router.post("/XIAOHONGSHU/login-qrcode")
 async def xiaohongshu_login_qrcode(
     request: Request,
+    db: Session = Depends(get_db),
     _: User = Depends(require_roles("ADMIN")),
 ) -> dict:
     if not settings.experimental_browser_publishing_enabled:
         raise AppException(40064, "小红书本地 MCP 发布未启用")
+    account = get_platform_account(db, "XIAOHONGSHU")
+    if account:
+        require_account_enabled(account)
     result = await mcp_get_qrcode()
     image_data_url = result.get("image_data_url", "")
     if not image_data_url:
@@ -281,7 +360,10 @@ async def toutiao_login_qrcode(
     account = get_platform_account(db, "TOUTIAO")
     if not account:
         raise AppException(40411, "请先保存今日头条账号配置", 404)
+    require_account_enabled(account)
     result = await get_login_qrcode(account.id, force_refresh=refresh)
+    db.refresh(account, with_for_update=True)
+    require_account_enabled(account)
     if result.get("connected"):
         checked_at = datetime.now()
         account.status = "CONNECTED"
@@ -326,7 +408,10 @@ async def wechat_login_qrcode(
     account = get_platform_account(db, "WECHAT_OFFICIAL")
     if not account or account.publish_mode != "BROWSER_DRAFT":
         raise AppException(40411, "请先保存微信公众号本机扫码配置", 404)
+    require_account_enabled(account)
     result = await get_wechat_login_qrcode(account.id, force_refresh=refresh)
+    db.refresh(account, with_for_update=True)
+    require_account_enabled(account)
     if result.get("connected"):
         checked_at = datetime.now()
         account.status = "CONNECTED"
@@ -431,6 +516,14 @@ async def disconnect(
         revoked = await XPublisher(db, account).disconnect()
         if not revoked.success:
             raise AppException(50213, revoked.error_message or "X 官方撤销授权失败", 502)
+    if platform == "BLUESKY":
+        revoked = await BlueskyPublisher(db, account).disconnect()
+        if not revoked.success:
+            raise AppException(50218, revoked.error_message or "Bluesky 会话撤销失败", 502)
+    if platform == "MASTODON":
+        revoked = await MastodonPublisher(db, account).disconnect()
+        if not revoked.success:
+            raise AppException(50219, revoked.error_message or "Mastodon 断开连接失败", 502)
     account_id = account.id
     disconnect_account(db, account)
     record_audit(db, request, user, "DISCONNECT", "PLATFORM_ACCOUNT", "ACCOUNT", account_id)
@@ -473,6 +566,7 @@ def weibo_oauth_start(
     account = get_platform_account(db, "WEIBO")
     if not account or not account.client_id:
         raise AppException(40063, "请先保存微博开放平台 App Key")
+    require_account_enabled(account)
     if not decrypt_json(account.credentials_encrypted).get("app_secret"):
         raise AppException(40063, "请先保存微博开放平台 App Secret")
     now = datetime.now(UTC)
@@ -524,6 +618,7 @@ async def weibo_oauth_callback(
         or not _is_admin(actor)
     ):
         raise AppException(40302, "平台账号授权人校验失败", 403)
+    require_account_enabled(account)
     config = decrypt_json(account.credentials_encrypted)
     secret = config.get("app_secret")
     if not secret:
@@ -542,6 +637,8 @@ async def weibo_oauth_callback(
     data = response.json()
     if not response.is_success or not data.get("access_token"):
         raise AppException(40065, str(data.get("error_description") or "微博 OAuth 授权失败"))
+    db.refresh(account, with_for_update=True)
+    require_account_enabled(account)
     account.access_token_encrypted = encrypt_secret(str(data["access_token"]))
     if data.get("refresh_token"):
         account.refresh_token_encrypted = encrypt_secret(str(data["refresh_token"]))
@@ -578,6 +675,7 @@ def x_oauth_start(
     account = get_platform_account(db, "X")
     if not account or not account.client_id:
         raise AppException(40063, "请先保存 X Client ID")
+    require_account_enabled(account)
     config = decrypt_json(account.credentials_encrypted)
     if not config.get("app_secret"):
         raise AppException(40063, "请先保存 X Client Secret")
@@ -661,6 +759,7 @@ async def x_oauth_callback(
         or not _is_admin(actor)
     ):
         raise AppException(40302, "X 平台账号授权人校验失败", 403)
+    require_account_enabled(account)
 
     config = decrypt_json(account.credentials_encrypted)
     pending = config.get("x_oauth_pending")
@@ -707,6 +806,8 @@ async def x_oauth_callback(
         db.commit()
         raise AppException(40065, str(exc)) from exc
 
+    db.refresh(account, with_for_update=True)
+    require_account_enabled(account)
     store_x_token_response(account, token_data)
     config = decrypt_json(account.credentials_encrypted)
     config["x_authorized_at"] = datetime.now(UTC).replace(tzinfo=None).isoformat()
@@ -748,7 +849,7 @@ async def wechat_diagnostic_test(
     app_id = str(body.get("app_id") or settings.wechat_app_id or "")
     app_secret = str(body.get("app_secret") or settings.wechat_app_secret or "")
 
-    result: dict[str, object] = {
+    result: dict[str, Any] = {
         "app_id_provided": bool(app_id),
         "app_secret_provided": bool(app_secret),
         "public_ip": "",

@@ -4,6 +4,65 @@ import re
 from collections.abc import Iterable
 from typing import Any
 
+import regex
+
+
+def bluesky_grapheme_length(value: str) -> int:
+    """Count the Unicode grapheme clusters used by Bluesky's post lexicon."""
+    return len(regex.findall(r"\X", value))
+
+
+def build_bluesky_post(title: str, content: str, hashtags: Iterable[Any] | None) -> str:
+    """Build the complete post without hiding over-limit text by truncation."""
+    hook = (title or "").strip()
+    body = (content or "").strip()
+    parts: list[str] = []
+    if hook and not body.startswith(hook):
+        parts.append(hook)
+    if body:
+        parts.append(body)
+    topics = " ".join(f"#{topic}" for topic in normalize_topics(hashtags, limit=4))
+    if topics:
+        parts.append(topics)
+    return "\n\n".join(parts)
+
+
+_MASTODON_URL_PATTERN = re.compile(r"https?://[^\s<>]+", flags=re.IGNORECASE)
+_MASTODON_URL_TRAILING_PUNCTUATION = ".,!?;:)]}。，！？；：）】"
+
+
+def mastodon_text_length(value: str, characters_reserved_per_url: int = 23) -> int:
+    """Count graphemes with Mastodon's fixed-length HTTP(S) URL reservation.
+
+    Mastodon's StatusLengthValidator counts grapheme clusters, not code points.
+    Remote mentions are conservatively kept at their full displayed length;
+    the server may accept more text by shortening their remote domain.
+    """
+    reserved = max(0, characters_reserved_per_url)
+    total = 0
+    offset = 0
+    for match in _MASTODON_URL_PATTERN.finditer(value):
+        url = match.group().rstrip(_MASTODON_URL_TRAILING_PUNCTUATION)
+        end = match.start() + len(url)
+        total += len(regex.findall(r"\X", value[offset : match.start()])) + reserved
+        offset = end
+    return total + len(regex.findall(r"\X", value[offset:]))
+
+
+def build_mastodon_post(title: str, content: str, hashtags: Iterable[Any] | None) -> str:
+    """Build the complete plain-text status used by preview and real publishing."""
+    hook = (title or "").strip()
+    body = (content or "").strip()
+    parts: list[str] = []
+    if hook and not body.startswith(hook):
+        parts.append(hook)
+    if body:
+        parts.append(body)
+    topics = " ".join(f"#{topic}" for topic in normalize_topics(hashtags, limit=4))
+    if topics:
+        parts.append(topics)
+    return "\n\n".join(parts)
+
 
 def normalize_topic(value: Any) -> str:
     """Return the platform topic name without presentation markers."""
@@ -145,6 +204,22 @@ def validate_platform_publish(
         weighted_length = x_weighted_length(post)
         if weighted_length > 280:
             errors.append(f"X 帖子合计 {weighted_length} 个加权字符，最多允许 280 个")
+    elif platform == "BLUESKY":
+        post = build_bluesky_post(clean_title, clean_content, hashtags)
+        length = bluesky_grapheme_length(post)
+        if length > 300:
+            errors.append(f"Bluesky 帖子合计 {length} 个可见字符，最多允许 300 个")
+        if len(post.encode("utf-8")) > 3000:
+            errors.append("Bluesky 帖子 UTF-8 编码最多允许 3000 字节")
+        if len(image_list) > 4:
+            errors.append("Bluesky 帖子最多允许 4 张图片")
+    elif platform == "MASTODON":
+        post = build_mastodon_post(clean_title, clean_content, hashtags)
+        length = mastodon_text_length(post)
+        if length > 500:
+            errors.append(f"Mastodon 帖子合计 {length} 个计数字符，默认最多允许 500 个")
+        if len(image_list) > 4:
+            errors.append("Mastodon 帖子默认最多允许 4 张图片")
     elif platform == "XIAOHONGSHU":
         if not clean_title:
             errors.append("小红书标题不能为空")

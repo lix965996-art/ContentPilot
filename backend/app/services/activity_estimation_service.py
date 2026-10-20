@@ -41,7 +41,10 @@ from app.services.activity_service import (
     ACCOUNT_SOURCE_TYPES,
     BASELINE_SOURCE_TYPES,
     WEEKDAY_NAMES,
+    business_now,
+    history_is_simulated,
     load_rows,
+    normalize_business_time,
 )
 
 ESTIMATOR_VERSION = "activity-semantic-v1"
@@ -89,7 +92,11 @@ class WeightedSample:
 def time_weight(publish_time: datetime, *, now: datetime, decay_days: int | None = None) -> float:
     """Exponential recency decay: exp(-age_days / decay_days)."""
     decay = float(decay_days or settings.activity_decay_days or 90)
-    age_days = max(0.0, (now - publish_time).total_seconds() / 86400)
+    age_days = max(
+        0.0,
+        (normalize_business_time(now) - normalize_business_time(publish_time)).total_seconds()
+        / 86400,
+    )
     return math.exp(-age_days / max(1.0, decay))
 
 
@@ -125,12 +132,27 @@ def build_samples(
     """Turn history rows into weighted samples, keyed by semantic similarity."""
     samples: list[WeightedSample] = []
     for row in rows:
+        if history_is_simulated(row) or normalize_business_time(
+            row.publish_time
+        ) > normalize_business_time(now):
+            continue
+        detail = row.metric_detail_json or {}
+        basis = str(detail.get("metricBasis") or "")
+        if basis in {"UNKNOWN", "NONE"}:
+            continue
         similarity = similarity_by_row.get(row.id)
         if similarity is None:
             similarity = default_similarity
         # Cosine can be negative; clamp so a weight never flips sign.
         similarity = max(0.05, min(1.0, float(similarity)))
-        reach = row.views or row.impressions or 0
+        reach_value = {
+            "IMPRESSIONS": row.impressions,
+            "VIEWS": row.views,
+            "FOLLOWERS": row.followers,
+        }.get(basis)
+        if reach_value is None:
+            reach_value = detail.get("reach") or row.impressions or row.views or 0
+        reach = int(reach_value)
         samples.append(
             WeightedSample(
                 row_id=row.id,
@@ -242,18 +264,20 @@ def estimate(
     default similarity, so the estimate degrades smoothly instead of emptying
     out when retrieval finds few matches.
     """
-    now = now or datetime.now()
+    now = normalize_business_time(now) if now else business_now()
     similar_ids = set(similarity_by_row)
 
     account_rows = load_rows(
-        db, platform=platform, account_id=account_id, source_types=ACCOUNT_SOURCE_TYPES
+        db, platform=platform, account_id=account_id, source_types=ACCOUNT_SOURCE_TYPES, end=now
     )
-    platform_rows = load_rows(db, platform=platform)
+    platform_rows = load_rows(db, platform=platform, end=now)
     baseline_rows = [row for row in platform_rows if row.source_type in BASELINE_SOURCE_TYPES]
     # Public datasets from *other* platforms: the last resort before the flat
     # system default, used mainly while a platform is still in cold start.
     cross_rows = [
-        row for row in load_rows(db, source_types=BASELINE_SOURCE_TYPES) if row.platform != platform
+        row
+        for row in load_rows(db, source_types=BASELINE_SOURCE_TYPES, end=now)
+        if row.platform != platform
     ]
 
     account_similar = [row for row in account_rows if row.id in similar_ids]
@@ -293,7 +317,10 @@ def estimate(
         table = table_for(rows, only_similar=only_similar, reliability_factor=reliability)
         if table:
             levels.append(PriorLevel(name, label, table, _mean_score(table)))
-    levels.append(PriorLevel("SYSTEM_DEFAULT", "系统默认基线", {}, SYSTEM_DEFAULT_SCORE))
+    default_label = (
+        "人工规则基线（非 Mastodon 历史统计）" if platform == "MASTODON" else "系统默认基线"
+    )
+    levels.append(PriorLevel("SYSTEM_DEFAULT", default_label, {}, SYSTEM_DEFAULT_SCORE))
 
     primary = levels[0]
     slots: dict[str, dict] = {}
@@ -308,7 +335,7 @@ def estimate(
             # Walk the prior chain until a level can speak for this slot.
             prior_score = SYSTEM_DEFAULT_SCORE
             prior_level = "SYSTEM_DEFAULT"
-            prior_label = "系统默认基线"
+            prior_label = default_label
             for level in levels[1:]:
                 candidate = level.table.get(key)
                 if candidate:
@@ -380,6 +407,11 @@ def estimate(
         "similarSampleCount": len(account_similar) or len(platform_similar),
         "accountSampleCount": len(account_rows),
         "platformSampleCount": len(platform_rows),
+        "platformEvidenceNote": (
+            "尚未导入 Mastodon 账号或实例历史；冷启动仅参考人工规则或已标注的跨平台代理数据。"
+            if platform == "MASTODON" and not platform_rows
+            else ""
+        ),
         "baselineSampleCount": len(baseline_rows),
         "crossPlatformSampleCount": len(cross_rows),
         "effectiveSampleCount": total_effective,

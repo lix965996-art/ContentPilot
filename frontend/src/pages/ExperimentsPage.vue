@@ -7,13 +7,14 @@ import EmptyState from '@/components/EmptyState.vue'
 import { workflowApi } from '@/api/workflow'
 import { getApiErrorMessage } from '@/api/client'
 import { useAuthStore } from '@/stores/auth'
-import type { ExperimentSampleRow } from '@/types/business'
+import type { DataScope, ExperimentSampleRow } from '@/types/business'
 const auth = useAuthStore()
 const canOperate = computed(() => auth.canManageBusiness)
 const rows = ref<Array<Record<string, any>>>([])
 const dialog = ref(false)
 const detail = ref<Record<string, any>>()
 const drawer = ref(false)
+const dataScope = ref<DataScope>('REAL')
 const form = reactive({
   name: '',
   type: 'PUBLISH_TIME',
@@ -24,10 +25,24 @@ const form = reactive({
 })
 const controlStats = computed(() => detail.value?.statistics?.CONTROL || {})
 const treatmentStats = computed(() => detail.value?.statistics?.TREATMENT || {})
-const engagementDifference = computed(
-  () =>
-    Number(treatmentStats.value.engagementRate || 0) -
-    Number(controlStats.value.engagementRate || 0),
+function rateDifference(
+  treatment: Record<string, any>,
+  control: Record<string, any>,
+): number | null {
+  if (
+    treatment.rateAvailable === false ||
+    control.rateAvailable === false ||
+    typeof treatment.engagementRate !== 'number' ||
+    typeof control.engagementRate !== 'number' ||
+    !treatment.metricBasis ||
+    treatment.metricBasis !== control.metricBasis ||
+    ['UNKNOWN', 'MIXED'].includes(treatment.metricBasis)
+  )
+    return null
+  return treatment.engagementRate - control.engagementRate
+}
+const engagementDifference = computed(() =>
+  rateDifference(treatmentStats.value, controlStats.value),
 )
 
 function typeLabel(value: string) {
@@ -51,6 +66,7 @@ function groupLabel(value: string) {
 }
 
 function formatPercent(value: unknown) {
+  if (value == null) return '口径未确认或无数据'
   const number = Number(value)
   return Number.isFinite(number) ? `${number.toFixed(2)}%` : '暂无数据'
 }
@@ -66,6 +82,7 @@ function conclusionText() {
     return '两组样本都不足 3 条，目前只能验证流程，不能据此调整正式发布时间。'
   }
   const difference = engagementDifference.value
+  if (difference === null) return '两组数据口径未确认或不一致，无法比较互动率。'
   if (Math.abs(difference) < 0.5) return '两组互动率接近，暂未观察到明显差异。'
   return difference > 0
     ? `按推荐时间发的平均互动率高 ${difference.toFixed(2)} 个百分点。`
@@ -87,7 +104,7 @@ const featuredExperiment = computed(() =>
 const featuredDiff = computed(() => {
   const stats = featuredExperiment.value?.statistics
   if (!stats?.TREATMENT || !stats?.CONTROL) return null
-  return Number(stats.TREATMENT.engagementRate || 0) - Number(stats.CONTROL.engagementRate || 0)
+  return rateDifference(stats.TREATMENT, stats.CONTROL)
 })
 
 const otherExperiments = computed(() =>
@@ -99,10 +116,11 @@ function resultHeadline(row: Record<string, any>) {
   const treatment = row.statistics?.TREATMENT
   const control = row.statistics?.CONTROL
   if (!treatment?.sampleCount && !control?.sampleCount) return row.conclusion || ''
-  const diff = Number(treatment?.engagementRate || 0) - Number(control?.engagementRate || 0)
+  const diff = rateDifference(treatment || {}, control || {})
+  if (diff === null) return '互动率口径未确认或不一致，无法比较。'
   if (Math.abs(diff) < 0.05) return '两组互动率接近，差异不明显。'
   return diff > 0
-    ? `按推荐时间发 ${Number(treatment?.engagementRate || 0).toFixed(2)}%，比平时时间高 ${Math.abs(diff).toFixed(2)} 个百分点。`
+    ? `按推荐时间发 ${Number(treatment?.engagementRate).toFixed(2)}%，比平时时间高 ${Math.abs(diff).toFixed(2)} 个百分点。`
     : `按平时时间发更好，推荐时间低 ${Math.abs(diff).toFixed(2)} 个百分点。`
 }
 
@@ -112,7 +130,7 @@ function dataSourceLabel(row: Record<string, any>) {
   return '排期实测'
 }
 async function load() {
-  rows.value = (await workflowApi.experiments()).sort((a, b) => {
+  rows.value = (await workflowApi.experiments({ data_scope: dataScope.value })).sort((a, b) => {
     if (a.name === BACKTEST_EXPERIMENT_NAME) return -1
     if (b.name === BACKTEST_EXPERIMENT_NAME) return 1
     return 0
@@ -134,8 +152,17 @@ async function action(row: any, name: string) {
   await load()
 }
 async function open(row: any) {
-  detail.value = await workflowApi.experiment(row.id)
+  detail.value = await workflowApi.experiment(row.id, { data_scope: dataScope.value })
   drawer.value = true
+}
+async function changeScope() {
+  try {
+    await load()
+    if (detail.value?.id)
+      detail.value = await workflowApi.experiment(detail.value.id, { data_scope: dataScope.value })
+  } catch (error) {
+    ElMessage.error(getApiErrorMessage(error))
+  }
 }
 async function syncSchedules(row: any) {
   syncing.value = true
@@ -180,7 +207,7 @@ async function submitOverride() {
 function assignmentLabel(value?: string) {
   return value === 'MANUAL' ? '人工调整' : '自动分组'
 }
-onMounted(load)
+onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error))))
 </script>
 <template>
   <div class="experiments-page">
@@ -191,6 +218,17 @@ onMounted(load)
         ><Plus :size="16" class="mr-2" />新建对比</el-button
       ></PageHeader
     >
+    <div class="mt-4 flex flex-wrap items-center gap-3">
+      <span class="text-sm text-muted">数据范围</span>
+      <el-select v-model="dataScope" class="!w-44" aria-label="实验数据范围" @change="changeScope">
+        <el-option label="真实和公开数据" value="REAL" />
+        <el-option label="演示数据" value="SIMULATED" />
+        <el-option label="全部（按来源区分）" value="ALL" />
+      </el-select>
+      <span v-if="dataScope !== 'REAL'" class="text-xs text-muted"
+        >演示样本仅用于流程验证，不代表线上效果。</span
+      >
+    </div>
 
     <section v-if="featuredExperiment" class="hero-panel panel">
       <div class="hero-panel__head">
@@ -219,7 +257,7 @@ onMounted(load)
           <span>差多少</span>
           <strong>{{
             featuredDiff !== null
-              ? `${featuredDiff >= 0 ? '+' : ''}${featuredDiff.toFixed(2)}%`
+              ? `${featuredDiff >= 0 ? '+' : ''}${featuredDiff.toFixed(2)} 个百分点`
               : '—'
           }}</strong>
           <small>YouTube 公开样本</small>

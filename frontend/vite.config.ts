@@ -1,4 +1,5 @@
 import { fileURLToPath, URL } from 'node:url'
+import { resolve } from 'node:path'
 
 import vue from '@vitejs/plugin-vue'
 import { loadEnv } from 'vite'
@@ -6,8 +7,11 @@ import { defineConfig } from 'vitest/config'
 
 export default defineConfig(({ mode }) => {
   const env = loadEnv(mode, process.cwd(), '')
+  const projectRoot = fileURLToPath(new URL('..', import.meta.url))
+  const varDirectory = resolve(projectRoot, env.CONTENTPILOT_VAR_DIR?.trim() || 'var')
   return {
     plugins: [vue()],
+    cacheDir: resolve(varDirectory, 'cache/vite'),
     resolve: {
       alias: {
         '@': fileURLToPath(new URL('./src', import.meta.url)),
@@ -24,6 +28,10 @@ export default defineConfig(({ mode }) => {
           timeout: 180_000,
           proxyTimeout: 180_000,
         },
+        '/uploads': {
+          target: env.CONTENTPILOT_API_TARGET || 'http://127.0.0.1:8000',
+          changeOrigin: true,
+        },
       },
     },
     build: {
@@ -36,7 +44,6 @@ export default defineConfig(({ mode }) => {
             if (id.includes('element-plus')) return 'element-plus'
             if (id.includes('echarts')) return 'echarts'
             if (id.includes('@fullcalendar')) return 'fullcalendar'
-            if (id.includes('md-editor-v3')) return 'markdown-editor'
             if (id.includes('vue') || id.includes('pinia')) return 'vue-vendor'
             return 'vendor'
           },
@@ -48,6 +55,9 @@ export default defineConfig(({ mode }) => {
       setupFiles: ['./tests/setup.ts'],
       css: true,
       exclude: ['tests/e2e/**', 'node_modules/**', 'dist/**'],
+      coverage: {
+        reportsDirectory: resolve(varDirectory, 'reports/coverage'),
+      },
     },
   }
 })

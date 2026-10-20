@@ -1,7 +1,7 @@
 """Downloaded YouTubeDurationData → engagement_history via history_import_service.
 
 Imports the original CSV files from:
-  sample-data/history/YouTubeDurationData/
+  examples/history/YouTubeDurationData/
 without modifying them. Creates a historical backtest experiment from real rows.
 
 Run:
@@ -17,7 +17,7 @@ from pathlib import Path
 
 PROJECT_ROOT = Path(__file__).resolve().parents[1]
 BACKEND = PROJECT_ROOT / "backend"
-REPO_DIR = PROJECT_ROOT / "sample-data" / "history" / "YouTubeDurationData"
+REPO_DIR = PROJECT_ROOT / "examples" / "history" / "YouTubeDurationData"
 PYTHON = BACKEND / ".venv" / "Scripts" / "python.exe"
 
 sys.path.insert(0, str(BACKEND))
@@ -242,6 +242,10 @@ def create_backtest_experiment(db, operator_id: int | None) -> dict:
                     "shares": row.shares,
                     "slotScore": round(score, 3),
                     "dataSource": "YOUTUBE_PUBLIC_SAMPLE",
+                    "historyRowId": row.id,
+                    "metricBasis": (row.metric_detail_json or {}).get("metricBasis", "UNKNOWN"),
+                    "rateAvailable": (row.metric_detail_json or {}).get("metricBasis")
+                    in {"VIEWS", "IMPRESSIONS", "FOLLOWERS"},
                     "videoId": row.account_ref,
                     "category": row.content_type,
                 },

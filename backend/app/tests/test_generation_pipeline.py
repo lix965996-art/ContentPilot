@@ -1,3 +1,4 @@
+import base64
 import time
 
 import pytest
@@ -76,7 +77,15 @@ def test_user_options_are_written_into_prompt() -> None:
         "hashtags（是否生成标签）：禁止生成",
     ):
         assert expected in prompt
-    assert len(PLATFORM_PROFILES) == 5
+    assert set(PLATFORM_PROFILES) == {
+        "WEIBO",
+        "X",
+        "BLUESKY",
+        "MASTODON",
+        "XIAOHONGSHU",
+        "WECHAT_OFFICIAL",
+        "TOUTIAO",
+    }
     assert "280 加权字符限制" in PLATFORM_PROFILES["X"].render()
     assert "可见文本" in prompt
     assert "严禁出现井号字符" in prompt
@@ -122,8 +131,14 @@ def test_variant_save_forbids_hash_in_visible_text(client: TestClient, login_as)
 
 
 def test_illustrated_weibo_edit_is_automatically_fitted_before_save(
-    client: TestClient, login_as
+    client: TestClient, login_as, monkeypatch
 ) -> None:
+    async def download(_url):
+        return ".png", base64.b64decode(
+            "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+        )
+
+    monkeypatch.setattr("app.api.endpoints.media._download_generated_image", download)
     token = login_as("operator", "Operator@123456")["access_token"]
     auth = headers(token)
     article_id = create_article(client, auth, "weibo-auto-fit")
@@ -317,7 +332,7 @@ def test_three_platforms_generate_in_parallel(client: TestClient, login_as, monk
             1,
         )
 
-    monkeypatch.setattr("app.api.endpoints.generation.generate_variant_data", slow_generate)
+    monkeypatch.setattr("app.services.generation_task_service.generate_variant_data", slow_generate)
     started = time.perf_counter()
     response = client.post(
         "/api/generation/content",
@@ -366,7 +381,9 @@ def test_platform_failure_preserves_other_results(
             1,
         )
 
-    monkeypatch.setattr("app.api.endpoints.generation.generate_variant_data", partly_failing)
+    monkeypatch.setattr(
+        "app.services.generation_task_service.generate_variant_data", partly_failing
+    )
     response = client.post(
         "/api/generation/content",
         headers=auth,
@@ -495,7 +512,11 @@ def test_history_delete_reject_and_single_platform_retry(client: TestClient, log
     weibo_history = [item for item in history if item["platform"] == "WEIBO"]
     assert [item["versionNo"] for item in weibo_history] == [2, 1]
 
-    rejected = client.post(f"/api/variants/{weibo_history[0]['id']}/reject", headers=auth)
+    rejected = client.post(
+        f"/api/variants/{weibo_history[0]['id']}/reject",
+        headers=auth,
+        json={"expected_fingerprint": weibo_history[0]["contentFingerprint"]},
+    )
     assert rejected.json()["data"]["reviewStatus"] == "REJECTED"
     deleted = client.delete(f"/api/variants/{weibo_history[1]['id']}", headers=auth)
     assert deleted.status_code == 200

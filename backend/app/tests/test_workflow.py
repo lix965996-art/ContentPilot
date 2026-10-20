@@ -4,13 +4,42 @@ import httpx
 from fastapi.testclient import TestClient
 
 from app.db.session import SessionLocal
-from app.models.business import ContentVariant, PlatformAccount
+from app.models.business import PlatformAccount
 from app.publishers.base import PublishResult
 from app.publishers.official import WeiboPublisher
+from app.services.generation_service import load_llm_runtime
+from app.services.llm_usage_service import begin_usage, finish_usage
 
 
 def headers(token: str) -> dict[str, str]:
     return {"Authorization": f"Bearer {token}"}
+
+
+def test_partial_article_update_preserves_keywords(client: TestClient, login_as) -> None:
+    auth = headers(login_as("operator", "Operator@123456")["access_token"])
+    created = client.post(
+        "/api/articles",
+        headers=auth,
+        json={
+            "title": "关键词保留验证",
+            "source_text": "这是一篇用于验证局部更新不会清空关键词的测试文章。",
+            "keywords": ["保留", "关键词"],
+        },
+    )
+    assert created.status_code == 200
+    article_id = created.json()["data"]["id"]
+
+    updated = client.put(
+        f"/api/articles/{article_id}",
+        headers=auth,
+        json={
+            "title": "关键词保留验证（已更新）",
+            "source_text": "更新标题和正文，但不提交 keywords 字段。",
+        },
+    )
+
+    assert updated.status_code == 200, updated.text
+    assert updated.json()["data"]["keywords"] == ["保留", "关键词"]
 
 
 def test_complete_content_to_publish_flow(client: TestClient, login_as, monkeypatch) -> None:
@@ -50,6 +79,12 @@ def test_complete_content_to_publish_flow(client: TestClient, login_as, monkeypa
     assert task["status"] == "SUCCESS"
     assert len(task["variants"]) == 3
     variant = task["variants"][0]
+    approved = client.post(
+        f"/api/variants/{variant['id']}/approve",
+        headers=auth,
+        json={"expected_fingerprint": variant["contentFingerprint"]},
+    )
+    assert approved.status_code == 200, approved.text
 
     recommendation = client.post(
         "/api/recommendations/publish-time",
@@ -259,16 +294,20 @@ def test_model_service_configuration_and_usage(client: TestClient, login_as, mon
     assert tested.json()["data"]["connected"] is True
     assert tested.json()["data"]["models"] == ["Qwen/Qwen3-8B"]
 
+    # Billing evidence belongs to provider attempts, not editable variants.
+    # Disable admission for this isolated accounting assertion; the dedicated
+    # budget tests verify exhausted/unknown and concurrent reservation behavior.
+    assert (
+        client.put(
+            "/api/settings/model-service", headers=auth, json={**payload, "monthly_budget": 0}
+        ).status_code
+        == 200
+    )
     with SessionLocal() as db:
-        variant = db.query(ContentVariant).first()
-        assert variant is not None
-        variant.prompt_tokens = 1_000_000
-        variant.completion_tokens = 1_000_000
-        variant.token_usage = 2_000_000
-        variant.estimated_cost = 0
-        variant.created_at = datetime.now()
-        variant_id = variant.id
-        db.commit()
+        ticket = begin_usage(load_llm_runtime(db), "TEST_COST")
+        assert ticket is not None
+        finish_usage(ticket, prompt_tokens=1_000_000, completion_tokens=1_000_000)
+    assert client.put("/api/settings/model-service", headers=auth, json=payload).status_code == 200
 
     usage = client.get("/api/settings/model-service/usage?days=30", headers=auth)
     assert usage.status_code == 200
@@ -276,9 +315,17 @@ def test_model_service_configuration_and_usage(client: TestClient, login_as, mon
     assert usage_data["totalTokens"] >= 2_000_000
     assert usage_data["currency"] == "CNY"
     assert usage_data["priceConfigured"] is True
-    detail = next(item for item in usage_data["recent"] if item["id"] == variant_id)
+    detail = next(item for item in usage_data["recent"] if item["id"] == ticket.id)
     assert detail["cost"] == 12.5
-    assert detail["pricingStatus"] == "CURRENT_PRICE"
+    assert detail["pricingStatus"] == "PRICE_SNAPSHOT"
+    # Session-scoped business fixtures are shared with later workflow tests;
+    # do not leave a newly enforced budget enabled for unrelated tests.
+    assert (
+        client.put(
+            "/api/settings/model-service", headers=auth, json={**payload, "monthly_budget": 0}
+        ).status_code
+        == 200
+    )
 
 
 def test_operator_cannot_manage_model_service(client: TestClient, login_as) -> None:

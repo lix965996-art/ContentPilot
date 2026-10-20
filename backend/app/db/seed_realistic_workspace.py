@@ -233,13 +233,15 @@ def update_workspace() -> dict[str, int]:
             raise RuntimeError("operator demo user is missing")
 
         article_ids = sorted(
-            set(
-                db.scalars(
+            {
+                asset_id
+                for asset_id in db.scalars(
                     select(MediaAsset.article_id).where(
                         MediaAsset.source_id.like("editorial-%-cover")
                     )
                 ).all()
-            )
+                if asset_id is not None
+            }
         )
         if len(article_ids) != len(ARTICLE_DATA):
             raise RuntimeError(

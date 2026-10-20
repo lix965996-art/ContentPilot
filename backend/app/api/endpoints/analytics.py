@@ -1,6 +1,6 @@
 import csv
 import io
-from datetime import date, datetime
+from datetime import date
 
 from fastapi import APIRouter, Depends, File, Query, Request, UploadFile
 from fastapi.responses import StreamingResponse
@@ -12,6 +12,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user, require_roles
 from app.core.exceptions import AppException
 from app.core.responses import success_response
+from app.core.uploads import read_upload_limited
 from app.db.session import get_db
 from app.models.business import (
     ContentArticle,
@@ -21,11 +22,15 @@ from app.models.business import (
 )
 from app.models.user import User
 from app.schemas.business import MetricCreate
-from app.services.activity_service import classify_content_type, content_type_name
+from app.services.activity_service import business_now, classify_content_type, content_type_name
 from app.services.analytics_service import (
+    DataScope,
+    aggregate_metrics,
     article_engagement,
     articles_engagement_batch,
     grouped,
+    metric_scope,
+    metric_values,
     summarize,
 )
 from app.services.audit_service import record_audit
@@ -33,7 +38,7 @@ from app.services.engagement_feedback_service import (
     sync_published_feedback,
     sync_schedule_feedback,
 )
-from app.services.recommendation_service import explain_slot
+from app.services.recommendation_analysis import explain_slot
 
 router = APIRouter(tags=["数据复盘"])
 HEADERS = [
@@ -51,24 +56,27 @@ HEADERS = [
     "data_source",
 ]
 OPTIONAL_HEADERS = {"metric_basis", "followers", "data_source"}
-DEFAULT_METRIC_BASIS = "IMPRESSIONS"
+DEFAULT_METRIC_BASIS = "UNKNOWN"
 DEFAULT_DATA_SOURCE = "IMPORTED"
 
 
 def _save_metric(db: Session, payload: MetricCreate) -> EngagementMetric:
-    if not db.get(PublishSchedule, payload.schedule_id):
+    schedule = db.get(PublishSchedule, payload.schedule_id)
+    if not schedule:
         raise AppException(40407, f"排期任务 {payload.schedule_id} 不存在", 404)
+    if payload.platform != schedule.platform:
+        raise AppException(40048, "互动数据平台与排期平台不匹配")
     total = payload.likes + payload.comments + payload.collects + payload.shares
     # Resolve the denominator from the caller's explicit choice. Previously the
     # code silently fell back to followers when impressions was zero, which
     # inflated engagement rates whenever a platform did not expose impressions.
     # The denominator is now selected explicitly; zero denominator means the
     # caller did not provide a valid basis, and we record the rate as 0.
-    denominator = (
-        payload.impressions if payload.metric_basis == "IMPRESSIONS" else payload.followers
+    denominator = {"IMPRESSIONS": payload.impressions, "FOLLOWERS": payload.followers}.get(
+        payload.metric_basis, 0
     )
     return EngagementMetric(
-        **payload.model_dump(exclude={"metric_basis"}),
+        **payload.model_dump(),
         engagement_total=total,
         engagement_rate=round(total / denominator, 6) if denominator else 0,
     )
@@ -78,6 +86,7 @@ def _save_metric(db: Session, payload: MetricCreate) -> EngagementMetric:
 def template(_: User = Depends(get_current_user)) -> StreamingResponse:
     workbook = Workbook()
     sheet = workbook.active
+    assert sheet is not None
     sheet.title = "互动数据导入"
     sheet.append(HEADERS)
     stream = io.BytesIO()
@@ -118,7 +127,9 @@ def manual(
         {
             "id": row.id,
             "engagementTotal": row.engagement_total,
-            "engagementRate": row.engagement_rate,
+            "engagementRate": row.engagement_rate if metric_values(row)["rateAvailable"] else None,
+            "metricBasis": row.metric_basis,
+            "rateAvailable": metric_values(row)["rateAvailable"],
             "feedbackHistoryId": feedback.id if feedback else None,
         },
         "互动数据已保存",
@@ -134,9 +145,7 @@ async def import_metrics(
 ) -> dict:
     if not file.filename or not file.filename.lower().endswith((".csv", ".xlsx")):
         raise AppException(40041, "只支持 CSV 或 XLSX 文件")
-    raw = await file.read()
-    if len(raw) > 5 * 1024 * 1024:
-        raise AppException(40042, "文件不能超过 5MB")
+    raw = await read_upload_limited(file, 5 * 1024 * 1024)
     records: list[dict] = []
     if file.filename.lower().endswith(".csv"):
         try:
@@ -145,11 +154,19 @@ async def import_metrics(
             raise AppException(40043, "CSV 必须使用 UTF-8 编码") from exc
     else:
         workbook = load_workbook(io.BytesIO(raw), read_only=True, data_only=True)
-        sheet = workbook.active
-        rows = list(sheet.iter_rows(values_only=True))
-        headers = [str(x or "") for x in rows[0]] if rows else []
-        records = [dict(zip(headers, values, strict=False)) for values in rows[1:]]
-    missing = [name for name in HEADERS if name not in (records[0].keys() if records else [])]
+        try:
+            sheet = workbook.active
+            assert sheet is not None
+            rows = list(sheet.iter_rows(values_only=True))
+            headers = [str(x or "") for x in rows[0]] if rows else []
+            records = [dict(zip(headers, values, strict=False)) for values in rows[1:]]
+        finally:
+            workbook.close()
+    missing = [
+        name
+        for name in HEADERS
+        if name not in OPTIONAL_HEADERS and name not in (records[0].keys() if records else [])
+    ]
     if missing:
         raise AppException(40044, "导入字段不完整", 422, {"missingFields": missing})
     success, errors = 0, []
@@ -157,21 +174,23 @@ async def import_metrics(
     for index, item in enumerate(records, start=2):
         try:
             basis = str(item.get("metric_basis") or DEFAULT_METRIC_BASIS).upper()
-            if basis not in {"IMPRESSIONS", "FOLLOWERS"}:
-                basis = DEFAULT_METRIC_BASIS
-            payload = MetricCreate(
-                schedule_id=int(item["schedule_id"]),
-                platform=str(item["platform"]),
-                metric_date=date.fromisoformat(str(item["metric_date"])[:10]),
-                group_type=str(item["group_type"]),
-                impressions=int(item["impressions"] or 0),
-                likes=int(item["likes"] or 0),
-                comments=int(item["comments"] or 0),
-                collects=int(item["collects"] or 0),
-                shares=int(item["shares"] or 0),
-                followers=int(item["followers"] or 0),
-                metric_basis=basis,
-                data_source=str(item["data_source"] or DEFAULT_DATA_SOURCE),
+            if basis not in {"IMPRESSIONS", "FOLLOWERS", "UNKNOWN"}:
+                raise ValueError(f"无效的互动率分母：{basis}")
+            payload = MetricCreate.model_validate(
+                {
+                    "schedule_id": int(item["schedule_id"]),
+                    "platform": str(item["platform"]),
+                    "metric_date": date.fromisoformat(str(item["metric_date"])[:10]),
+                    "group_type": str(item["group_type"]),
+                    "impressions": int(item["impressions"] or 0),
+                    "likes": int(item["likes"] or 0),
+                    "comments": int(item["comments"] or 0),
+                    "collects": int(item["collects"] or 0),
+                    "shares": int(item["shares"] or 0),
+                    "followers": int(item.get("followers") or 0),
+                    "metric_basis": basis,
+                    "data_source": str(item.get("data_source") or DEFAULT_DATA_SOURCE),
+                }
             )
             with db.begin_nested():
                 db.add(_save_metric(db, payload))
@@ -217,31 +236,46 @@ def sync_feedback(
 
 @router.get("/analytics/overview")
 def overview(
-    request: Request, db: Session = Depends(get_db), _: User = Depends(get_current_user)
+    request: Request,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+    data_scope: DataScope = "REAL",
 ) -> dict:
-    return success_response(request, summarize(db))
+    return success_response(request, summarize(db, data_scope=data_scope))
 
 
 @router.get("/analytics/platform-comparison")
 def platform_comparison(
-    request: Request, db: Session = Depends(get_db), _: User = Depends(get_current_user)
+    request: Request,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+    data_scope: DataScope = "REAL",
 ) -> dict:
-    return success_response(request, grouped(db, "platform"))
+    return success_response(request, grouped(db, "platform", data_scope=data_scope))
 
 
 @router.get("/analytics/time-comparison")
 def time_comparison(
-    request: Request, db: Session = Depends(get_db), _: User = Depends(get_current_user)
+    request: Request,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+    data_scope: DataScope = "REAL",
 ) -> dict:
-    return success_response(request, grouped(db, "group_type"))
+    return success_response(request, grouped(db, "group_type", data_scope=data_scope))
 
 
 @router.get("/analytics/content-ranking")
 def content_ranking(
-    request: Request, db: Session = Depends(get_db), _: User = Depends(get_current_user)
+    request: Request,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+    data_scope: DataScope = "REAL",
 ) -> dict:
     metrics = db.scalars(
-        select(EngagementMetric).order_by(EngagementMetric.engagement_rate.desc()).limit(50)
+        select(EngagementMetric)
+        .where(*metric_scope(data_scope))
+        .order_by(EngagementMetric.engagement_rate.desc())
+        .limit(50)
     ).all()
     items = []
     for metric in metrics:
@@ -258,7 +292,7 @@ def content_ranking(
                 "collects": metric.collects,
                 "shares": metric.shares,
                 "followers": metric.followers,
-                "engagementRate": round(metric.engagement_rate * 100, 2),
+                **metric_values(metric),
                 "engagementTotal": metric.engagement_total,
                 "dataSource": metric.data_source,
                 "groupType": metric.group_type,
@@ -272,6 +306,7 @@ def content_ranking(
 def articles_engagement_summary(
     request: Request,
     ids: str = Query("", description="Comma-separated article ids"),
+    data_scope: DataScope = "REAL",
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ) -> dict:
@@ -281,7 +316,7 @@ def articles_engagement_summary(
         if value.isdigit():
             article_ids.append(int(value))
     article_ids = article_ids[:100]
-    summaries = articles_engagement_batch(db, article_ids)
+    summaries = articles_engagement_batch(db, article_ids, data_scope=data_scope)
     return success_response(
         request,
         {"items": [summaries[article_id] for article_id in article_ids if article_id in summaries]},
@@ -292,12 +327,13 @@ def articles_engagement_summary(
 def article_engagement_detail(
     article_id: int,
     request: Request,
+    data_scope: DataScope = "REAL",
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ) -> dict:
     if not db.get(ContentArticle, article_id):
         raise AppException(40401, "文章不存在", 404)
-    return success_response(request, article_engagement(db, article_id))
+    return success_response(request, article_engagement(db, article_id, data_scope=data_scope))
 
 
 def _parse_date(value: str | None) -> date | None:
@@ -320,6 +356,7 @@ TIME_SOURCE_LABELS = {
 def publish_decision(
     schedule_id: int,
     request: Request,
+    data_scope: DataScope = "REAL",
     db: Session = Depends(get_db),
     _: User = Depends(get_current_user),
 ) -> dict:
@@ -358,10 +395,10 @@ def publish_decision(
     )
 
     metrics = db.scalars(
-        select(EngagementMetric).where(EngagementMetric.schedule_id == schedule.id)
+        select(EngagementMetric).where(
+            EngagementMetric.schedule_id == schedule.id, *metric_scope(data_scope)
+        )
     ).all()
-    impressions = sum(item.impressions for item in metrics)
-    engagement = sum(item.engagement_total for item in metrics)
 
     return success_response(
         request,
@@ -417,56 +454,56 @@ def publish_decision(
                 "alternatives": snapshot.get("alternatives") or [],
             },
             "result": {
-                "sampleCount": len(metrics),
-                "impressions": impressions,
-                "engagementTotal": engagement,
-                "engagementRate": (
-                    round(engagement / impressions * 100, 2) if impressions else None
-                ),
+                **aggregate_metrics(list(metrics)),
+                "dataScope": data_scope,
                 "dataSources": sorted({item.data_source for item in metrics if item.data_source}),
             },
         },
     )
 
 
-def _metric_index(db: Session) -> dict[int, list[EngagementMetric]]:
+def _metric_index(db: Session, data_scope: DataScope = "REAL") -> dict[int, list[EngagementMetric]]:
     index: dict[int, list[EngagementMetric]] = {}
-    for metric in db.scalars(select(EngagementMetric)).all():
+    for metric in db.scalars(select(EngagementMetric).where(*metric_scope(data_scope))).all():
         index.setdefault(metric.schedule_id, []).append(metric)
     return index
 
 
-def _effect_bucket(name: str, rows: list[dict]) -> dict:
+def _effect_bucket(name: str, rows: list[dict], metric_index: dict) -> dict:
     measured = [item for item in rows if item["sampleCount"]]
-    impressions = sum(item["impressions"] for item in measured)
-    engagement = sum(item["engagementTotal"] for item in measured)
+    metrics = [metric for item in measured for metric in metric_index.get(item["scheduleId"], [])]
+    totals = aggregate_metrics(metrics)
+    comparable = [
+        item
+        for item in measured
+        if item["rateAvailable"] and item["metricBasis"] == totals["metricBasis"]
+    ]
     return {
         "name": name,
         "scheduleCount": len(rows),
         "measuredCount": len(measured),
-        "impressions": impressions,
-        "engagementTotal": engagement,
-        "engagementRate": round(engagement / impressions * 100, 2) if impressions else 0,
+        **totals,
         "avgEngagementRate": (
-            round(sum(item["engagementRate"] for item in measured) / len(measured), 2)
-            if measured
-            else 0
+            round(sum(item["engagementRate"] for item in comparable) / len(comparable), 2)
+            if comparable and totals["rateAvailable"]
+            else None
         ),
     }
 
 
 @router.get("/analytics/recommendation-effect")
 def recommendation_effect(
-    request: Request, db: Session = Depends(get_db), _: User = Depends(get_current_user)
+    request: Request,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+    data_scope: DataScope = "REAL",
 ) -> dict:
     """Compare recommended slots with operator-chosen slots on real measured data."""
     schedules = db.scalars(select(PublishSchedule).order_by(PublishSchedule.scheduled_at)).all()
-    metrics = _metric_index(db)
+    metrics = _metric_index(db, data_scope)
     rows = []
     for schedule in schedules:
         items = metrics.get(schedule.id, [])
-        impressions = sum(item.impressions for item in items)
-        engagement = sum(item.engagement_total for item in items)
         article = db.get(ContentArticle, schedule.article_id)
         rows.append(
             {
@@ -493,11 +530,8 @@ def recommendation_effect(
                     if schedule.actual_publish_at
                     else None
                 ),
-                "sampleCount": len(items),
-                "impressions": impressions,
-                "engagementTotal": engagement,
-                # 百分比口径，与平台/时间对比接口保持一致
-                "engagementRate": round(engagement / impressions * 100, 2) if impressions else 0,
+                **aggregate_metrics(list(items)),
+                "dataScope": data_scope,
             }
         )
 
@@ -545,33 +579,39 @@ def recommendation_effect(
             },
             "comparison": [
                 _effect_bucket(
-                    "推荐时段", [item for item in rows if item["timeSource"] != "CUSTOM"]
+                    "推荐时段", [item for item in rows if item["timeSource"] != "CUSTOM"], metrics
                 ),
                 _effect_bucket(
-                    "非推荐时段", [item for item in rows if item["timeSource"] == "CUSTOM"]
+                    "非推荐时段", [item for item in rows if item["timeSource"] == "CUSTOM"], metrics
                 ),
             ],
             "experimentGroups": [
-                _effect_bucket("实验组（推荐时间）", group_rows.get("RECOMMENDED_TIME", [])),
-                _effect_bucket("对照组（固定时间）", group_rows.get("FIXED_TIME", [])),
+                _effect_bucket(
+                    "实验组（推荐时间）", group_rows.get("RECOMMENDED_TIME", []), metrics
+                ),
+                _effect_bucket("对照组（固定时间）", group_rows.get("FIXED_TIME", []), metrics),
             ],
             "items": rows[-60:],
             "notice": (
                 "对比仅使用已录入的真实或已标注来源的互动数据；"
                 "标记为 SIMULATED 的样本不能作为效果结论。"
             ),
+            "dataScope": data_scope,
         },
     )
 
 
 @router.get("/analytics/report")
-def report(_: User = Depends(get_current_user), db: Session = Depends(get_db)) -> StreamingResponse:
-    summary = summarize(db)
-    platforms = grouped(db, "platform")
-    times = grouped(db, "group_type")
+def report(
+    _: User = Depends(get_current_user),
+    db: Session = Depends(get_db),
+    data_scope: DataScope = "REAL",
+) -> StreamingResponse:
+    summary = summarize(db, data_scope=data_scope)
+    platforms = grouped(db, "platform", data_scope=data_scope)
+    times = grouped(db, "group_type", data_scope=data_scope)
     platform_rows = "".join(
-        f"<tr><td>{item['name']}</td><td>{item['sampleCount']}</td>"
-        f"<td>{item['engagementRate']}%</td></tr>"
+        f"<tr><td>{item['name']}</td><td>{item['sampleCount']}</td><td>{_rate_text(item)}</td></tr>"
         for item in platforms
     )
     html = (
@@ -579,9 +619,11 @@ def report(_: User = Depends(get_current_user), db: Session = Depends(get_db)) -
         "<title>ContentPilot 数据复盘</title><style>body{font:16px/1.7 sans-serif;"
         "max-width:900px;margin:40px auto;color:#172033}table{border-collapse:collapse;"
         "width:100%}td,th{border:1px solid #ddd;padding:8px}</style>"
-        f"<h1>ContentPilot 数据复盘报告</h1><p>生成时间：{datetime.now():%Y-%m-%d %H:%M}</p>"
-        f"<p>样本数：{summary['sampleCount']}；互动率：{summary['engagementRate']}%；"
-        f"其中 SIMULATED：{summary['simulatedCount']} 条。</p>"
+        f"<h1>ContentPilot 数据复盘报告</h1><p>生成时间：{business_now():%Y-%m-%d %H:%M}</p>"
+        f"<p>数据范围：{data_scope}；样本数：{summary['sampleCount']}；互动率：{_rate_text(summary)}；"
+        f"其中 SIMULATED：{summary['simulatedCount']} 条；"
+        f"未知分母：{summary['unknownBasisCount']} 条。</p>"
+        f"<p>按分母分组：{summary['byBasis']}。SIMULATED 仅用于演示。</p>"
         "<h2>平台对比</h2><table><tr><th>平台</th><th>样本</th><th>互动率</th></tr>"
         f"{platform_rows}</table><h2>时间组对比</h2><pre>{times}</pre>"
     )
@@ -594,11 +636,14 @@ def report(_: User = Depends(get_current_user), db: Session = Depends(get_db)) -
 
 @router.post("/analytics/ai-summary")
 def ai_summary(
-    request: Request, db: Session = Depends(get_db), _: User = Depends(get_current_user)
+    request: Request,
+    db: Session = Depends(get_db),
+    _: User = Depends(get_current_user),
+    data_scope: DataScope = "REAL",
 ) -> dict:
-    summary = summarize(db)
-    platforms = grouped(db, "platform")
-    times = grouped(db, "group_type")
+    summary = summarize(db, data_scope=data_scope)
+    platforms = grouped(db, "platform", data_scope=data_scope)
+    times = grouped(db, "group_type", data_scope=data_scope)
     if not summary["sampleCount"]:
         return success_response(
             request,
@@ -610,17 +655,19 @@ def ai_summary(
                 "provider": "RULE_BASED",
             },
         )
-    best = platforms[0] if platforms else None
     return success_response(
         request,
         {
             "summary": (
-                f"当前共 {summary['sampleCount']} 条样本，总互动率为 {summary['engagementRate']}%。"
+                f"当前范围 {data_scope} 共 {summary['sampleCount']} 条样本，"
+                f"互动率：{_rate_text(summary)}。"
             ),
-            "keyFindings": [f"{best['name']} 当前样本互动率最高，为 {best['engagementRate']}%"]
-            if best
-            else [],
-            "timeInsights": [f"{x['name']}：{x['engagementRate']}%" for x in times],
+            "keyFindings": [
+                f"{item['name']}：{_rate_text(item)}（{item['metricBasis']}）" for item in platforms
+            ],
+            "timeInsights": [f"{x['name']}：{_rate_text(x)}（{x['metricBasis']}）" for x in times],
+            "byBasis": summary["byBasis"],
+            "dataScope": data_scope,
             "recommendations": [
                 "持续补充真实数据后再判断时间推荐效果",
                 "对高表现内容主题进行小规模复现",
@@ -629,7 +676,16 @@ def ai_summary(
                 [f"包含 {summary['simulatedCount']} 条演示数据，不能作为真实效果结论"]
                 if summary["simulatedCount"]
                 else ["结论仅适用于当前已导入样本和统计口径"]
+            )
+            + (
+                ["存在未知或混合分母，必须按分母分组解释，不能比较总互动率"]
+                if not summary["rateAvailable"]
+                else []
             ),
             "provider": "RULE_BASED",
         },
     )
+
+
+def _rate_text(item: dict) -> str:
+    return f"{item['engagementRate']}%" if item["rateAvailable"] else "不可用（未知或混合分母）"

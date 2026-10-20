@@ -12,21 +12,25 @@ only contains WeChat-specific page automation and the draft publisher.
 from __future__ import annotations
 
 import asyncio
-import ipaddress
 import mimetypes
 import re
 import tempfile
 import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import unquote, urljoin, urlsplit
+from urllib.parse import urlsplit
 
-import httpx
 from playwright.async_api import Page
 
-from app.core.config import BACKEND_DIR, settings
+from app.core.config import settings
+from app.core.paths import TMP_DIR, ensure_directory, local_media_path
+from app.core.urls import fetch_public_image
 from app.publishers.base import PublishResult
-from app.publishers.browser_session import BrowserSessionManager, LoginSession
+from app.publishers.browser_session import (
+    BrowserSessionManager,
+    LoginSession,
+    plain_text_to_html,
+)
 
 WECHAT_HOME = "https://mp.weixin.qq.com/"
 BODY_EDITOR_SELECTOR = ".rich_media_content .ProseMirror"
@@ -63,6 +67,7 @@ _manager = BrowserSessionManager(
     profile_root_setting="wechat_browser_profile_root",
     headless_setting="wechat_browser_headless",
     platform_label="微信公众号",
+    platform_id="wechat",
     logged_in_check=_wechat_logged_in,
     login_timeout=60_000,
 )
@@ -79,82 +84,31 @@ _logged_in = _manager._logged_in  # noqa: SLF001
 
 
 def _local_image(value: str) -> Path | None:
-    if not value:
-        return None
-    direct = Path(value)
-    if direct.is_file():
-        return direct.resolve()
-    parsed = urlsplit(value)
-    if parsed.scheme in {"http", "https"}:
-        if (parsed.hostname or "").lower() not in {"127.0.0.1", "localhost", "::1"}:
-            return None
-        path_only = unquote(parsed.path)
-    else:
-        path_only = unquote(value.split("?", 1)[0])
-    if path_only.startswith("/uploads/"):
-        candidate = BACKEND_DIR.parent / path_only.lstrip("/")
-        return candidate.resolve() if candidate.is_file() else None
-    if path_only.startswith("/media/"):
-        candidate = BACKEND_DIR.parent / "frontend" / "public" / path_only.lstrip("/")
-        return candidate.resolve() if candidate.is_file() else None
-    return None
-
-
-def _ensure_public_image_url(value: str) -> None:
-    parsed = urlsplit(value)
-    if parsed.scheme != "https" or not parsed.hostname:
-        raise ValueError("远程图片必须使用有效的 HTTPS 地址")
-    host = parsed.hostname.lower()
-    if host in {"localhost", "localhost.localdomain"} or host.endswith(".localhost"):
-        raise ValueError("不允许从本机或内网地址下载远程图片")
-    try:
-        host_ip = ipaddress.ip_address(host)
-    except ValueError:
-        host_ip = None
-    if host_ip is not None and not host_ip.is_global:
-        raise ValueError("不允许从本机或内网地址下载远程图片")
+    return local_media_path(value, local_hosts_only=True)
 
 
 async def _download_image(value: str, target_dir: Path, index: int) -> Path:
-    current_url = value
-    async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
-        for _ in range(5):
-            _ensure_public_image_url(current_url)
-            response = await client.get(
-                current_url,
-                headers={
-                    "User-Agent": (
-                        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
-                        "AppleWebKit/537.36 Chrome/138.0 Safari/537.36"
-                    ),
-                    "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
-                    "Referer": f"{urlsplit(current_url).scheme}://{urlsplit(current_url).netloc}/",
-                },
-            )
-            if response.is_redirect:
-                location = response.headers.get("location", "")
-                if not location:
-                    raise ValueError("远程图片重定向地址为空")
-                current_url = urljoin(current_url, location)
-                continue
-            response.raise_for_status()
-            break
-        else:
-            raise ValueError("远程图片重定向次数过多")
-
-    content_type = response.headers.get("content-type", "").split(";", 1)[0].lower()
+    fetched = await fetch_public_image(
+        value,
+        max_bytes=10 * 1024 * 1024,
+        require_https=True,
+        headers={
+            "User-Agent": (
+                "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+                "AppleWebKit/537.36 Chrome/138.0 Safari/537.36"
+            ),
+            "Accept": "image/avif,image/webp,image/apng,image/*,*/*;q=0.8",
+        },
+    )
+    content_type = fetched.content_type
     if not content_type.startswith("image/"):
         raise ValueError("远程地址返回的内容不是图片")
-    if not response.content:
-        raise ValueError("远程图片文件为空")
-    if len(response.content) > 10 * 1024 * 1024:
-        raise ValueError("单张图片不能超过 10MB")
 
-    suffix = Path(urlsplit(current_url).path).suffix.lower()
+    suffix = Path(urlsplit(fetched.url).path).suffix.lower()
     if suffix not in {".jpg", ".jpeg", ".png", ".gif", ".webp", ".bmp"}:
         suffix = mimetypes.guess_extension(content_type) or ".jpg"
     target = target_dir / f"wechat-image-{index}{suffix}"
-    target.write_bytes(response.content)
+    target.write_bytes(fetched.content)
     return target
 
 
@@ -317,7 +271,9 @@ class WechatBrowserDraftPublisher:
         image_temp_dir: tempfile.TemporaryDirectory[str] | None = None
         try:
             image_values = [str(value) for value in request.get("images", []) if value]
-            image_temp_dir = tempfile.TemporaryDirectory(prefix="contentpilot-wechat-images-")
+            image_temp_dir = tempfile.TemporaryDirectory(
+                prefix="wechat-images-", dir=ensure_directory(TMP_DIR)
+            )
             image_paths = await _materialize_images(image_values, Path(image_temp_dir.name))
             session = await _launch(self.account_id, headless=settings.wechat_browser_headless)
             page = await _open_article_editor(session)
@@ -328,9 +284,7 @@ class WechatBrowserDraftPublisher:
             if author and await page.locator("#author").count():
                 await _set_form_field(page, "#author", author, "作者")
 
-            safe_html = content_html or "".join(
-                f"<p>{line}</p>" for line in content.splitlines() if line.strip()
-            )
+            safe_html = content_html or plain_text_to_html(content)
             await _insert_html(page, safe_html)
             image_inserted_count = await _append_images(page, image_paths)
             if image_inserted_count != len(image_values):

@@ -9,6 +9,7 @@ from sqlalchemy import (
     DateTime,
     Float,
     ForeignKey,
+    Index,
     Integer,
     String,
     Text,
@@ -73,6 +74,12 @@ class ContentVariant(TimestampMixin, Base):
     manual_edit_ratio: Mapped[float] = mapped_column(Float, default=0)
     review_status: Mapped[str] = mapped_column(String(30), default="PENDING", index=True)
     review_detail_json: Mapped[dict] = mapped_column(JSON, default=dict)
+    # Hash of the exact content (platform/title/body/tags/source) that the
+    # current review or manual approval refers to. NULL means "legacy review
+    # without a fingerprint" and must not be treated as current after an edit.
+    review_fingerprint: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    content_revision: Mapped[int] = mapped_column(Integer, default=1, server_default="1")
+    __mapper_args__ = {"version_id_col": content_revision}
     original_generated_text: Mapped[str | None] = mapped_column(Text, nullable=True)
     article: Mapped[ContentArticle] = relationship(back_populates="variants")
 
@@ -410,6 +417,9 @@ class EngagementMetric(TimestampMixin, Base):
     followers: Mapped[int] = mapped_column(Integer, default=0)
     engagement_total: Mapped[int] = mapped_column(Integer, default=0)
     engagement_rate: Mapped[float] = mapped_column(Float, default=0)
+    metric_basis: Mapped[str] = mapped_column(
+        String(30), default="UNKNOWN", server_default="UNKNOWN"
+    )
     group_type: Mapped[str] = mapped_column(String(30), default="RECOMMENDED_TIME")
     data_source: Mapped[str] = mapped_column(String(30), default="MANUAL")
 
@@ -490,6 +500,31 @@ class GenerationTask(TimestampMixin, Base):
     options_json: Mapped[dict] = mapped_column(JSON, default=dict)
 
 
+class TaskDispatch(TimestampMixin, Base):
+    """Persistent dispatch intent for a schedule or generation task.
+
+    The row is written in the same transaction as the business task, so a crash
+    between "commit" and "hand to the in-process scheduler" leaves a record that
+    the periodic dispatcher can pick up.
+    """
+
+    __tablename__ = "task_dispatch"
+    __table_args__ = (
+        UniqueConstraint("task_type", "task_id", name="uq_task_dispatch_task"),
+        Index("ix_task_dispatch_status_run_at", "status", "run_at"),
+    )
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    task_type: Mapped[str] = mapped_column(String(40))
+    task_id: Mapped[str] = mapped_column(String(64))
+    revision: Mapped[str] = mapped_column(String(64), default="")
+    run_at: Mapped[datetime] = mapped_column(DateTime)
+    status: Mapped[str] = mapped_column(String(20), default="PENDING")
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class SystemSetting(TimestampMixin, Base):
     __tablename__ = "system_setting"
     id: Mapped[int] = mapped_column(primary_key=True)
@@ -497,3 +532,33 @@ class SystemSetting(TimestampMixin, Base):
     setting_value: Mapped[str] = mapped_column(Text, default="")
     is_secret: Mapped[bool] = mapped_column(Boolean, default=False)
     description: Mapped[str | None] = mapped_column(String(255), nullable=True)
+
+
+class LlmUsageEntry(Base):
+    """Immutable billing evidence, deliberately independent of editable content."""
+
+    __tablename__ = "llm_usage_entry"
+    id: Mapped[str] = mapped_column(String(36), primary_key=True)
+    legacy_variant_id: Mapped[int | None] = mapped_column(Integer, unique=True, nullable=True)
+    provider: Mapped[str] = mapped_column(String(50))
+    model: Mapped[str] = mapped_column(String(255))
+    operation: Mapped[str] = mapped_column(String(50))
+    status: Mapped[str] = mapped_column(String(30))
+    prompt_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    completion_tokens: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    input_price: Mapped[float] = mapped_column(Float, default=0)
+    output_price: Mapped[float] = mapped_column(Float, default=0)
+    currency: Mapped[str] = mapped_column(String(10), default="CNY")
+    estimated_cost: Mapped[float | None] = mapped_column(Float, nullable=True)
+    reserved_cost: Mapped[float] = mapped_column(Float, default=0)
+    pricing_status: Mapped[str] = mapped_column(String(30))
+    error_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), index=True)
+    completed_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
+class LlmBudgetMonth(Base):
+    __tablename__ = "llm_budget_month"
+    # Month and currency together isolate independent accounting units.
+    id: Mapped[str] = mapped_column(String(20), primary_key=True)
+    reserved_cost: Mapped[float] = mapped_column(Float, default=0)

@@ -9,9 +9,12 @@ from sqlalchemy.orm import Session
 
 from app.core.config import settings
 from app.core.credentials import decrypt_json, encrypt_json, encrypt_secret, secret_hint
+from app.core.exceptions import AppException
 from app.models.business import PlatformAccount, PlatformAuthLog
 from app.models.user import User
 from app.publishers.base import PlatformPublisher, PublishResult
+from app.publishers.bluesky import BlueskyPublisher
+from app.publishers.mastodon import MastodonPublisher
 from app.publishers.official import (
     WechatDraftPublisher,
     WeiboPublisher,
@@ -25,13 +28,15 @@ from app.publishers.x_official import XPublisher
 from app.publishers.xhs_mcp import XiaohongshuMCPPublisher, mcp_check_login
 from app.schemas.platform_account import PlatformAccountUpsert
 
-PLATFORMS = ("WEIBO", "WECHAT_OFFICIAL", "XIAOHONGSHU", "TOUTIAO", "X")
+PLATFORMS = ("WEIBO", "WECHAT_OFFICIAL", "XIAOHONGSHU", "TOUTIAO", "X", "BLUESKY", "MASTODON")
 PLATFORM_NAMES = {
     "WEIBO": "微博",
     "WECHAT_OFFICIAL": "微信公众号",
     "XIAOHONGSHU": "小红书",
     "TOUTIAO": "今日头条",
     "X": "X",
+    "BLUESKY": "Bluesky",
+    "MASTODON": "Mastodon",
 }
 DEFAULT_CAPABILITIES = {
     "WEIBO": ["TEXT_PUBLISH", "IMAGE_PUBLISH", "STATUS_READ"],
@@ -39,6 +44,8 @@ DEFAULT_CAPABILITIES = {
     "XIAOHONGSHU": ["COPYWRITING", "IMAGE_PACKAGE", "MANUAL_CONFIRM"],
     "TOUTIAO": ["DRAFT_CREATE", "ARTICLE_PUBLISH", "STATUS_READ"],
     "X": ["TEXT_PUBLISH", "STATUS_READ"],
+    "BLUESKY": ["TEXT_PUBLISH", "IMAGE_PUBLISH", "STATUS_READ"],
+    "MASTODON": ["TEXT_PUBLISH", "IMAGE_PUBLISH", "STATUS_READ"],
 }
 
 WECHAT_DRAFT_CAPABILITIES = {"DRAFT_CREATE", "DRAFT_UPDATE", "DRAFT_READ", "DRAFT_DELETE"}
@@ -49,8 +56,31 @@ DEFAULT_PUBLISH_MODES = {
     "XIAOHONGSHU": "MANUAL_CONFIRM",
     "TOUTIAO": "BROWSER_PUBLISH",
     "X": "REAL_API",
+    "BLUESKY": "REAL_API",
+    "MASTODON": "REAL_API",
 }
 CONNECTION_GUIDES = {
+    "MASTODON": {
+        "mode": "ACCESS_TOKEN",
+        "consoleUrl": "https://joinmastodon.org/servers",
+        "steps": [
+            "选择 Mastodon 服务器并注册账号，遵守所在服务器的规则",
+            "在自己的服务器打开首选项 → 开发 → 新建应用",
+            "授予 read:accounts、write:statuses、write:media；read:statuses 为可选读取权限",
+            "填写服务器 HTTPS 网址和访问令牌；令牌仅加密保存在本机数据库中",
+            "保存后检测真实账号身份；真实发布默认关闭，启用后才会执行公开发布排期",
+        ],
+    },
+    "BLUESKY": {
+        "mode": "APP_PASSWORD",
+        "consoleUrl": "https://bsky.app/settings/app-passwords",
+        "steps": [
+            "登录 Bluesky 并创建项目专用应用密码，无需开启私信权限",
+            "填写完整账号名和应用密码；应用密码仅加密保存在本机数据库中",
+            "保存后点击检测连接，核对返回的账号身份；连接成功不代表已发布内容",
+            "真实发布默认关闭，审核具体内容后再启用真实发布并创建排期",
+        ],
+    },
     "WEIBO": {
         "mode": "OFFICIAL_OAUTH",
         "consoleUrl": "https://open.weibo.com/apps",
@@ -137,7 +167,7 @@ def public_account(
     )
     if platform == "TOUTIAO":
         available_publish_modes = ["BROWSER_PUBLISH"] if local_publishing_enabled else []
-    elif platform == "X":
+    elif platform in {"X", "BLUESKY", "MASTODON"}:
         available_publish_modes = []
     elif platform == "XIAOHONGSHU":
         available_publish_modes = (
@@ -174,6 +204,8 @@ def public_account(
             "appId": "",
             "clientId": "",
             "secretConfigured": False,
+            "appPasswordConfigured": False,
+            "instanceUrl": "",
             "accessTokenConfigured": False,
             "refreshTokenConfigured": False,
             "tokenHint": "",
@@ -197,18 +229,35 @@ def public_account(
             "allow_submit_publish",
             "allow_public_publish",
             "wechat_connection_method",
+            "identifier",
         )
         if config.get(key) not in (None, "")
     }
+    if platform == "MASTODON":
+        safe_config.update(
+            {
+                public_key: config[private_key]
+                for public_key, private_key in (
+                    ("instanceUrl", "instance_url"),
+                    ("accountId", "mastodon_account_id"),
+                    ("acct", "mastodon_acct"),
+                    ("maxCharacters", "mastodon_max_characters"),
+                    ("charactersReservedPerUrl", "mastodon_characters_reserved_per_url"),
+                    ("maxMediaAttachments", "mastodon_max_media_attachments"),
+                )
+                if config.get(private_key) not in (None, "")
+            }
+        )
     browser_mode_disabled = (
         platform == "XIAOHONGSHU"
         and not settings.experimental_browser_publishing_enabled
         and account.publish_mode in {"CDP_PUBLISH", "MCP_PUBLISH"}
     )
     public_publish_enabled = bool(
-        platform in {"X", "TOUTIAO"} and config.get("allow_public_publish") is True
+        platform in {"X", "TOUTIAO", "BLUESKY", "MASTODON"}
+        and config.get("allow_public_publish") is True
     )
-    if platform == "X":
+    if platform in {"X", "BLUESKY", "MASTODON"}:
         available_publish_modes = ["REAL_API"] if public_publish_enabled else []
     caps = (
         DEFAULT_CAPABILITIES["XIAOHONGSHU"]
@@ -254,6 +303,10 @@ def public_account(
             if platform == "TOUTIAO"
             else config.get("x_username", "")
             if platform == "X"
+            else config.get("bluesky_handle", config.get("identifier", ""))
+            if platform == "BLUESKY"
+            else config.get("mastodon_acct", "")
+            if platform == "MASTODON"
             else config.get("wechat_login_username", "")
             if platform == "WECHAT_OFFICIAL" and account.auth_type == "QR_LOGIN"
             else ""
@@ -263,9 +316,13 @@ def public_account(
         "appId": account.app_id or "" if include_configuration else "",
         "clientId": account.client_id or "" if include_configuration else "",
         "secretConfigured": bool(config.get("app_secret")),
+        "appPasswordConfigured": bool(config.get("app_password")),
+        "instanceUrl": config.get("instance_url", "") if platform == "MASTODON" else "",
         "accessTokenConfigured": bool(account.access_token_encrypted),
         "refreshTokenConfigured": bool(account.refresh_token_encrypted),
-        "tokenHint": secret_hint(account.access_token_encrypted) if include_configuration else "",
+        "tokenHint": secret_hint(account.access_token_encrypted)
+        if include_configuration and platform != "MASTODON"
+        else "",
         "tokenExpiresAt": account.token_expires_at.isoformat()
         if account.token_expires_at
         else None,
@@ -295,9 +352,18 @@ def effective_status(account: PlatformAccount) -> str:
         if not settings.wechat_browser_publishing_enabled:
             return "DISABLED"
         return account.status or "LOGIN_REQUIRED"
-    if account.token_expires_at and account.token_expires_at <= datetime.now():
-        return "TOKEN_EXPIRED"
+    if account.token_expires_at:
+        now = datetime.now(UTC).replace(tzinfo=None) if account.platform == "X" else datetime.now()
+        if account.token_expires_at <= now:
+            if account.platform == "BLUESKY" and account.refresh_token_encrypted:
+                return account.status
+            return "TOKEN_EXPIRED"
     return account.status
+
+
+def require_account_enabled(account: PlatformAccount) -> None:
+    if account.status == "DISABLED":
+        raise AppException(40087, "平台账号已停用，请先在账号配置中重新启用")
 
 
 def _parse_datetime(value: Any) -> datetime | None:
@@ -336,7 +402,8 @@ def clear_xhs_session_metadata(account: PlatformAccount) -> None:
     for key in ("xhs_login_username", "xhs_last_login_at", "xhs_last_seen_at"):
         config.pop(key, None)
     account.credentials_encrypted = encrypt_json(config)
-    account.status = "LOGIN_REQUIRED"
+    if account.status != "DISABLED":
+        account.status = "LOGIN_REQUIRED"
     account.last_error = None
 
 
@@ -360,7 +427,8 @@ def record_wechat_session(account: PlatformAccount, username: str, checked_at: d
         config["wechat_last_login_at"] = checked_at.isoformat()
     config["wechat_last_seen_at"] = checked_at.isoformat()
     account.credentials_encrypted = encrypt_json(config)
-    account.status = "CONNECTED"
+    if account.status != "DISABLED":
+        account.status = "CONNECTED"
     account.last_error = None
     if account.auth_type == "QR_LOGIN" or account.publish_mode == "BROWSER_DRAFT":
         account.access_token_encrypted = None
@@ -373,7 +441,8 @@ def clear_toutiao_session_metadata(account: PlatformAccount) -> None:
     for key in ("toutiao_login_username", "toutiao_last_login_at", "toutiao_last_seen_at"):
         config.pop(key, None)
     account.credentials_encrypted = encrypt_json(config)
-    account.status = "LOGIN_REQUIRED"
+    if account.status != "DISABLED":
+        account.status = "LOGIN_REQUIRED"
     account.last_error = None
 
 
@@ -382,7 +451,8 @@ def clear_wechat_session_metadata(account: PlatformAccount) -> None:
     for key in ("wechat_login_username", "wechat_last_login_at", "wechat_last_seen_at"):
         config.pop(key, None)
     account.credentials_encrypted = encrypt_json(config)
-    account.status = "LOGIN_REQUIRED"
+    if account.status != "DISABLED":
+        account.status = "LOGIN_REQUIRED"
     account.last_error = None
 
 
@@ -392,6 +462,14 @@ def _build_publish_hint(platform: str, caps: list[str], config: dict) -> str:
         return "支持调用微博开放 API 自动发布图文内容。"
     if platform == "X":
         return "支持通过 X 官方 API 自动发布文字内容；图片上传尚未启用。"
+    if platform == "BLUESKY":
+        if config.get("allow_public_publish"):
+            return "支持通过 Bluesky 官方接口发布图文；连接检测仅验证账号，实际发布以平台回执为准。"
+        return "可使用应用密码检测账号连接；真实发布开关尚未开启，不会发送帖文。"
+    if platform == "MASTODON":
+        if config.get("allow_public_publish"):
+            return "支持通过所在 Mastodon 服务器的官方 API 发布图文，执行结果以平台回执为准。"
+        return "可检测 Mastodon 服务器与账号连接；真实发布开关尚未开启，不会发送帖文。"
     if platform == "XIAOHONGSHU":
         if not settings.experimental_browser_publishing_enabled:
             return "到点生成文案与图片交付包，由运营人员前往小红书创作中心人工发布。"
@@ -430,6 +508,7 @@ def upsert_account(
     db: Session, user: User, platform: str, payload: PlatformAccountUpsert
 ) -> PlatformAccount:
     account = get_platform_account(db, platform)
+    previous_status = account.status if account else None
     if not account:
         account = PlatformAccount(
             user_id=user.id,
@@ -440,13 +519,44 @@ def upsert_account(
         db.add(account)
     else:
         account.updated_by = user.id
+    config = decrypt_json(account.credentials_encrypted)
     credentials_changed = bool(
         payload.app_secret
         or payload.app_id != account.app_id
         or (payload.client_id or payload.app_id) != account.client_id
         or payload.auth_type != account.auth_type
     )
-    config = decrypt_json(account.credentials_encrypted)
+    if platform == "BLUESKY":
+        credentials_changed = bool(
+            payload.app_password
+            or payload.identifier != config.get("identifier")
+            or payload.auth_type != account.auth_type
+        )
+        config["identifier"] = payload.identifier
+        if payload.app_password:
+            config["app_password"] = payload.app_password
+        if credentials_changed:
+            for key in ("bluesky_did", "bluesky_handle", "bluesky_last_checked_at"):
+                config.pop(key, None)
+    if platform == "MASTODON":
+        credentials_changed = bool(
+            payload.access_token
+            or payload.instance_url != config.get("instance_url")
+            or payload.auth_type != account.auth_type
+        )
+        config["instance_url"] = payload.instance_url
+        if credentials_changed:
+            for key in (
+                "mastodon_account_id",
+                "mastodon_acct",
+                "mastodon_max_characters",
+                "mastodon_characters_reserved_per_url",
+                "mastodon_max_media_attachments",
+                "mastodon_image_size_limit",
+                "mastodon_last_checked_at",
+            ):
+                config.pop(key, None)
+            account.last_test_at = None
     if platform == "X" and credentials_changed:
         config.pop("x_oauth_pending", None)
     config.update(
@@ -473,6 +583,8 @@ def upsert_account(
     )
     if payload.app_secret:
         config["app_secret"] = payload.app_secret
+    if not payload.enabled:
+        config.pop("x_oauth_pending", None)
     account.account_name = payload.account_name
     account.auth_type = payload.auth_type
     account.publish_mode = payload.publish_mode
@@ -506,7 +618,20 @@ def upsert_account(
         account.refresh_token_encrypted = None
         account.token_expires_at = None
     account.capabilities_json = DEFAULT_CAPABILITIES[platform]
-    account.status = "NOT_CONFIGURED" if not payload.enabled else _configured_status(account)
+    if platform == "WECHAT_OFFICIAL" and payload.allow_submit_publish:
+        account.capabilities_json = [*account.capabilities_json, WECHAT_PUBLISH_CAPABILITY]
+    if platform == "MASTODON":
+        account.refresh_token_encrypted = None
+        account.token_expires_at = None
+        if not payload.enabled:
+            account.status = "DISABLED"
+        elif not credentials_changed and previous_status not in {None, "DISABLED"}:
+            assert previous_status is not None
+            account.status = previous_status
+        else:
+            account.status = _configured_status(account)
+    else:
+        account.status = "DISABLED" if not payload.enabled else _configured_status(account)
     account.last_error = None
     db.flush()
     log_auth(db, account, "CONFIGURE", "SUCCESS", "平台账号配置已保存")
@@ -531,6 +656,14 @@ def _configured_status(account: PlatformAccount) -> str:
         return "CONNECTING"
     if account.platform == "X" and account.client_id:
         return "CONNECTING"
+    if account.platform == "BLUESKY":
+        config = decrypt_json(account.credentials_encrypted)
+        if config.get("identifier") and config.get("app_password"):
+            return "CONNECTING"
+    if account.platform == "MASTODON":
+        config = decrypt_json(account.credentials_encrypted)
+        if config.get("instance_url") and account.access_token_encrypted:
+            return "CONNECTING"
     return "NOT_CONFIGURED"
 
 
@@ -543,6 +676,10 @@ def account_validator(db: Session, account: PlatformAccount) -> PlatformPublishe
         return WechatDraftPublisher(db, account)
     if account.platform == "X":
         return XPublisher(db, account)
+    if account.platform == "BLUESKY":
+        return BlueskyPublisher(db, account)
+    if account.platform == "MASTODON":
+        return MastodonPublisher(db, account)
     if account.platform == "TOUTIAO":
         return ToutiaoBrowserPublisher(account.id)
     if not settings.experimental_browser_publishing_enabled:
@@ -551,6 +688,7 @@ def account_validator(db: Session, account: PlatformAccount) -> PlatformPublishe
 
 
 async def test_account(db: Session, account: PlatformAccount) -> PublishResult:
+    require_account_enabled(account)
     if account.platform == "WECHAT_OFFICIAL" and (
         account.auth_type == "QR_LOGIN" or account.publish_mode == "BROWSER_DRAFT"
     ):
@@ -568,6 +706,9 @@ async def test_account(db: Session, account: PlatformAccount) -> PublishResult:
             )
         else:
             logged, info = await wechat_check_login(account.id)
+            db.refresh(account, with_for_update=True)
+            require_account_enabled(account)
+            account.last_test_at = checked_at
             if logged:
                 account.status = "CONNECTED"
                 account.capabilities_json = ["DRAFT_CREATE", "DRAFT_UPDATE", "DRAFT_READ"]
@@ -616,6 +757,9 @@ async def test_account(db: Session, account: PlatformAccount) -> PublishResult:
             )
         else:
             logged, info = await toutiao_check_login(account.id)
+            db.refresh(account, with_for_update=True)
+            require_account_enabled(account)
+            account.last_test_at = checked_at
             if logged:
                 account.status = "CONNECTED"
                 account.capabilities_json = DEFAULT_CAPABILITIES["TOUTIAO"]
@@ -671,6 +815,9 @@ async def test_account(db: Session, account: PlatformAccount) -> PublishResult:
             db.flush()
             return result
         logged, info = await mcp_check_login()
+        db.refresh(account, with_for_update=True)
+        require_account_enabled(account)
+        account.last_test_at = checked_at
         if logged:
             account.status = "CONNECTED"
             account.capabilities_json = ["COPYWRITING", "IMAGE_PACKAGE", "MCP_PUBLISH"]
@@ -715,6 +862,31 @@ async def test_account(db: Session, account: PlatformAccount) -> PublishResult:
             if username:
                 config["x_username"] = username
             config["x_last_checked_at"] = account.last_test_at.isoformat()
+            account.credentials_encrypted = encrypt_json(config)
+        if account.platform == "BLUESKY":
+            config = decrypt_json(account.credentials_encrypted)
+            did = str(result.detail.get("did") or result.external_id or "")
+            if did:
+                config["bluesky_did"] = did
+            handle = str(result.detail.get("handle") or "")
+            if handle:
+                config["bluesky_handle"] = handle
+            config["bluesky_last_checked_at"] = account.last_test_at.isoformat()
+            account.credentials_encrypted = encrypt_json(config)
+        if account.platform == "MASTODON":
+            config = decrypt_json(account.credentials_encrypted)
+            for detail_key, config_key in (
+                ("account_id", "mastodon_account_id"),
+                ("acct", "mastodon_acct"),
+                ("max_characters", "mastodon_max_characters"),
+                ("characters_reserved_per_url", "mastodon_characters_reserved_per_url"),
+                ("max_media_attachments", "mastodon_max_media_attachments"),
+                ("image_size_limit", "mastodon_image_size_limit"),
+            ):
+                value = result.detail.get(detail_key)
+                if value is not None:
+                    config[config_key] = value
+            config["mastodon_last_checked_at"] = account.last_test_at.isoformat()
             account.credentials_encrypted = encrypt_json(config)
     elif result.error_code == "TOKEN_EXPIRED":
         account.status = "TOKEN_EXPIRED"

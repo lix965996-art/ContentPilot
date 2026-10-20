@@ -4,7 +4,7 @@
 #
 # Usage:
 #   .\scripts\new-customer.ps1 -Name acme -Port 8081 -ApiPort 8001
-#   cd ..\contentpilot-customers\acme
+#   cd .\var\deployments\customers\acme
 #   docker compose up -d --build
 
 param(
@@ -21,9 +21,11 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
-$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
+. (Join-Path $PSScriptRoot 'runtime-paths.ps1')
+$paths = Get-ContentPilotPaths
+$repoRoot = $paths.Project
 if (-not $OutputRoot) {
-  $OutputRoot = Join-Path (Split-Path $repoRoot -Parent) 'contentpilot-customers'
+  $OutputRoot = Join-Path $paths.Deployments 'customers'
 }
 $customerDir = Join-Path $OutputRoot $Name
 

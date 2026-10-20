@@ -23,6 +23,11 @@ import {
 } from 'lucide-vue-next'
 import { getApiErrorMessage } from '@/api/client'
 import { workflowApi } from '@/api/workflow'
+import { useAuthStore } from '@/stores/auth'
+import { useVariantDrafts, type VariantDraftPayload } from '@/composables/useVariantDrafts'
+import { useGenerationPolling, type GenerationTicket } from '@/composables/useGenerationPolling'
+import { useVisualTools } from '@/composables/useVisualTools'
+import { generationOutcome } from '@/utils/task-outcome'
 import EmptyState from '@/components/EmptyState.vue'
 import PageHeader from '@/components/PageHeader.vue'
 import PlatformIcon from '@/components/PlatformIcon.vue'
@@ -34,6 +39,10 @@ import WeiboPreview from '@/components/platform-preview/WeiboPreview.vue'
 import XiaohongshuPreview from '@/components/platform-preview/XiaohongshuPreview.vue'
 import WechatPreview from '@/components/platform-preview/WechatPreview.vue'
 import XPreview from '@/components/platform-preview/XPreview.vue'
+import BlueskyPreview from '@/components/platform-preview/BlueskyPreview.vue'
+import MastodonPreview from '@/components/platform-preview/MastodonPreview.vue'
+import { buildMastodonText, mastodonLimits, mastodonTextLength } from '@/utils/mastodon'
+import { blueskyTextLength, buildBlueskyText } from '@/utils/bluesky'
 import ToutiaoPreview from '@/components/platform-preview/ToutiaoPreview.vue'
 import type {
   Article,
@@ -56,6 +65,7 @@ const previewPlatformNames: Record<Platform, string> = {
 
 const route = useRoute()
 const router = useRouter()
+const auth = useAuthStore()
 const editorContent = ref<globalThis.HTMLTextAreaElement>()
 const articles = ref<Article[]>([])
 const selectedArticleId = ref<number>()
@@ -82,46 +92,29 @@ const wechatDraftStartedAt = ref<number>()
 const savingToutiaoDraft = ref(false)
 const toutiaoDraftStartedAt = ref<number>()
 const reviewResult = ref<Record<string, unknown>>()
-const saved = ref(true)
 const savedToast = ref(false)
-const autosaveState = ref<'SAVED' | 'DIRTY' | 'SAVING' | 'ERROR'>('SAVED')
-const autosaveError = ref('')
-const lastSavedAt = ref<number>()
-const recoveryDraft = ref<LocalVariantDraft>()
 const showWechatFormatter = ref(false)
-const visualMode = ref<'SEARCH' | 'GENERATE' | 'TRANSFORM'>('SEARCH')
-const visualLoading = ref(false)
-const visualOperationState = ref<'IDLE' | 'RUNNING' | 'SUCCESS' | 'FAILED'>('IDLE')
-const visualOperationProgress = ref(0)
-const visualOperationStage = ref('')
-const visualOperationElapsedMs = ref(0)
-const removingMediaId = ref<number>()
-const visualNotice = ref('')
-const visualKeyword = ref('')
-const visualPrompt = ref('')
-const imageSearchResults = ref<Array<Record<string, unknown>>>([])
 const wechatPreviewHtml = ref('')
 const wechatPreviewLoading = ref(false)
-const textImageModels = ref<string[]>([])
-const editImageModels = ref<string[]>([])
-const textImageModel = ref('Qwen/Qwen-Image')
-const editImageModel = ref('Qwen/Qwen-Image-Edit-2509')
-const imageSize = ref('1328x1328')
-const transformAssetId = ref<number>()
 const clock = ref(Date.now())
 const operationStartedAt = ref<number>()
-let pollingSequence = 0
+let articleLoadSequence = 0
+let loadedArticleId: number | undefined
 let clockTimer: number | undefined
-let autosaveTimer: number | undefined
-let localDraftTimer: number | undefined
 let wechatPreviewTimer: number | undefined
-let visualProgressTimer: number | undefined
 let wechatPreviewSequence = 0
-let syncingEditor = false
 const autoFittedWeiboVariantIds = new Set<number>()
 
 const options = reactive({
-  platforms: ['WEIBO', 'XIAOHONGSHU', 'WECHAT_OFFICIAL', 'TOUTIAO', 'X'] as Platform[],
+  platforms: [
+    'WEIBO',
+    'XIAOHONGSHU',
+    'WECHAT_OFFICIAL',
+    'TOUTIAO',
+    'X',
+    'BLUESKY',
+    'MASTODON',
+  ] as Platform[],
   style: '专业自然',
   length: 'MEDIUM' as 'SHORT' | 'MEDIUM' | 'LONG',
   target_audience: '',
@@ -143,18 +136,6 @@ const defaultWechatProfile: WechatFormatProfile = {
   link_footnotes: true,
 }
 const preferenceKey = (articleId: number) => `contentpilot_studio_preferences:${articleId}`
-const draftKey = (variantId: number) => `contentpilot_studio_draft:${variantId}`
-
-interface VariantDraftPayload {
-  title: string
-  content_text: string
-  hashtags: string[]
-}
-
-interface LocalVariantDraft extends VariantDraftPayload {
-  variantId: number
-  savedAt: number
-}
 
 const activeVersions = computed(() =>
   variants.value
@@ -166,6 +147,46 @@ const current = computed(
     activeVersions.value.find((item) => item.id === selectedVersionId.value) ||
     activeVersions.value[0],
 )
+const drafts = useVariantDrafts({
+  current,
+  editing,
+  fromVariant: (variant) => ({
+    title: cleanVisibleMarkdown(variant.title || ''),
+    content_text: cleanVisibleMarkdown(variant.contentText || ''),
+    hashtags: [...(variant.hashtagsJson || [])],
+  }),
+  update: (id, payload) => workflowApi.updateVariant(id, { ...payload }),
+  onSaved: (value) => {
+    variants.value = variants.value.map((item) => (item.id === value.id ? value : item))
+  },
+  errorMessage: (error) => getApiErrorMessage(error, '保存失败，草稿已保留在本机'),
+})
+const { saved, autosaveState, autosaveError, lastSavedAt, recoveryDraft } = drafts
+const generationPolling = useGenerationPolling({
+  articleId: () => selectedArticleId.value,
+  fetchTask: (id) => workflowApi.task(id),
+  fetchVariants: (id) => workflowApi.variants(id),
+  onTask: (result) => {
+    generationTask.value = result
+    if (
+      result.optionsJson?.generation_mode === 'DEEP' &&
+      result.platformsJson[0] &&
+      !result.platformsJson.includes(deepWorkbenchPlatform.value)
+    ) {
+      deepWorkbenchPlatform.value = result.platformsJson[0]
+    }
+    if (result.variants?.length) {
+      const byId = new Map(variants.value.map((item) => [item.id, item]))
+      result.variants.forEach((item) => byId.set(item.id, item))
+      variants.value = [...byId.values()]
+    }
+  },
+  onComplete: (_task, rows) => {
+    variants.value = rows
+    selectedVersionId.value = undefined
+    syncEditor()
+  },
+})
 const comparisonVersion = computed(() =>
   activeVersions.value.find((item) => item.id === comparisonVersionId.value),
 )
@@ -209,51 +230,6 @@ function snapshotEditing(): VariantDraftPayload {
   }
 }
 
-function sameDraft(left: VariantDraftPayload, right: VariantDraftPayload) {
-  return (
-    left.title === right.title &&
-    left.content_text === right.content_text &&
-    JSON.stringify(left.hashtags) === JSON.stringify(right.hashtags)
-  )
-}
-
-function readLocalDraft(variantId: number) {
-  try {
-    const raw = window.localStorage.getItem(draftKey(variantId))
-    if (!raw) return undefined
-    const value = JSON.parse(raw) as Partial<LocalVariantDraft>
-    if (
-      value.variantId !== variantId ||
-      typeof value.title !== 'string' ||
-      typeof value.content_text !== 'string' ||
-      !Array.isArray(value.hashtags) ||
-      typeof value.savedAt !== 'number'
-    ) {
-      window.localStorage.removeItem(draftKey(variantId))
-      return undefined
-    }
-    return value as LocalVariantDraft
-  } catch {
-    return undefined
-  }
-}
-
-function writeLocalDraft(variantId: number, payload: VariantDraftPayload) {
-  try {
-    const value: LocalVariantDraft = { variantId, savedAt: Date.now(), ...payload }
-    window.localStorage.setItem(draftKey(variantId), JSON.stringify(value))
-  } catch {
-    // 浏览器禁用本地存储时，服务端自动保存仍然有效。
-  }
-}
-
-function clearLocalDraft(variantId: number) {
-  try {
-    window.localStorage.removeItem(draftKey(variantId))
-  } catch {
-    // 无需阻断正常保存。
-  }
-}
 function cleanVisibleMarkdown(value: string) {
   return value
     .replace(/#/g, '')
@@ -310,6 +286,16 @@ const xStatusLength = computed(() => {
     .join(' ')
   return xWeightedLength([editing.content_text.trim(), topics].filter(Boolean).join('\n\n'))
 })
+const blueskyStatusLength = computed(() =>
+  blueskyTextLength(buildBlueskyText(editing.title, editing.content_text, editing.hashtags)),
+)
+
+const mastodonStatusLength = computed(() =>
+  mastodonTextLength(
+    buildMastodonText(editing.title, editing.content_text, editing.hashtags),
+    currentMastodonLimits.value.charactersReservedPerUrl,
+  ),
+)
 
 function topicName(value: string) {
   return value.replace(/#/g, '').trim()
@@ -348,15 +334,18 @@ function fitWeiboDraftForImage() {
     content = best || content.slice(0, 1)
   }
 
-  syncingEditor = true
-  editing.title = title
-  editing.content_text = content
-  editing.hashtags = hashtags
-  syncingEditor = false
+  drafts.replaceEditing({ title, content_text: content, hashtags })
+  drafts.stage()
   return true
 }
 
 function platformCopyText() {
+  if (activePlatform.value === 'MASTODON') {
+    return buildMastodonText(editing.title, editing.content_text, editing.hashtags)
+  }
+  if (activePlatform.value === 'BLUESKY') {
+    return buildBlueskyText(editing.title, editing.content_text, editing.hashtags)
+  }
   const topics = editing.hashtags.map(topicName).filter(Boolean)
   if (activePlatform.value === 'WEIBO') {
     const body = [weiboPreviewTitle.value, editing.content_text.trim()].filter(Boolean).join('\n\n')
@@ -412,6 +401,7 @@ function scheduleWechatPreview() {
 const currentAccount = computed(() =>
   accounts.value.find((item) => item.platform === activePlatform.value),
 )
+const currentMastodonLimits = computed(() => mastodonLimits(currentAccount.value?.config))
 const editorPlatformConfig = computed(
   () =>
     ({
@@ -451,6 +441,24 @@ const editorPlatformConfig = computed(
         tagPlaceholder: '添加 X 话题',
         tagHint: '发布时自动转换为 #话题，内部标题不会单独发送',
       },
+      BLUESKY: {
+        titleLabel: '首句标题',
+        titlePlaceholder: '标题会与正文合并发送',
+        titleMax: 100,
+        contentMax: 2000,
+        contentHint: `标题、正文与话题当前合计 ${blueskyStatusLength.value}/300 字符（按完整 emoji 计数），支持最多 4 张图片`,
+        tagPlaceholder: '添加 Bluesky 话题',
+        tagHint: '发布时自动转换为 #话题，计入 300 字符上限',
+      },
+      MASTODON: {
+        titleLabel: '首句标题',
+        titlePlaceholder: '标题会与正文合并发送',
+        titleMax: 100,
+        contentMax: Math.max(2000, currentMastodonLimits.value.maxCharacters * 2),
+        contentHint: `标题、正文与话题当前合计 ${mastodonStatusLength.value}/${currentMastodonLimits.value.maxCharacters} 字符，链接按 ${currentMastodonLimits.value.charactersReservedPerUrl} 字符计，最多 ${currentMastodonLimits.value.maxMediaAttachments} 张图片`,
+        tagPlaceholder: '添加 Mastodon 话题',
+        tagHint: '话题计入总长度；服务器会在发布时再次校验文字和图片限制',
+      },
       TOUTIAO: {
         titleLabel: '头条文章标题',
         titlePlaceholder: '2～30 个字，准确具体',
@@ -466,6 +474,38 @@ const previewMedia = computed(() => [
   ...media.value.filter((item) => item.selected !== false && item.usageType === 'COVER'),
   ...media.value.filter((item) => item.selected !== false && item.usageType === 'BODY'),
 ])
+const visual = useVisualTools({
+  selectedArticleId,
+  currentVariantId: () => current.value?.id,
+  media,
+  previewMedia,
+})
+const {
+  visualMode,
+  visualLoading,
+  visualSearchLoading,
+  visualOperationState,
+  visualOperationProgress,
+  visualOperationStage,
+  visualOperationElapsedMs,
+  removingMediaId,
+  visualNotice,
+  visualKeyword,
+  visualPrompt,
+  imageSearchResults,
+  textImageModels,
+  editImageModels,
+  textImageModel,
+  editImageModel,
+  imageSize,
+  transformAssetId,
+  searchVisuals,
+  selectVisual,
+  removePreviewMedia,
+  setPreviewCover,
+  generateVisual,
+  transformVisual,
+} = visual
 const terminalTask = computed(() =>
   generationTask.value
     ? ['SUCCESS', 'PARTIAL_SUCCESS', 'FAILED'].includes(generationTask.value.status)
@@ -683,10 +723,6 @@ function restorePreferences(articleId: number) {
   }
 }
 
-function sleep(milliseconds: number) {
-  return new Promise((resolve) => window.setTimeout(resolve, milliseconds))
-}
-
 async function loadArticles() {
   const data = await workflowApi.articles({ page_size: 100 })
   articles.value = data.items
@@ -697,23 +733,43 @@ async function loadArticles() {
   if (selectedArticleId.value) await loadArticle()
 }
 
+async function fetchArticleBundle(articleId: number) {
+  const [articleData, accountData, mediaData, latestDeepTask] = await Promise.all([
+    workflowApi.article(articleId),
+    workflowApi.platformAccounts(),
+    workflowApi.articleMedia(articleId),
+    workflowApi.latestDeepTask(articleId),
+  ])
+  const articleVariants = articleData.variants || (await workflowApi.variants(articleId))
+  return { articleData, accountData, mediaData, latestDeepTask, articleVariants }
+}
+
 async function loadArticle() {
   if (!selectedArticleId.value) return
-  pollingSequence += 1
-  const [articleData, accountData, mediaData, latestDeepTask] = await Promise.all([
-    workflowApi.article(selectedArticleId.value),
-    workflowApi.platformAccounts(),
-    workflowApi.articleMedia(selectedArticleId.value),
-    workflowApi.latestDeepTask(selectedArticleId.value),
-  ])
+  const articleId = selectedArticleId.value
+  const sequence = ++articleLoadSequence
+  visual.dispose()
+  generationPolling.cancel()
+  generating.value = false
+  regeneratingDeepPlatform.value = false
+  let bundle
+  try {
+    bundle = await fetchArticleBundle(articleId)
+  } catch (error) {
+    if (sequence === articleLoadSequence && articleId === selectedArticleId.value) {
+      if (loadedArticleId !== undefined) selectedArticleId.value = loadedArticleId
+      ElMessage.error(getApiErrorMessage(error, '文章加载失败，已保留当前内容'))
+    }
+    return
+  }
+  const { articleData, accountData, mediaData, latestDeepTask, articleVariants } = bundle
+  if (sequence !== articleLoadSequence || articleId !== selectedArticleId.value) return
+  loadedArticleId = articleId
   article.value = articleData
-  variants.value = articleData.variants || (await workflowApi.variants(selectedArticleId.value))
+  variants.value = articleVariants
   accounts.value = accountData
   media.value = mediaData
-  transformAssetId.value = mediaData[0]?.id
-  visualKeyword.value = articleData.topic || articleData.title
-  visualPrompt.value = `为文章《${articleData.title}》创作一张专业、真实、具有编辑感的配图，无文字、无水印、无品牌 Logo。${articleData.summary || articleData.topic || ''}`
-  void searchVisuals()
+  visual.resetForArticle(articleData, mediaData)
   options.target_audience = articleData.targetAudience || ''
   restorePreferences(articleData.id)
   if (route.query.mode === 'deep') options.generation_mode = 'DEEP'
@@ -728,35 +784,25 @@ async function loadArticle() {
     operationStartedAt.value = latestDeepTask.createdAt
       ? Date.parse(latestDeepTask.createdAt)
       : Date.now()
-    void pollTask(latestDeepTask.id)
-      .catch((error) => ElMessage.error(getApiErrorMessage(error, '恢复生成任务失败')))
-      .finally(() => (generating.value = false))
+    const ticket = generationPolling.begin(articleId)
+    void generationPolling
+      .poll(latestDeepTask.id, ticket)
+      .catch((error) => {
+        if (ticket.active()) ElMessage.error(getApiErrorMessage(error, '恢复生成任务失败'))
+      })
+      .finally(() => {
+        if (ticket.active()) generating.value = false
+      })
   }
 }
 
 function syncEditor() {
-  if (autosaveTimer) window.clearTimeout(autosaveTimer)
-  if (localDraftTimer) window.clearTimeout(localDraftTimer)
-  autosaveTimer = undefined
-  localDraftTimer = undefined
-  syncingEditor = true
-  editing.title = cleanVisibleMarkdown(current.value?.title || '')
-  editing.content_text = cleanVisibleMarkdown(current.value?.contentText || '')
-  editing.hashtags = [...(current.value?.hashtagsJson || [])]
-  syncingEditor = false
+  drafts.syncCurrent()
   reviewResult.value = current.value?.reviewDetailJson
   if (!comparisonVersionId.value || comparisonVersionId.value === current.value?.id) {
     comparisonVersionId.value = activeVersions.value.find(
       (item) => item.id !== current.value?.id,
     )?.id
-  }
-  saved.value = true
-  autosaveState.value = 'SAVED'
-  autosaveError.value = ''
-  recoveryDraft.value = current.value ? readLocalDraft(current.value.id) : undefined
-  if (recoveryDraft.value && sameDraft(recoveryDraft.value, snapshotEditing())) {
-    clearLocalDraft(recoveryDraft.value.variantId)
-    recoveryDraft.value = undefined
   }
   if (current.value && !recoveryDraft.value && !autoFittedWeiboVariantIds.has(current.value.id)) {
     autoFittedWeiboVariantIds.add(current.value.id)
@@ -767,33 +813,8 @@ function syncEditor() {
   }
 }
 
-async function pollTask(taskId: string) {
-  const sequence = ++pollingSequence
-  for (let attempt = 0; attempt < 1200 && sequence === pollingSequence; attempt += 1) {
-    const result = await workflowApi.task(taskId)
-    generationTask.value = result
-    if (
-      result.optionsJson?.generation_mode === 'DEEP' &&
-      result.platformsJson[0] &&
-      !result.platformsJson.includes(deepWorkbenchPlatform.value)
-    ) {
-      deepWorkbenchPlatform.value = result.platformsJson[0]
-    }
-    if (result.variants?.length) {
-      const byId = new Map(variants.value.map((item) => [item.id, item]))
-      result.variants.forEach((item) => byId.set(item.id, item))
-      variants.value = [...byId.values()]
-    }
-    if (['SUCCESS', 'PARTIAL_SUCCESS', 'FAILED'].includes(result.status)) {
-      if (selectedArticleId.value)
-        variants.value = await workflowApi.variants(selectedArticleId.value)
-      selectedVersionId.value = undefined
-      syncEditor()
-      return result
-    }
-    await sleep(400)
-  }
-  throw new Error('生成任务轮询超时')
+function notifyGeneration(result: GenerationTask, message: string, platform?: Platform) {
+  ElMessage(generationOutcome(result, message, platform))
 }
 
 async function generate() {
@@ -806,19 +827,24 @@ async function generate() {
   generationTask.value = undefined
   deepWorkbenchPlatform.value = options.platforms[0]
   operationStartedAt.value = Date.now()
+  const ticket = generationPolling.begin(selectedArticleId.value)
+  const request = {
+    article_id: selectedArticleId.value,
+    ...options,
+    platforms: [...options.platforms],
+  }
   try {
-    const task = await workflowApi.generate({ article_id: selectedArticleId.value, ...options })
-    const result = await pollTask(task.taskId)
-    activePlatform.value = options.platforms[0]
-    if (result.status === 'PARTIAL_SUCCESS')
-      ElMessage.warning('部分平台生成成功，可单独重试失败平台')
-    else if (result.status === 'FAILED') ElMessage.error('所有平台均生成失败')
-    else ElMessage.success('平台版本已生成')
-    if (options.generation_mode === 'DEEP' && result.status !== 'FAILED') openFineTuneWorkspace()
+    const task = await workflowApi.generate(request)
+    if (!ticket.active()) return
+    const result = await generationPolling.poll(task.taskId, ticket)
+    if (!result || !ticket.active()) return
+    activePlatform.value = request.platforms[0]
+    notifyGeneration(result, '平台版本已生成')
+    if (request.generation_mode === 'DEEP' && result.status !== 'FAILED') openFineTuneWorkspace()
   } catch (error) {
-    ElMessage.error(getApiErrorMessage(error, '生成失败'))
+    if (ticket.active()) ElMessage.error(getApiErrorMessage(error, '生成失败'))
   } finally {
-    generating.value = false
+    if (ticket.active()) generating.value = false
   }
 }
 
@@ -847,18 +873,18 @@ function openFineTuneWorkspace() {
 
 async function selectCandidate(index: number) {
   if (!deepTask.value) return
+  const taskId = deepTask.value.id
+  const platform = deepWorkbenchPlatform.value
+  const articleId = selectedArticleId.value
   selectingCandidate.value = index
   try {
-    const result = await workflowApi.selectDeepCandidate(
-      deepTask.value.id,
-      deepWorkbenchPlatform.value,
-      index,
-    )
+    const result = await workflowApi.selectDeepCandidate(taskId, platform, index)
+    if (selectedArticleId.value !== articleId) return
     generationTask.value = result.task
     const byId = new Map(variants.value.map((item) => [item.id, item]))
     byId.set(result.variant.id, result.variant)
     variants.value = [...byId.values()]
-    activePlatform.value = deepWorkbenchPlatform.value
+    activePlatform.value = platform
     selectedVersionId.value = result.variant.id
     syncEditor()
     ElMessage.success(`已采用候选稿 ${index + 1}，并保存为新的可编辑版本`)
@@ -870,11 +896,15 @@ async function selectCandidate(index: number) {
 }
 
 async function regenerateDeep() {
-  if (!deepTask.value) return
+  if (!deepTask.value || !selectedArticleId.value) return
+  const taskId = deepTask.value.id
+  const platform = deepWorkbenchPlatform.value
+  const articleId = selectedArticleId.value
+  let ticket: GenerationTicket | undefined
   try {
     const { value } = await ElMessageBox.prompt(
       '说明希望保留什么、修改什么。系统只会重做当前平台，并保存新的研究过程。',
-      `重做${platformNames[deepWorkbenchPlatform.value]}候选稿`,
+      `重做${platformNames[platform]}候选稿`,
       {
         confirmButtonText: '按意见重做',
         cancelButtonText: '取消',
@@ -883,95 +913,65 @@ async function regenerateDeep() {
         inputValidator: (input) => Boolean(input.trim()) || '请输入修改意见',
       },
     )
+    if (selectedArticleId.value !== articleId) return
     regeneratingDeepPlatform.value = true
     operationStartedAt.value = Date.now()
-    const task = await workflowApi.regenerateDeepPlatform(
-      deepTask.value.id,
-      deepWorkbenchPlatform.value,
-      value.trim(),
-    )
-    await pollTask(task.taskId)
-    ElMessage.success('已按修改意见生成新的候选方案')
+    ticket = generationPolling.begin(articleId)
+    const task = await workflowApi.regenerateDeepPlatform(taskId, platform, value.trim())
+    if (!ticket.active()) return
+    const result = await generationPolling.poll(task.taskId, ticket)
+    if (result && ticket.active())
+      notifyGeneration(result, '已按修改意见生成新的候选方案', platform)
   } catch (error) {
     if (error === 'cancel' || error === 'close') return
-    ElMessage.error(getApiErrorMessage(error, '重新生成失败'))
+    if (!ticket || ticket.active()) ElMessage.error(getApiErrorMessage(error, '重新生成失败'))
   } finally {
-    regeneratingDeepPlatform.value = false
+    if (ticket?.active()) regeneratingDeepPlatform.value = false
   }
 }
 
 async function retryFailed(platform: Platform) {
-  if (!generationTask.value) return
+  if (!generationTask.value || !selectedArticleId.value) return
+  const taskId = generationTask.value.id
+  const ticket = generationPolling.begin(selectedArticleId.value)
   generating.value = true
   operationStartedAt.value = Date.now()
   try {
-    const task = await workflowApi.retryTaskPlatform(generationTask.value.id, platform)
+    const task = await workflowApi.retryTaskPlatform(taskId, platform)
+    if (!ticket.active()) return
     options.platforms = [platform]
-    await pollTask(task.taskId)
+    const result = await generationPolling.poll(task.taskId, ticket)
+    if (!result || !ticket.active()) return
     activePlatform.value = platform
-    ElMessage.success(`${platformNames[platform]}已重新生成`)
+    notifyGeneration(result, `${platformNames[platform]}已重新生成`, platform)
   } catch (error) {
-    ElMessage.error(getApiErrorMessage(error, '平台重试失败'))
+    if (ticket.active()) ElMessage.error(getApiErrorMessage(error, '平台重试失败'))
   } finally {
-    generating.value = false
+    if (ticket.active()) generating.value = false
   }
 }
 
-async function persistVariant(variantId: number, payload: VariantDraftPayload, manual = false) {
-  autosaveState.value = 'SAVING'
-  autosaveError.value = ''
-  try {
-    const value = await workflowApi.updateVariant(variantId, { ...payload })
-    variants.value = variants.value.map((item) => (item.id === value.id ? value : item))
-    clearLocalDraft(variantId)
-    if (current.value?.id === variantId && sameDraft(payload, snapshotEditing())) {
-      saved.value = true
-      autosaveState.value = 'SAVED'
-      lastSavedAt.value = Date.now()
-      recoveryDraft.value = undefined
-    }
-    if (manual) {
-      savedToast.value = true
-      window.setTimeout(() => (savedToast.value = false), 1800)
-    }
-  } catch (error) {
-    writeLocalDraft(variantId, payload)
-    if (current.value?.id === variantId) {
-      saved.value = false
-      autosaveState.value = 'ERROR'
-      autosaveError.value = getApiErrorMessage(error, '保存失败')
-    }
-    if (manual) ElMessage.error(getApiErrorMessage(error, '保存失败，草稿已保留在本机'))
-  }
+async function persistVariant(variantId: number, _payload: VariantDraftPayload, manual = false) {
+  const success = await drafts.save(variantId)
+  if (manual && success) {
+    savedToast.value = true
+    window.setTimeout(() => (savedToast.value = false), 1800)
+  } else if (manual && !success) ElMessage.error('保存失败，草稿已保留在本机')
+  return success
 }
 
 function scheduleAutosave() {
-  if (!current.value || syncingEditor) return
-  const variantId = current.value.id
-  const payload = snapshotEditing()
-  saved.value = false
-  autosaveState.value = 'DIRTY'
-  autosaveError.value = ''
-  if (localDraftTimer) window.clearTimeout(localDraftTimer)
-  localDraftTimer = window.setTimeout(() => writeLocalDraft(variantId, payload), 250)
-  if (autosaveTimer) window.clearTimeout(autosaveTimer)
-  autosaveTimer = window.setTimeout(() => {
-    autosaveTimer = undefined
-    void persistVariant(variantId, payload)
-  }, 1500)
+  drafts.stage()
 }
 
 async function save() {
-  if (!current.value) return
-  if (autosaveTimer) window.clearTimeout(autosaveTimer)
-  if (localDraftTimer) window.clearTimeout(localDraftTimer)
-  autosaveTimer = undefined
-  localDraftTimer = undefined
-  await persistVariant(current.value.id, snapshotEditing(), true)
+  if (!current.value) return false
+  return persistVariant(current.value.id, snapshotEditing(), true)
 }
 
 async function saveWechatDraft() {
   if (!current.value || current.value.platform !== 'WECHAT_OFFICIAL') return
+  const variantId = current.value.id
   const account = accounts.value.find((item) => item.platform === 'WECHAT_OFFICIAL')
   if (!account?.id || account.status !== 'CONNECTED') {
     try {
@@ -980,7 +980,11 @@ async function saveWechatDraft() {
         '公众号尚未连接',
         { confirmButtonText: '去连接', cancelButtonText: '取消', type: 'warning' },
       )
-      await router.push({ name: 'platform-accounts', query: { platform: 'WECHAT_OFFICIAL' } })
+      if (auth.canManageSystem) {
+        await router.push({ name: 'platform-accounts', query: { platform: 'WECHAT_OFFICIAL' } })
+      } else {
+        ElMessage.info('请联系管理员在“平台账号”页面完成公众号连接')
+      }
     } catch {
       // 用户选择留在当前编辑页。
     }
@@ -1000,9 +1004,9 @@ async function saveWechatDraft() {
   savingWechatDraft.value = true
   wechatDraftStartedAt.value = Date.now()
   try {
-    await save()
-    if (autosaveState.value === 'ERROR') return
-    const result = await workflowApi.saveWechatDraft(current.value.id)
+    if (current.value?.id !== variantId) return
+    if (!(await persistVariant(variantId, snapshotEditing(), true))) return
+    const result = await workflowApi.saveWechatDraft(variantId)
     ElMessage.success(
       result.draftId ? `已保存到公众号草稿箱（${result.draftId}）` : '已保存到公众号草稿箱',
     )
@@ -1016,6 +1020,7 @@ async function saveWechatDraft() {
 
 async function saveToutiaoDraft() {
   if (!current.value || current.value.platform !== 'TOUTIAO') return
+  const variantId = current.value.id
   const account = accounts.value.find((item) => item.platform === 'TOUTIAO')
   if (!account?.id || account.status !== 'CONNECTED') {
     try {
@@ -1024,7 +1029,11 @@ async function saveToutiaoDraft() {
         cancelButtonText: '取消',
         type: 'warning',
       })
-      await router.push({ name: 'platform-accounts', query: { platform: 'TOUTIAO' } })
+      if (auth.canManageSystem) {
+        await router.push({ name: 'platform-accounts', query: { platform: 'TOUTIAO' } })
+      } else {
+        ElMessage.info('请联系管理员在“平台账号”页面完成今日头条连接')
+      }
     } catch {
       // 用户选择留在当前编辑页。
     }
@@ -1044,9 +1053,9 @@ async function saveToutiaoDraft() {
   savingToutiaoDraft.value = true
   toutiaoDraftStartedAt.value = Date.now()
   try {
-    await save()
-    if (autosaveState.value === 'ERROR') return
-    const result = await workflowApi.saveToutiaoDraft(current.value.id)
+    if (current.value?.id !== variantId) return
+    if (!(await persistVariant(variantId, snapshotEditing(), true))) return
+    const result = await workflowApi.saveToutiaoDraft(variantId)
     ElMessage.success(
       result.draftId ? `已保存到今日头条草稿箱（${result.draftId}）` : '已保存到今日头条草稿箱',
     )
@@ -1059,73 +1068,99 @@ async function saveToutiaoDraft() {
 }
 
 function restoreLocalDraft() {
-  if (!recoveryDraft.value || recoveryDraft.value.variantId !== current.value?.id) return
-  const draft = recoveryDraft.value
-  syncingEditor = true
-  editing.title = draft.title
-  editing.content_text = draft.content_text
-  editing.hashtags = [...draft.hashtags]
-  syncingEditor = false
-  recoveryDraft.value = undefined
-  scheduleAutosave()
-  ElMessage.success('已恢复本机草稿，将自动保存到当前版本')
+  if (drafts.restore()) ElMessage.success('已恢复本机草稿，将自动保存到当前版本')
 }
 
 function discardLocalDraft() {
   if (!recoveryDraft.value) return
-  clearLocalDraft(recoveryDraft.value.variantId)
-  recoveryDraft.value = undefined
+  drafts.discard()
   ElMessage.success('已丢弃本机草稿')
 }
 
 async function approve() {
   if (!current.value) return
-  const value = await workflowApi.approveVariant(current.value.id)
-  variants.value = variants.value.map((item) => (item.id === value.id ? value : item))
-  ElMessage.success('已审核通过')
+  const variantId = current.value.id
+  const articleId = selectedArticleId.value
+  try {
+    if (!(await drafts.save(variantId))) return ElMessage.error('请先保存正文后再审核')
+    if (current.value?.id !== variantId || selectedArticleId.value !== articleId) return
+    const fingerprint = current.value.contentFingerprint
+    if (!fingerprint) return ElMessage.error('请刷新当前版本后重新审核')
+    const value = await workflowApi.approveVariant(variantId, { expected_fingerprint: fingerprint })
+    if (selectedArticleId.value !== articleId) return
+    variants.value = variants.value.map((item) => (item.id === value.id ? value : item))
+    ElMessage.success('已审核通过')
+  } catch (error) {
+    ElMessage.error(getApiErrorMessage(error, '审核通过失败'))
+  }
 }
 
 async function reject() {
   if (!current.value) return
-  const value = await workflowApi.rejectVariant(current.value.id)
-  variants.value = variants.value.map((item) => (item.id === value.id ? value : item))
-  ElMessage.success('版本已拒绝')
+  const variantId = current.value.id
+  const articleId = selectedArticleId.value
+  try {
+    if (!(await drafts.save(variantId))) return ElMessage.error('请先保存正文后再审核')
+    if (current.value?.id !== variantId || selectedArticleId.value !== articleId) return
+    const fingerprint = current.value.contentFingerprint
+    if (!fingerprint) return ElMessage.error('请刷新当前版本后重新审核')
+    const value = await workflowApi.rejectVariant(variantId, { expected_fingerprint: fingerprint })
+    if (selectedArticleId.value !== articleId) return
+    variants.value = variants.value.map((item) => (item.id === value.id ? value : item))
+    ElMessage.success('版本已拒绝')
+  } catch (error) {
+    ElMessage.error(getApiErrorMessage(error, '拒绝版本失败'))
+  }
 }
 
 async function deleteVersion() {
   if (!current.value) return
-  await ElMessageBox.confirm(`确定删除版本 ${current.value.versionNo}？`, '删除历史版本', {
-    type: 'warning',
-  })
   const id = current.value.id
-  await workflowApi.deleteVariant(id)
-  variants.value = variants.value.filter((item) => item.id !== id)
-  selectedVersionId.value = undefined
-  syncEditor()
-  ElMessage.success('版本已删除')
+  try {
+    await ElMessageBox.confirm(`确定删除版本 ${current.value.versionNo}？`, '删除历史版本', {
+      type: 'warning',
+    })
+    await workflowApi.deleteVariant(id)
+    drafts.forget(id)
+    variants.value = variants.value.filter((item) => item.id !== id)
+    selectedVersionId.value = undefined
+    syncEditor()
+    ElMessage.success('版本已删除')
+  } catch (error) {
+    if (error !== 'cancel' && error !== 'close') {
+      ElMessage.error(getApiErrorMessage(error, '删除版本失败'))
+    }
+  }
 }
 
 async function regenerate() {
-  if (!current.value) return
+  if (!current.value || !selectedArticleId.value) return
+  const variant = current.value
+  const ticket = generationPolling.begin(selectedArticleId.value)
   generating.value = true
   operationStartedAt.value = Date.now()
   try {
-    const task = await workflowApi.regenerate(current.value.id)
-    options.platforms = [current.value.platform]
-    await pollTask(task.taskId)
-    ElMessage.success('单平台版本已重新生成')
+    const task = await workflowApi.regenerate(variant.id)
+    if (!ticket.active()) return
+    options.platforms = [variant.platform]
+    const result = await generationPolling.poll(task.taskId, ticket)
+    if (result && ticket.active())
+      notifyGeneration(result, '单平台版本已重新生成', variant.platform)
   } catch (error) {
-    ElMessage.error(getApiErrorMessage(error))
+    if (ticket.active()) ElMessage.error(getApiErrorMessage(error))
   } finally {
-    generating.value = false
+    if (ticket.active()) generating.value = false
   }
 }
 
 async function reviewQuality() {
   if (!current.value) return
+  const variantId = current.value.id
   reviewing.value = true
   try {
-    reviewResult.value = await workflowApi.reviewVariant(current.value.id)
+    const result = await workflowApi.reviewVariant(variantId)
+    if (current.value?.id !== variantId) return
+    reviewResult.value = result
     ElMessage.success('质量评审完成')
   } catch (error) {
     ElMessage.error(getApiErrorMessage(error, '质量评审失败'))
@@ -1135,14 +1170,35 @@ async function reviewQuality() {
 }
 
 async function copy() {
-  await navigator.clipboard.writeText(platformCopyText())
-  ElMessage.success('已复制')
+  const text = platformCopyText()
+  try {
+    if (navigator.clipboard?.writeText) {
+      await navigator.clipboard.writeText(text)
+    } else {
+      const area = document.createElement('textarea')
+      area.value = text
+      area.style.position = 'fixed'
+      area.style.opacity = '0'
+      try {
+        document.body.appendChild(area)
+        area.select()
+        if (!document.execCommand('copy')) throw new Error('copy command failed')
+      } finally {
+        area.remove()
+      }
+    }
+    ElMessage.success('已复制')
+  } catch (error) {
+    ElMessage.error(getApiErrorMessage(error, '复制失败，请手动选择文本复制'))
+  }
 }
 
 async function openWechatFormatter() {
   if (!current.value || current.value.platform !== 'WECHAT_OFFICIAL') return
+  const variantId = current.value.id
   try {
-    if (!saved.value) await save()
+    if (!saved.value && !(await save())) return
+    if (current.value?.id !== variantId) return
     showWechatFormatter.value = true
   } catch (error) {
     ElMessage.error(getApiErrorMessage(error, '请先保存正文后再进行排版'))
@@ -1169,202 +1225,6 @@ function openMedia() {
   })
 }
 
-async function loadImageModels() {
-  if (textImageModels.value.length || editImageModels.value.length) return
-  try {
-    const data = await workflowApi.imageModels()
-    textImageModels.value = data.textToImage
-    editImageModels.value = data.imageToImage
-    if (!data.textToImage.includes(textImageModel.value) && data.textToImage[0])
-      textImageModel.value = data.textToImage[0]
-    if (!data.imageToImage.includes(editImageModel.value) && data.imageToImage[0])
-      editImageModel.value = data.imageToImage[0]
-  } catch (error) {
-    visualNotice.value = getApiErrorMessage(error, '读取图片模型失败')
-  }
-}
-
-async function searchVisuals() {
-  if (!visualKeyword.value.trim()) return
-  visualLoading.value = true
-  try {
-    const data = await workflowApi.searchMedia(visualKeyword.value.trim())
-    imageSearchResults.value = data.items.slice(0, 6)
-    visualNotice.value = data.notice
-  } catch (error) {
-    visualNotice.value = getApiErrorMessage(error, '图片搜索失败')
-  } finally {
-    visualLoading.value = false
-  }
-}
-
-async function selectVisual(item: Record<string, unknown>, usageType: 'COVER' | 'BODY') {
-  if (!selectedArticleId.value) return
-  visualLoading.value = true
-  try {
-    await workflowApi.selectMedia({
-      article_id: selectedArticleId.value,
-      variant_id: current.value?.id,
-      source: item.source,
-      source_id: item.id,
-      image_url: item.imageUrl,
-      thumbnail_url: item.thumbnailUrl,
-      photographer_name: item.photographerName,
-      photographer_url: item.photographerUrl,
-      alt_text: item.altText,
-      search_keyword: visualKeyword.value,
-      usage_type: usageType,
-    })
-    media.value = await workflowApi.articleMedia(selectedArticleId.value)
-    transformAssetId.value = media.value[0]?.id
-    ElMessage.success(usageType === 'COVER' ? '已设为封面' : '已加入正文')
-  } catch (error) {
-    ElMessage.error(getApiErrorMessage(error, '选择图片失败'))
-  } finally {
-    visualLoading.value = false
-  }
-}
-
-async function removePreviewMedia(item: MediaAsset) {
-  removingMediaId.value = item.id
-  try {
-    const updated = await workflowApi.detachMedia(item.id)
-    media.value = media.value.map((asset) => (asset.id === updated.id ? updated : asset))
-    if (transformAssetId.value === item.id) {
-      transformAssetId.value = previewMedia.value[0]?.id
-    }
-    ElMessage.success('图片已移除，可以重新选择')
-  } catch (error) {
-    ElMessage.error(getApiErrorMessage(error, '移除图片失败'))
-  } finally {
-    removingMediaId.value = undefined
-  }
-}
-
-async function setPreviewCover(item: MediaAsset) {
-  if (item.usageType === 'COVER') return
-  visualLoading.value = true
-  try {
-    await workflowApi.setMediaCover(item.id)
-    if (selectedArticleId.value) {
-      media.value = await workflowApi.articleMedia(selectedArticleId.value)
-    }
-    transformAssetId.value = item.id
-    ElMessage.success('已更换封面，原封面保留在正文图片中')
-  } catch (error) {
-    ElMessage.error(getApiErrorMessage(error, '更换封面失败'))
-  } finally {
-    visualLoading.value = false
-  }
-}
-
-async function generateVisual() {
-  if (!selectedArticleId.value || !visualPrompt.value.trim()) {
-    ElMessage.warning('请先填写图片创作要求')
-    return
-  }
-  startVisualOperation('GENERATE')
-  try {
-    await workflowApi.generateImage({
-      article_id: selectedArticleId.value,
-      prompt: visualPrompt.value.trim(),
-      model: textImageModel.value,
-      image_size: imageSize.value,
-      usage_type: 'COVER',
-    })
-    media.value = await workflowApi.articleMedia(selectedArticleId.value)
-    transformAssetId.value = media.value[0]?.id
-    finishVisualOperation(true, '图片已生成并保存为封面')
-    ElMessage.success('AI 配图已生成并设为封面')
-  } catch (error) {
-    finishVisualOperation(false, '生成失败，可以修改提示词后重试')
-    ElMessage.error(getApiErrorMessage(error, 'AI 图片生成失败'))
-  } finally {
-    visualLoading.value = false
-  }
-}
-
-async function transformVisual() {
-  if (!selectedArticleId.value) {
-    ElMessage.warning('请先选择一篇文章')
-    return
-  }
-  if (!transformAssetId.value) {
-    ElMessage.warning('请先选择要改造的图片')
-    return
-  }
-  if (!visualPrompt.value.trim()) {
-    ElMessage.warning('请先填写图片改造要求')
-    return
-  }
-  startVisualOperation('TRANSFORM')
-  try {
-    await workflowApi.transformImage({
-      article_id: selectedArticleId.value,
-      asset_id: transformAssetId.value,
-      prompt: visualPrompt.value.trim(),
-      model: editImageModel.value,
-      usage_type: 'COVER',
-    })
-    media.value = await workflowApi.articleMedia(selectedArticleId.value)
-    transformAssetId.value = media.value[0]?.id
-    finishVisualOperation(true, '改造版本已生成并保存为封面')
-    ElMessage.success('AI 图片改造完成并设为封面')
-  } catch (error) {
-    finishVisualOperation(false, '改造失败，原图未受影响，可以重试')
-    ElMessage.error(getApiErrorMessage(error, 'AI 图片改造失败'))
-  } finally {
-    visualLoading.value = false
-  }
-}
-
-function startVisualOperation(mode: 'GENERATE' | 'TRANSFORM') {
-  if (visualProgressTimer) window.clearInterval(visualProgressTimer)
-  const startedAt = Date.now()
-  visualLoading.value = true
-  visualOperationState.value = 'RUNNING'
-  visualOperationProgress.value = 6
-  visualOperationElapsedMs.value = 0
-  visualOperationStage.value =
-    mode === 'TRANSFORM' ? '正在校验并上传原图' : '正在校验提示词与图片尺寸'
-  visualProgressTimer = window.setInterval(() => {
-    const elapsed = Date.now() - startedAt
-    visualOperationElapsedMs.value = elapsed
-    visualOperationProgress.value = Math.min(
-      92,
-      Math.round(8 + 84 * (1 - Math.exp(-elapsed / 30_000))),
-    )
-    if (elapsed < 4_000) {
-      visualOperationStage.value =
-        mode === 'TRANSFORM' ? '正在上传原图并提交改造任务' : '正在提交图片生成任务'
-    } else if (elapsed < 45_000) {
-      visualOperationStage.value =
-        mode === 'TRANSFORM' ? 'AI 正在分析原图并生成改造版本' : 'AI 正在绘制图片'
-    } else {
-      visualOperationStage.value = '模型仍在处理，页面可继续停留等待'
-    }
-  }, 500)
-}
-
-function finishVisualOperation(success: boolean, message: string) {
-  if (visualProgressTimer) window.clearInterval(visualProgressTimer)
-  visualProgressTimer = undefined
-  visualOperationState.value = success ? 'SUCCESS' : 'FAILED'
-  visualOperationProgress.value = success ? 100 : visualOperationProgress.value
-  visualOperationStage.value = message
-}
-
-watch(visualMode, (mode) => {
-  if (!visualLoading.value) {
-    visualOperationState.value = 'IDLE'
-    visualOperationProgress.value = 0
-    visualOperationStage.value = ''
-    visualOperationElapsedMs.value = 0
-  }
-  if (mode === 'SEARCH' && !imageSearchResults.value.length) void searchVisuals()
-  if (mode !== 'SEARCH') void loadImageModels()
-})
-
 async function goToCalendar(scheduleId: number) {
   persistPreferences()
   await router.push({ name: 'calendar', query: { schedule: scheduleId } })
@@ -1372,14 +1232,18 @@ async function goToCalendar(scheduleId: number) {
 
 async function scheduleCurrent() {
   if (!article.value || !current.value) return
-  if (fitWeiboDraftForImage()) {
-    await persistVariant(current.value.id, snapshotEditing())
-    ElMessage.success('微博内容已自动适配 140 字图文接口')
-  }
+  const articleId = article.value.id
+  const variantId = current.value.id
+  const fitted = fitWeiboDraftForImage()
+  // Flush any pending autosave before leaving the studio: the calendar reads
+  // the server-side variant, so navigating with unflushed edits would schedule
+  // stale content.
+  if (!(await persistVariant(variantId, snapshotEditing()))) return
+  if (fitted) ElMessage.success('微博内容已自动适配 140 字图文接口')
   persistPreferences()
   await router.push({
     name: 'calendar',
-    query: { create: '1', article: article.value.id, variant: current.value.id },
+    query: { create: '1', article: articleId, variant: variantId },
   })
 }
 
@@ -1396,26 +1260,18 @@ watch(
   },
 )
 watch(
-  editing,
-  () => {
-    scheduleAutosave()
-  },
-  { deep: true, flush: 'sync' },
-)
-watch(
   [() => editing.content_text, () => activePlatform.value, () => current.value?.formatProfileJson],
   scheduleWechatPreview,
   { deep: true, immediate: true },
 )
 onBeforeUnmount(() => {
-  pollingSequence += 1
+  articleLoadSequence += 1
+  generationPolling.cancel()
+  drafts.dispose()
+  visual.dispose()
   if (clockTimer) window.clearInterval(clockTimer)
-  if (autosaveTimer) window.clearTimeout(autosaveTimer)
-  if (localDraftTimer) window.clearTimeout(localDraftTimer)
   if (wechatPreviewTimer) window.clearTimeout(wechatPreviewTimer)
-  if (visualProgressTimer) window.clearInterval(visualProgressTimer)
   wechatPreviewSequence += 1
-  if (!saved.value && current.value) writeLocalDraft(current.value.id, snapshotEditing())
   window.removeEventListener('keydown', handleGenerationShortcut)
 })
 onMounted(() => {
@@ -2124,9 +1980,25 @@ onMounted(() => {
               </div>
             </div>
             <div v-if="reviewResult" class="quality-summary">
-              <span v-for="item in qualityDimensions" :key="item[0]"
-                >{{ item[0] }} {{ item[1] }}</span
+              <span v-if="reviewResult.stale" class="stale-review"
+                >内容已修改，原评审已失效，请重新评审</span
               >
+              <template v-else>
+                <span
+                  v-if="
+                    reviewResult.reviewSource === 'RULES' ||
+                    reviewResult.provider === 'RULE_FALLBACK'
+                  "
+                  class="text-amber-700"
+                  >当前为规则检查，事实尚未验证，需人工复核</span
+                >
+                <span v-else-if="reviewResult.needHumanReview" class="text-amber-700"
+                  >检测到待核实问题，请先处理评审意见</span
+                >
+                <span v-for="item in qualityDimensions" :key="item[0]"
+                  >{{ item[0] }} {{ item[1] }}</span
+                >
+              </template>
             </div>
             <ScheduleAdvisor
               :article-id="article?.id"
@@ -2233,6 +2105,27 @@ onMounted(() => {
               :removing-id="removingMediaId"
               @remove="removePreviewMedia"
             />
+            <BlueskyPreview
+              v-else-if="activePlatform === 'BLUESKY'"
+              :account-name="currentAccount?.accountName || '未配置 Bluesky 账号'"
+              :title="editing.title"
+              :content="editing.content_text"
+              :tags="editing.hashtags"
+              :media="previewMedia"
+              :removing-id="removingMediaId"
+              @remove="removePreviewMedia"
+            />
+            <MastodonPreview
+              v-else-if="activePlatform === 'MASTODON'"
+              :account-name="currentAccount?.accountName || '未配置 Mastodon 账号'"
+              :title="editing.title"
+              :content="editing.content_text"
+              :tags="editing.hashtags"
+              :media="previewMedia"
+              v-bind="currentMastodonLimits"
+              :removing-id="removingMediaId"
+              @remove="removePreviewMedia"
+            />
             <WechatPreview
               v-else-if="activePlatform === 'WECHAT_OFFICIAL'"
               :account-name="currentAccount?.accountName || '未配置公众号'"
@@ -2274,7 +2167,7 @@ onMounted(() => {
                   placeholder="输入图片关键词"
                   @keyup.enter="searchVisuals"
                 />
-                <el-button :loading="visualLoading" @click="searchVisuals">搜索</el-button>
+                <el-button :loading="visualSearchLoading" @click="searchVisuals">搜索</el-button>
               </div>
               <small v-if="visualNotice">{{ visualNotice }}</small>
               <div class="visual-result-grid">
@@ -2376,10 +2269,7 @@ onMounted(() => {
                 <span>
                   {{
                     visualOperationState === 'RUNNING'
-                      ? `预计进度 ${visualOperationProgress}% · 已等待 ${Math.max(
-                          1,
-                          Math.ceil(visualOperationElapsedMs / 1000),
-                        )} 秒`
+                      ? `已等待 ${Math.max(1, Math.ceil(visualOperationElapsedMs / 1000))} 秒`
                       : visualOperationState === 'SUCCESS'
                         ? '100% · 处理完成'
                         : '处理未完成'
@@ -2387,6 +2277,7 @@ onMounted(() => {
                 </span>
               </div>
               <el-progress
+                v-if="visualOperationState !== 'RUNNING'"
                 :percentage="visualOperationProgress"
                 :status="
                   visualOperationState === 'SUCCESS'
@@ -2399,7 +2290,7 @@ onMounted(() => {
                 :show-text="false"
               />
               <small v-if="visualOperationState === 'RUNNING'">
-                进度根据已完成的请求阶段和等待时间估算，服务端返回后会立即变为 100%。
+                服务仍在处理，请继续等待；完成后图片会显示在预览中。
               </small>
             </div>
             <el-button text @click="openMedia">打开完整媒体库</el-button>

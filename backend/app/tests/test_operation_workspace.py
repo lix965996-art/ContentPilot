@@ -1,3 +1,5 @@
+import base64
+
 from fastapi.testclient import TestClient
 
 
@@ -49,7 +51,15 @@ def test_global_media_metadata_and_attach(client: TestClient, login_as) -> None:
         "/api/media/upload",
         headers=auth,
         data={"usage_type": "BODY"},
-        files={"file": ("library-test.png", b"not-a-real-image", "image/png")},
+        files={
+            "file": (
+                "library-test.png",
+                base64.b64decode(
+                    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNk+A8AAQUBAScY42YAAAAASUVORK5CYII="
+                ),
+                "image/png",
+            )
+        },
     )
     assert uploaded.status_code == 200, uploaded.text
     asset_id = uploaded.json()["data"]["id"]
@@ -117,7 +127,14 @@ def test_operation_runs_and_schedule_backlog(client: TestClient, login_as) -> No
     task_id = generated.json()["data"]["taskId"]
     task = client.get(f"/api/generation/tasks/{task_id}", headers=auth).json()["data"]
     variant_id = task["variants"][0]["id"]
-    assert client.post(f"/api/variants/{variant_id}/approve", headers=auth).status_code == 200
+    assert (
+        client.post(
+            f"/api/variants/{variant_id}/approve",
+            headers=auth,
+            json={"expected_fingerprint": task["variants"][0]["contentFingerprint"]},
+        ).status_code
+        == 200
+    )
 
     runs = client.get("/api/operation-runs?run_type=GENERATION", headers=auth)
     assert runs.status_code == 200

@@ -42,8 +42,14 @@ async def test_xiaohongshu_mcp_retries_once_after_stale_session(monkeypatch) -> 
 async def test_xiaohongshu_mcp_uses_upstream_argument_contract(monkeypatch) -> None:
     captured: dict = {}
 
-    async def fake_rpc(method: str, params: dict | None = None, timeout: float = 30) -> dict:
-        captured.update({"method": method, "params": params, "timeout": timeout})
+    async def fake_rpc(
+        method: str,
+        params: dict | None = None,
+        timeout: float = 30,
+        *,
+        retry: bool = True,
+    ) -> dict:
+        captured.update({"method": method, "params": params, "timeout": timeout, "retry": retry})
         return {
             "result": {
                 "content": [
@@ -69,6 +75,7 @@ async def test_xiaohongshu_mcp_uses_upstream_argument_contract(monkeypatch) -> N
     assert result.detail["verified_identifier"] is False
     assert captured["method"] == "tools/call"
     assert captured["timeout"] == 120
+    assert captured["retry"] is False
     assert captured["params"]["name"] == "publish_content"
     arguments = captured["params"]["arguments"]
     assert arguments["visibility"] == "仅自己可见"
@@ -144,8 +151,14 @@ async def test_xiaohongshu_mcp_classifies_login_required(monkeypatch) -> None:
 async def test_xiaohongshu_mcp_logout_deletes_local_cookies(monkeypatch) -> None:
     captured: dict = {}
 
-    async def fake_rpc(method: str, params: dict | None = None, timeout: float = 30) -> dict:
-        captured.update({"method": method, "params": params, "timeout": timeout})
+    async def fake_rpc(
+        method: str,
+        params: dict | None = None,
+        timeout: float = 30,
+        *,
+        retry: bool = True,
+    ) -> dict:
+        captured.update({"method": method, "params": params, "timeout": timeout, "retry": retry})
         return {
             "result": {
                 "content": [{"type": "text", "text": "Cookies 删除成功"}],

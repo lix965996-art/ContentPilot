@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
   CalendarClock,
@@ -13,6 +13,7 @@ import {
 } from 'lucide-vue-next'
 import { getApiErrorMessage } from '@/api/client'
 import { workflowApi } from '@/api/workflow'
+import { createIdempotencyIntent, normalizeSchedulePayload } from '@/utils/idempotency'
 import {
   accountStatusNames,
   defaultPublishMode,
@@ -48,7 +49,10 @@ const emit = defineEmits<{ scheduled: [scheduleId: number] }>()
 
 const loading = ref(false)
 const creating = ref(false)
+const createIntent = createIdempotencyIntent()
 const result = ref<PublishTimeRecommendation>()
+let requestSequence = 0
+let conflictSequence = 0
 const choice = ref<'RECOMMENDED' | 'ALTERNATIVE_0' | 'ALTERNATIVE_1' | 'CUSTOM'>('RECOMMENDED')
 const customTime = ref('')
 const accountId = ref<number>()
@@ -119,9 +123,10 @@ async function calculate() {
   if (windowMode.value === 'CUSTOM' && (!windowStartDate.value || !windowEndDate.value)) {
     return ElMessage.warning('自定义时间范围需要填写开始和结束日期')
   }
+  const sequence = ++requestSequence
   loading.value = true
   try {
-    result.value = await workflowApi.recommend({
+    const data = await workflowApi.recommend({
       article_id: props.articleId,
       variant_id: props.variantId,
       platform: props.platform,
@@ -131,18 +136,21 @@ async function calculate() {
       window_start_date: windowMode.value === 'CUSTOM' ? windowStartDate.value : undefined,
       window_end_date: windowMode.value === 'CUSTOM' ? windowEndDate.value : undefined,
     })
+    if (sequence !== requestSequence) return
+    result.value = data
     choice.value = 'RECOMMENDED'
-    customTime.value = result.value.recommendedAt.slice(0, 16)
+    customTime.value = data.recommendedAt.slice(0, 16)
     await checkConflict()
-    ElMessage.success('排期建议已生成')
+    if (sequence === requestSequence) ElMessage.success('排期建议已生成')
   } catch (error) {
-    ElMessage.error(getApiErrorMessage(error, '推荐时间计算失败'))
+    if (sequence === requestSequence) ElMessage.error(getApiErrorMessage(error, '推荐时间计算失败'))
   } finally {
-    loading.value = false
+    if (sequence === requestSequence) loading.value = false
   }
 }
 
 async function checkConflict() {
+  const sequence = ++conflictSequence
   if (!selectedTime.value) return
   try {
     const data = await workflowApi.scheduleConflictCheck({
@@ -150,15 +158,18 @@ async function checkConflict() {
       scheduled_at: `${selectedTime.value}:00`,
       account_id: accountId.value,
     })
+    if (sequence !== conflictSequence) return
     conflicts.value = data.conflicts
     conflictChecked.value = true
   } catch {
+    if (sequence !== conflictSequence) return
     conflicts.value = []
     conflictChecked.value = false
   }
 }
 
 async function addToSchedule() {
+  if (creating.value) return
   if (!props.articleId || !props.variantId) return ElMessage.warning('请先选择平台版本')
   if (!selectedTime.value) return ElMessage.warning('请选择发布时间')
   if (props.reviewStatus !== 'APPROVED') {
@@ -172,7 +183,7 @@ async function addToSchedule() {
   }
   creating.value = true
   try {
-    const schedule = await workflowApi.createSchedule({
+    const payload = normalizeSchedulePayload({
       article_id: props.articleId,
       variant_id: props.variantId,
       account_id: accountId.value,
@@ -182,6 +193,10 @@ async function addToSchedule() {
       recommendation_id: result.value?.id,
       time_source: timeSource.value,
       content_type: result.value?.contentType,
+    })
+    const schedule = await workflowApi.createSchedule({
+      ...payload,
+      idempotency_key: createIntent.keyFor(payload),
     })
     emit('scheduled', schedule.id)
     ElMessage.success('已加入排期日历')
@@ -201,14 +216,34 @@ function useNow() {
 watch(
   () => props.platform,
   () => {
-    result.value = undefined
-    conflicts.value = []
     syncAccount()
   },
   { immediate: true },
 )
 watch(() => props.accounts, syncAccount)
 watch([choice, customTime], () => void checkConflict())
+function invalidateRecommendation() {
+  requestSequence += 1
+  conflictSequence += 1
+  loading.value = false
+  result.value = undefined
+  conflicts.value = []
+  conflictChecked.value = false
+}
+watch(
+  [
+    () => props.articleId,
+    () => props.variantId,
+    () => props.platform,
+    accountId,
+    windowMode,
+    windowStartDate,
+    windowEndDate,
+  ],
+  invalidateRecommendation,
+  { flush: 'sync' },
+)
+onBeforeUnmount(invalidateRecommendation)
 </script>
 
 <template>

@@ -4,7 +4,10 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import Session, sessionmaker
 
 from app.core.config import settings
+from app.core.paths import ensure_sqlite_directory
 
+ensure_sqlite_directory(settings.database_url)
+ensure_sqlite_directory(settings.sqlite_fallback_url)
 engine_options: dict[str, object] = {"pool_pre_ping": True}
 if settings.database_url.startswith("sqlite"):
     engine_options["connect_args"] = {"check_same_thread": False}

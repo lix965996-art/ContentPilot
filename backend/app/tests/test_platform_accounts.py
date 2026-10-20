@@ -1,4 +1,5 @@
 import asyncio
+import uuid
 from datetime import datetime, timedelta
 
 import httpx
@@ -6,16 +7,24 @@ import pytest
 from sqlalchemy import select
 
 from app.api.endpoints import platform_accounts as platform_accounts_endpoint
+from app.core import paths
 from app.core.config import settings
 from app.core.credentials import decrypt_json, decrypt_secret, encrypt_secret
 from app.db.session import SessionLocal
-from app.models.business import ContentVariant, MediaAsset, PlatformAccount
+from app.models.business import (
+    ContentVariant,
+    MediaAsset,
+    PlatformAccount,
+    PublishSchedule,
+    TaskDispatch,
+)
 from app.models.user import User
 from app.publishers import wechat_browser
 from app.publishers.base import PublishResult
 from app.publishers.official import WechatDraftPublisher
 from app.publishers.wechat_browser import WechatBrowserDraftPublisher
 from app.services import platform_account_service, publish_service
+from app.services.review_fingerprint import variant_fingerprint
 
 
 def headers(token: str) -> dict[str, str]:
@@ -40,6 +49,13 @@ def _variant_for(client, auth: dict[str, str], platform: str) -> tuple[int, int]
         ]
         variant = next((item for item in variants if item["platform"] == platform), None)
         if variant:
+            if variant["reviewStatus"] != "APPROVED":
+                approved = client.post(
+                    f"/api/variants/{variant['id']}/approve",
+                    headers=auth,
+                    json={"expected_fingerprint": variant["contentFingerprint"]},
+                )
+                assert approved.status_code == 200, approved.text
             return article["id"], variant["id"]
     raise AssertionError(f"missing seeded variant for {platform}")
 
@@ -49,12 +65,158 @@ def _account_id(client, auth: dict[str, str], platform: str) -> int:
     return next(int(item["id"]) for item in rows if item["platform"] == platform)
 
 
+def test_schedule_commit_survives_dispatch_failure_and_is_recovered(
+    client, login_as, monkeypatch
+) -> None:
+    from unittest.mock import Mock
+
+    from app.api.endpoints import schedules as schedules_endpoint
+    from app.scheduler import dispatch as dispatcher
+    from app.scheduler import runtime
+
+    auth = _operator_auth(client, login_as)
+    article_id, variant_id = _variant_for(client, auth, "XIAOHONGSHU")
+    idempotency_key = f"dispatch-failure-{uuid.uuid4().hex}"
+    payload = {
+        "article_id": article_id,
+        "variant_id": variant_id,
+        "platform": "XIAOHONGSHU",
+        "publish_mode": "MANUAL_CONFIRM",
+        "scheduled_at": (datetime.now() + timedelta(days=41)).isoformat(),
+        "idempotency_key": idempotency_key,
+    }
+    monkeypatch.setattr(
+        schedules_endpoint,
+        "add_schedule_job",
+        Mock(side_effect=RuntimeError("scheduler down")),
+    )
+
+    with pytest.raises(RuntimeError, match="scheduler down"):
+        client.post("/api/schedules", headers=auth, json=payload)
+
+    with SessionLocal() as db:
+        schedule = db.scalar(
+            select(PublishSchedule).where(PublishSchedule.idempotency_key == idempotency_key)
+        )
+        assert schedule is not None, "the business row must survive dispatch failure"
+        dispatch = db.scalar(select(TaskDispatch).where(TaskDispatch.task_id == str(schedule.id)))
+        assert dispatch is not None and dispatch.status == "PENDING"
+
+    monkeypatch.setattr(dispatcher, "SessionLocal", SessionLocal)
+    added = Mock()
+    monkeypatch.setattr(runtime, "add_schedule_job", added)
+    dispatcher.dispatch_pending()
+
+    assert any(call.args[0] == schedule.id for call in added.call_args_list)
+    with SessionLocal() as db:
+        dispatch = db.scalar(select(TaskDispatch).where(TaskDispatch.task_id == str(schedule.id)))
+        assert dispatch.status == "DONE"
+
+
+def test_failed_dispatch_can_be_rescheduled_without_reviving_the_old_job(
+    client, login_as, monkeypatch
+) -> None:
+    from unittest.mock import Mock
+
+    from app.api.endpoints import schedules as schedules_endpoint
+    from app.core.config import settings
+    from app.scheduler import dispatch as dispatcher
+    from app.scheduler import runtime
+
+    auth = _operator_auth(client, login_as)
+    article_id, variant_id = _variant_for(client, auth, "XIAOHONGSHU")
+    key = f"dispatch-reschedule-{uuid.uuid4().hex}"
+    first_time = datetime.now() + timedelta(days=6)
+    created = client.post(
+        "/api/schedules",
+        headers=auth,
+        json={
+            "article_id": article_id,
+            "variant_id": variant_id,
+            "platform": "XIAOHONGSHU",
+            "publish_mode": "MANUAL_CONFIRM",
+            "scheduled_at": first_time.isoformat(),
+            "idempotency_key": key,
+        },
+    )
+    assert created.status_code == 200, created.text
+    schedule_id = created.json()["data"]["id"]
+
+    with SessionLocal() as db:
+        dispatch = db.scalar(select(TaskDispatch).where(TaskDispatch.task_id == str(schedule_id)))
+        dispatch.attempts = settings.dispatch_max_attempts - 1
+        db.commit()
+        old_revision = dispatch.revision
+
+    monkeypatch.setattr(dispatcher, "SessionLocal", SessionLocal)
+    monkeypatch.setattr(
+        runtime,
+        "add_schedule_job",
+        Mock(side_effect=RuntimeError("scheduler down")),
+    )
+    dispatcher.dispatch_pending()
+
+    with SessionLocal() as db:
+        schedule = db.get(PublishSchedule, schedule_id)
+        dispatch = db.scalar(select(TaskDispatch).where(TaskDispatch.task_id == str(schedule_id)))
+        assert schedule.status == "FAILED"
+        assert "派发失败" in (schedule.error_message or "")
+        assert dispatch.status == "FAILED"
+
+    added = Mock()
+    monkeypatch.setattr(schedules_endpoint, "add_schedule_job", added)
+    new_time = first_time + timedelta(days=1)
+    rescheduled = client.put(
+        f"/api/schedules/{schedule_id}",
+        headers=auth,
+        json={"scheduled_at": new_time.isoformat(), "time_source": "CUSTOM"},
+    )
+    assert rescheduled.status_code == 200, rescheduled.text
+
+    with SessionLocal() as db:
+        schedule = db.get(PublishSchedule, schedule_id)
+        dispatch = db.scalar(select(TaskDispatch).where(TaskDispatch.task_id == str(schedule_id)))
+        assert schedule.status == "PENDING"
+        assert schedule.scheduled_at == new_time
+        assert dispatch.status == "PENDING"
+        assert dispatch.run_at == new_time
+        assert dispatch.revision != old_revision
+
+    monkeypatch.setattr(runtime, "add_schedule_job", added)
+    dispatcher.dispatch_pending()
+
+    schedule_calls = [call for call in added.call_args_list if call.args[0] == schedule_id]
+    assert len(schedule_calls) == 2
+    assert all(call.args[1] == new_time for call in schedule_calls)
+    with SessionLocal() as db:
+        dispatch = db.scalar(select(TaskDispatch).where(TaskDispatch.task_id == str(schedule_id)))
+        assert dispatch.status == "DONE"
+
+
+def test_single_schedule_create_is_idempotent(client, login_as) -> None:
+    auth = _operator_auth(client, login_as)
+    article_id, variant_id = _variant_for(client, auth, "XIAOHONGSHU")
+    payload = {
+        "article_id": article_id,
+        "variant_id": variant_id,
+        "platform": "XIAOHONGSHU",
+        "publish_mode": "MANUAL_CONFIRM",
+        "scheduled_at": (datetime.now() + timedelta(days=40)).isoformat(),
+        "idempotency_key": f"idem-test-{uuid.uuid4().hex}",
+    }
+
+    first = client.post("/api/schedules", headers=auth, json=payload)
+    second = client.post("/api/schedules", headers=auth, json=payload)
+
+    assert first.status_code == second.status_code == 200
+    assert first.json()["data"]["id"] == second.json()["data"]["id"]
+
+
 def test_wechat_browser_resolves_local_http_upload_url(tmp_path, monkeypatch) -> None:
-    backend_dir = tmp_path / "backend"
     image = tmp_path / "uploads" / "media" / "cover.png"
     image.parent.mkdir(parents=True)
     image.write_bytes(b"png")
-    monkeypatch.setattr(wechat_browser, "BACKEND_DIR", backend_dir)
+    monkeypatch.setattr(paths, "UPLOADS_DIR", tmp_path / "uploads")
 
     resolved = wechat_browser._local_image(
         "http://127.0.0.1:8000/uploads/media/cover.png?version=1"
@@ -224,6 +386,24 @@ async def test_wechat_token_cache_does_not_require_network() -> None:
         db.commit()
         publisher = WechatDraftPublisher(db, account)
         assert await publisher._access_token() == "cached-wechat-token"
+
+
+def test_wechat_real_publish_capability_is_recorded_when_enabled(client, login_as) -> None:
+    admin_auth = _admin_auth(client, login_as)
+    configured = client.put(
+        "/api/platform-accounts/WECHAT_OFFICIAL",
+        headers=admin_auth,
+        json={
+            "account_name": "真实公众号发布",
+            "auth_type": "APP_SECRET",
+            "publish_mode": "SUBMIT_PUBLISH",
+            "app_id": "wx-publish",
+            "app_secret": "wechat-publish-secret",
+            "allow_submit_publish": True,
+        },
+    )
+    assert configured.status_code == 200, configured.text
+    assert "SUBMIT_PUBLISH" in configured.json()["data"]["capabilities"]
 
 
 def test_wechat_real_draft_uses_official_publisher(client, login_as, monkeypatch) -> None:
@@ -407,6 +587,7 @@ def test_xiaohongshu_package_download_and_manual_confirmation(
         assert variant is not None
         variant.title = "合规的小红书标题"
         variant.content_text = "这是一篇用于验证人工交付包的小红书正文。"
+        variant.review_fingerprint = variant_fingerprint(variant)
         db.add(
             MediaAsset(
                 article_id=article_id,
@@ -523,6 +704,7 @@ def test_xiaohongshu_mcp_optional_publish_flow(client, login_as, monkeypatch) ->
         assert variant is not None
         variant.title = "真实发布链路测试"
         variant.content_text = "验证可选 MCP 发布流程，不调用真实平台。"
+        variant.review_fingerprint = variant_fingerprint(variant)
         db.add(
             MediaAsset(
                 article_id=article_id,

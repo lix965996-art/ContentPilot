@@ -13,6 +13,7 @@ import BatchScheduleConfirm from '@/components/recommendation/BatchScheduleConfi
 import { RECOMMEND_PLATFORMS, useBatchRecommendation } from '@/composables/useBatchRecommendation'
 import { workflowApi } from '@/api/workflow'
 import { getApiErrorMessage } from '@/api/client'
+import { fallbackHistorySources, historyInputSources } from '@/utils/historySources'
 import { useAuthStore } from '@/stores/auth'
 import type {
   ActivityAnalysis,
@@ -42,6 +43,7 @@ const staggerMinutes = ref(15)
 
 /* ---------- 活跃度分析 / 历史数据（保留原能力） ---------- */
 const analysis = ref<ActivityAnalysis>()
+let analysisSequence = 0
 const analysisLoading = ref(false)
 const analysisFilter = ref<{
   platform: string
@@ -143,6 +145,7 @@ const heatmapOption = computed(() => {
   }
 })
 async function loadAnalysis() {
+  const sequence = ++analysisSequence
   if (
     analysisFilter.value.window === 'CUSTOM' &&
     (!analysisFilter.value.start_date || !analysisFilter.value.end_date)
@@ -162,12 +165,22 @@ async function loadAnalysis() {
       params.start_date = analysisFilter.value.start_date
       params.end_date = analysisFilter.value.end_date
     }
-    analysis.value = await workflowApi.activityAnalysis(params)
+    const data = await workflowApi.activityAnalysis(params)
+    if (sequence !== analysisSequence) return
+    analysis.value = data
   } catch (e) {
-    ElMessage.error(getApiErrorMessage(e))
+    if (sequence === analysisSequence) {
+      analysis.value = undefined
+      ElMessage.error(getApiErrorMessage(e))
+    }
   } finally {
-    analysisLoading.value = false
+    if (sequence === analysisSequence) analysisLoading.value = false
   }
+}
+
+function onAnalysisPlatformChange() {
+  analysisFilter.value.account_id = undefined
+  void loadAnalysis()
 }
 
 /* ---------- 历史数据导入 ---------- */
@@ -182,7 +195,16 @@ const importForm = ref<{
   default_content_type: '',
   source_note: '',
 })
-const sourceTypes = ref<Array<{ value: string; label: string }>>([])
+const sourceTypes = ref([...fallbackHistorySources])
+
+async function loadHistoryFields() {
+  try {
+    const metadata = await workflowApi.historyFields()
+    sourceTypes.value = historyInputSources(metadata.sourceTypes)
+  } catch {
+    sourceTypes.value = [...fallbackHistorySources]
+  }
+}
 type UploadFile = UploadRequestOptions['file']
 const preview = ref<HistoryImportPreview>()
 const previewFile = ref<UploadFile>()
@@ -209,7 +231,7 @@ async function handleUpload(options: UploadRequestOptions) {
   try {
     preview.value = await workflowApi.previewHistoryImport(buildFormData(file))
     mapping.value = { ...preview.value.mapping }
-    sourceTypes.value = preview.value.sourceTypes
+    sourceTypes.value = historyInputSources(preview.value.sourceTypes)
     ElMessage.success(`解析完成，可导入 ${preview.value.importableRows} 行`)
   } catch (e) {
     preview.value = undefined
@@ -220,6 +242,7 @@ async function reparse() {
   if (!previewFile.value) return
   try {
     preview.value = await workflowApi.previewHistoryImport(buildFormData(previewFile.value))
+    sourceTypes.value = historyInputSources(preview.value.sourceTypes)
   } catch (e) {
     ElMessage.error(getApiErrorMessage(e))
   }
@@ -267,9 +290,10 @@ async function removeBatch(row: HistoryImportBatch) {
 onBeforeUnmount(() => batch.stopCalcProgress())
 
 onMounted(async () => {
+  const fieldsLoading = loadHistoryFields()
   await batch.loadArticles()
   contentTypes.value = batch.contentTypes.value
-  await Promise.all([loadAnalysis(), loadBatches()])
+  await Promise.all([loadAnalysis(), loadBatches(), fieldsLoading])
 })
 
 function onPlatformsChange(platforms: Platform[]) {
@@ -350,14 +374,11 @@ async function confirmBatchSchedule() {
       <section v-if="batch.loading.value" class="recommend-progress mt-3">
         <div class="recommend-progress-head">
           <strong>正在计算跨平台推荐</strong>
-          <span>{{ batch.calcPercent.value }}%</span>
+          <span>{{ batch.calcStep.value === 0 ? '等待服务响应' : '正在检查冲突' }}</span>
         </div>
         <p class="recommend-progress-note">
-          开启语义联合排期时通常需要 1～2 分钟，请勿关闭页面；完成后结果会出现在下方表格。
+          服务端未提供实时进度。收到推荐结果后会检查排期冲突，完成后结果显示在下方。
         </p>
-        <div class="recommend-progress-bar">
-          <i :style="{ width: `${batch.calcPercent.value}%` }" />
-        </div>
         <ol>
           <li
             v-for="(step, index) in batch.CALC_STEPS"
@@ -476,7 +497,7 @@ async function confirmBatchSchedule() {
             clearable
             class="mt-2 w-full"
             placeholder="全部平台"
-            @change="loadAnalysis"
+            @change="onAnalysisPlatformChange"
             ><el-option
               v-for="(name, key) in analysisPlatformNames"
               :key="key"
@@ -656,16 +677,12 @@ async function confirmBatchSchedule() {
                 :label="name"
                 :value="key" /></el-select></label
           ><label class="field-label"
-            >数据来源<el-select v-model="importForm.default_source_type" class="mt-2 w-full"
+            >数据来源<el-select
+              v-model="importForm.default_source_type"
+              data-testid="history-import-source"
+              class="mt-2 w-full"
               ><el-option
-                v-for="item in sourceTypes.length
-                  ? sourceTypes
-                  : [
-                      { value: 'ACCOUNT_HISTORY', label: '账号历史数据' },
-                      { value: 'PUBLIC_DATASET', label: '公开数据集' },
-                      { value: 'YOUTUBE_PUBLIC', label: 'YouTube 公开样本' },
-                      { value: 'SIMULATED', label: '模拟样本（SIMULATED）' },
-                    ]"
+                v-for="item in sourceTypes"
                 :key="item.value"
                 :label="item.label"
                 :value="item.value" /></el-select></label

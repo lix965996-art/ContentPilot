@@ -20,6 +20,7 @@ from app.models.business import (
     PublishSchedule,
     ResearchItem,
     SystemSetting,
+    TaskDispatch,
 )
 
 __all__ = [
@@ -42,6 +43,7 @@ __all__ = [
     "ResearchItem",
     "Role",
     "SystemSetting",
+    "TaskDispatch",
     "User",
     "user_roles",
 ]

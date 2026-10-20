@@ -76,7 +76,7 @@ async def classify_with_llm(
         f"正文（截断）：{content[:1200]}"
     )
     try:
-        raw, _, _ = await generation_service._chat_completion(
+        raw, _, _ = await generation_service._tracked_chat_completion(
             runtime, CLASSIFY_SYSTEM_PROMPT, [{"role": "user", "content": prompt}], temperature=0.1
         )
         payload = json.loads(raw)
@@ -114,7 +114,7 @@ async def narrate(db: Session, stats: dict) -> tuple[str, str]:
         "alternatives": [item["recommendedAt"] for item in stats.get("alternatives", [])],
     }
     try:
-        raw, _, _ = await generation_service._chat_completion(
+        raw, _, _ = await generation_service._tracked_chat_completion(
             runtime,
             NARRATIVE_SYSTEM_PROMPT,
             [{"role": "user", "content": json.dumps(facts, ensure_ascii=False)}],

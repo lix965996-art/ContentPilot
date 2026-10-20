@@ -22,8 +22,13 @@ from typing import Any
 
 from playwright.async_api import Page
 
+from app.core.paths import TMP_DIR, ensure_directory
 from app.publishers.base import PublishResult
-from app.publishers.browser_session import BrowserSessionManager, LoginSession
+from app.publishers.browser_session import (
+    BrowserSessionManager,
+    LoginSession,
+    plain_text_to_html,
+)
 from app.publishers.wechat_browser import _materialize_images
 
 TOUTIAO_HOME = "https://mp.toutiao.com/"
@@ -60,6 +65,7 @@ _manager = BrowserSessionManager(
     profile_root_setting="toutiao_browser_profile_root",
     headless_setting="toutiao_browser_headless",
     platform_label="今日头条",
+    platform_id="toutiao",
     logged_in_check=_toutiao_logged_in,
     login_timeout=45_000,
 )
@@ -128,6 +134,64 @@ async def _append_article_images(page: Page, paths: list[Path]) -> int:
     raise RuntimeError("今日头条图片上传超时，请检查图片格式或平台页面")
 
 
+def _install_draft_listener(page) -> asyncio.Future[tuple[bool, str]]:
+    future: asyncio.Future[tuple[bool, str]] = asyncio.get_running_loop().create_future()
+
+    async def capture_draft_id(response) -> None:
+        if response.request.method != "POST" or "/mp/agw/article/publish" not in response.url:
+            return
+        try:
+            payload = await response.json()
+            data = payload.get("data") or {}
+            draft_id = str(data.get("pgcId") or data.get("pgc_id") or "")
+            if future.done():
+                return
+            if payload.get("code") == 0 and draft_id:
+                future.set_result((True, draft_id))
+            elif payload.get("code") != 0:
+                message = str(
+                    payload.get("reason") or payload.get("message") or "今日头条拒绝保存草稿"
+                )
+                future.set_result((False, message))
+        except Exception:
+            return
+
+    page.on("response", lambda response: asyncio.create_task(capture_draft_id(response)))
+    return future
+
+
+async def _fill_editor(
+    page, *, title: str, content: str, content_html: str, mode: str
+) -> str | None:
+    title_input = page.locator(
+        "textarea[placeholder*='标题'], input[placeholder*='标题'], [data-testid='title'] input"
+    ).first
+    if not await title_input.count():
+        return "未找到标题输入框，今日头条页面可能已更新"
+    await title_input.fill(title)
+
+    editor = page.locator(
+        ".ProseMirror[contenteditable='true'], .ql-editor[contenteditable='true'], "
+        "[contenteditable='true'][class*='editor'], [contenteditable='true']"
+    ).first
+    if not await editor.count():
+        return "未找到正文编辑器，今日头条页面可能已更新"
+    if mode == "BROWSER_DRAFT":
+        # Playwright's contenteditable fill emits the native events used by
+        # Toutiao's editor state and cloud-draft debounce. Replacing innerHTML
+        # alone changes what is visible but does not reliably update the
+        # React/editor model, so no cloud draft is created.
+        await editor.fill(content)
+    else:
+        safe_html = content_html or plain_text_to_html(content)
+        await editor.evaluate(
+            "(el, html) => { el.innerHTML = html; el.dispatchEvent(new InputEvent('input', "
+            "{ bubbles: true, inputType: 'insertText', data: null })); }",
+            safe_html,
+        )
+    return None
+
+
 class ToutiaoBrowserPublisher:
     platform = "TOUTIAO"
     mode = "BROWSER_PUBLISH"
@@ -178,74 +242,25 @@ class ToutiaoBrowserPublisher:
                     "LOGIN_REQUIRED", "今日头条登录已失效，请重新扫码", status="LOGIN_REQUIRED"
                 )
 
-            draft_future: asyncio.Future[tuple[bool, str]] | None = None
-            if self.mode == "BROWSER_DRAFT":
-                draft_future = asyncio.get_running_loop().create_future()
+            draft_future = _install_draft_listener(page) if self.mode == "BROWSER_DRAFT" else None
 
-                async def capture_draft_id(response) -> None:
-                    if (
-                        response.request.method != "POST"
-                        or "/mp/agw/article/publish" not in response.url
-                    ):
-                        return
-                    try:
-                        payload = await response.json()
-                        data = payload.get("data") or {}
-                        draft_id = str(data.get("pgcId") or data.get("pgc_id") or "")
-                        if draft_future.done():
-                            return
-                        if payload.get("code") == 0 and draft_id:
-                            draft_future.set_result((True, draft_id))
-                        elif payload.get("code") != 0:
-                            message = str(
-                                payload.get("reason")
-                                or payload.get("message")
-                                or "今日头条拒绝保存草稿"
-                            )
-                            draft_future.set_result((False, message))
-                    except Exception:
-                        return
-
-                page.on(
-                    "response", lambda response: asyncio.create_task(capture_draft_id(response))
-                )
-
-            title_input = page.locator(
-                "textarea[placeholder*='标题'], input[placeholder*='标题'], "
-                "[data-testid='title'] input"
-            ).first
-            if not await title_input.count():
+            editor_error = await _fill_editor(
+                page,
+                title=title,
+                content=content,
+                content_html=content_html,
+                mode=self.mode,
+            )
+            if editor_error:
                 await _close(session)
-                return self._failure("PAGE_CHANGED", "未找到标题输入框，今日头条页面可能已更新")
-            await title_input.fill(title)
-
-            editor = page.locator(
-                ".ProseMirror[contenteditable='true'], .ql-editor[contenteditable='true'], "
-                "[contenteditable='true'][class*='editor'], [contenteditable='true']"
-            ).first
-            if not await editor.count():
-                await _close(session)
-                return self._failure("PAGE_CHANGED", "未找到正文编辑器，今日头条页面可能已更新")
-            if self.mode == "BROWSER_DRAFT":
-                # Playwright's contenteditable fill emits the native events used
-                # by Toutiao's editor state and cloud-draft debounce. Replacing
-                # innerHTML alone changes what is visible but does not reliably
-                # update the React/editor model, so no cloud draft is created.
-                await editor.fill(content)
-            else:
-                safe_html = content_html or "".join(
-                    f"<p>{line}</p>" for line in content.splitlines() if line.strip()
-                )
-                await editor.evaluate(
-                    "(el, html) => { el.innerHTML = html; el.dispatchEvent(new InputEvent('input', "
-                    "{ bubbles: true, inputType: 'insertText', data: null })); }",
-                    safe_html,
-                )
+                return self._failure("PAGE_CHANGED", editor_error)
 
             image_values = [str(value) for value in request.get("images", []) if value]
             image_inserted_count = 0
             if self.mode == "BROWSER_DRAFT" and image_values:
-                with tempfile.TemporaryDirectory(prefix="contentpilot-toutiao-images-") as temp_dir:
+                with tempfile.TemporaryDirectory(
+                    prefix="toutiao-images-", dir=ensure_directory(TMP_DIR)
+                ) as temp_dir:
                     image_paths = await _materialize_images(image_values, Path(temp_dir))
                     image_inserted_count = await _append_article_images(page, image_paths)
 

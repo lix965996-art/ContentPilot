@@ -152,6 +152,12 @@ function score(value?: number | null) {
         <template #default="{ row }">
           <span v-if="row.errorMessage" class="status-error">{{ row.errorMessage }}</span>
           <span v-else-if="row.skipped" class="status-muted">暂不排期</span>
+          <span v-else-if="row.conflictMessage === '冲突检测失败'" class="status-error"
+            >冲突检测失败，请重新计算</span
+          >
+          <span v-else-if="row.conflictMessage === '正在检查冲突'" class="status-muted"
+            >正在检查冲突</span
+          >
           <span v-else-if="row.conflictLevel === 'CONFLICT'" class="status-error">{{
             row.conflictMessage
           }}</span>

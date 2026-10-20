@@ -1,0 +1,3 @@
+# Historical Playwright-only JWT fixture, verified as a test value rather than a service credential.
+# Keep this exception tied to the original commit, file, rule and line.
+66a8541bfda29a05d0bdf6a22de534d27aae4dbc:frontend/playwright.config.ts:generic-api-key:34

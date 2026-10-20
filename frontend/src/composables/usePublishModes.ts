@@ -41,6 +41,24 @@ export function canUseXApi(account?: PlatformAccount): boolean {
   )
 }
 
+export function canUseBlueskyApi(account?: PlatformAccount): boolean {
+  return Boolean(
+    account?.platform === 'BLUESKY' &&
+    account.status === 'CONNECTED' &&
+    account.availablePublishModes.includes('REAL_API') &&
+    account.publicPublishEnabled,
+  )
+}
+
+export function canUseMastodonApi(account?: PlatformAccount): boolean {
+  return Boolean(
+    account?.platform === 'MASTODON' &&
+    account.status === 'CONNECTED' &&
+    account.availablePublishModes.includes('REAL_API') &&
+    account.publicPublishEnabled,
+  )
+}
+
 export function defaultPublishMode(platform: Platform, account?: PlatformAccount): PublishMode {
   if (platform === 'TOUTIAO') return 'BROWSER_PUBLISH'
   if (platform === 'XIAOHONGSHU') {
@@ -107,12 +125,30 @@ export function publishModeOptions(
     ]
   if (platform === 'X')
     return [{ value: 'REAL_API', label: 'X 官方 API（真实发布）', disabled: !canUseXApi(account) }]
+  if (platform === 'BLUESKY')
+    return [
+      {
+        value: 'REAL_API',
+        label: 'Bluesky API（真实发布）',
+        disabled: !canUseBlueskyApi(account),
+      },
+    ]
+  if (platform === 'MASTODON')
+    return [
+      {
+        value: 'REAL_API',
+        label: 'Mastodon API（真实发布）',
+        disabled: !canUseMastodonApi(account),
+      },
+    ]
   return [{ value: 'REAL_API', label: '微博官方 API', disabled: account?.status !== 'CONNECTED' }]
 }
 
 export function publishModeLabel(platform: Platform, mode: PublishMode): string {
   if (platform === 'WEIBO' && mode === 'REAL_API') return '微博官方 API'
   if (platform === 'X' && mode === 'REAL_API') return 'X 官方 API（真实发布）'
+  if (platform === 'BLUESKY' && mode === 'REAL_API') return 'Bluesky API（真实发布）'
+  if (platform === 'MASTODON' && mode === 'REAL_API') return 'Mastodon API（真实发布）'
   return publishModeNames[mode] || mode
 }
 

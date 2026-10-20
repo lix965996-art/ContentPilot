@@ -1,173 +1,116 @@
-# ContentPilot 设计文档
+# ContentPilot 设计
 
-> 本文合并自原 REQUIREMENTS / SYSTEM_DESIGN / DATABASE_DESIGN / API_DESIGN / PROMPTS / EXPERIMENT_DESIGN / TEST_PLAN 七份文档（2026-07-31），原件见 git 历史。
+## 研究范围
 
-## 1. 需求说明
+毕业设计研究“基于大语言模型与用户活跃度分析的社交媒体内容适配排期系统”。核心问题是：平台化内容生成能否降低人工改写成本并保持事实一致性，以及有来源的历史数据能否为发布时间推荐提供可解释的依据。
 
-### 用户与权限
+按已确认的使用范围，保留合成演示数据及导入、分析、排期操作，使用他人的公开历史数据进行离线分析；无需先接入自己的小红书、公众号等真实发布 API。大模型内容适配仍需要实际模型调用证据。AI 生图、热点研究、更多平台和公开发布可作为扩展。
 
-- ADMIN：用户、模型、平台规则、日志和全局统计；
-- OPERATOR：内容、生成、媒体、推荐、排期、发布、数据与实验；
-- VIEWER：只读访问内容、排期和报告。
+数据分析方式和任务执行方式独立：公开历史可以用于计算排期，随后通过明确标识的演示执行或人工交付验证软件流程。公开数据不能因此被改成模拟来源，模拟执行也不能被记成真实平台发布。完整跨平台演示执行及贯穿算法的数据模式选择尚需实现，见 [ROADMAP](ROADMAP.md)。
 
-### 核心业务链路
+“用户活跃度”在本项目中指通过历史发布时间、曝光及互动表现估计适合触达的时段；当前没有全平台实时在线人数采集。论文、界面与报告应统一这一含义，并说明内容质量、粉丝规模和平台分发会影响观察结果。
 
-1. 新建或导入 UTF-8 TXT/Markdown 原文；
-2. 选择微博、X、小红书、微信公众号、今日头条中的一个或多个平台并生成版本；
-3. 查看质量、耗时、Token、Prompt 版本，编辑并审核；
-4. 提取中英文图片关键词，选择封面/正文图；
-5. 计算平台曲线、综合分、置信度、推荐理由和备选时间；
-6. 创建排期并在日历拖拽；
-7. APScheduler 到点调用已通过验证的官方发布器，或生成小红书人工交付任务，记录日志并防止重复；
-8. 导入 CSV/XLSX 或手工录入互动数据；
-9. 查看平台、内容、时间组对比和 AI 复盘；
-10. 建立实验，汇总分组样本并导出报告。
-
-### 非功能要求
-
-- Windows 10/11 优先；没有真实平台凭证时仍可编辑内容，但不能伪造连接或发布成功；
-- API 统一 `{ code, message, data, traceId }`；
-- 1366×768 与 1920×1080 可用，移动端有响应式导航；
-- 上传限制、ORM、JWT、BCrypt、RBAC、密钥脱敏、DOM 安全、审计和发布幂等；
-- 不伪造真实 API、测试结果或实验结论。
-
-## 2. 系统设计
-
-### 架构
+## 架构与约定
 
 ```text
-Vue 3 SPA
-  ├─ Router / Pinia / Axios / Element Plus
-  ├─ FullCalendar / ECharts
-  └─ JWT Bearer
-          ↓ /api
-FastAPI
-  ├─ Auth + RBAC + Audit
-  ├─ Content / Generation / Media
-  ├─ Recommendation / Schedule / Publisher
-  ├─ Analytics / Experiment / Settings
-  └─ APScheduler
-          ↓
-SQLAlchemy 2 + Alembic → MySQL 8
+Vue 3 / TypeScript / Vite
+  Router · Pinia · Axios · Element Plus
+  FullCalendar · ECharts · Tailwind CSS
+                    ↓ /api
+FastAPI / Pydantic
+  认证与角色 · 内容生成 · 媒体 · 历史分析
+  推荐与优化 · 排期 · 发布适配 · 实验
+                    ↓
+SQLAlchemy / Alembic → MySQL 8
+                    ↘ SQLite 开发与隔离测试
 ```
 
-### 状态流
+后端是 Python 服务，前端是 Vue 应用，分别管理依赖。前端使用 ESLint 和 Prettier，后端使用 Ruff；API 核心响应统一为 `{ code, data, message }`，现有实现附加 `traceId`。错误响应维持相同结构，由业务码和 HTTP 状态共同表达结果。
 
-- 文章：`DRAFT → GENERATED → APPROVED → ARCHIVED`；
-- 版本审核：`PENDING → APPROVED`；
-- 微博发布：`PENDING → RUNNING → SUCCESS`；只有通过 OAuth 实测的账号才可创建任务；
-- 公众号发布：`PENDING → RUNNING → DRAFT_CREATED/PUBLISH_SUBMITTED`；创建草稿不等同于公开发布；
-- 小红书人工交付：`PENDING → WAITING_MANUAL_CONFIRM → MANUAL_PUBLISHED`；
-- 今日头条发布：`PENDING → RUNNING → SUCCESS`；仅在本机浏览器会话有效且管理员显式开启真实发布后执行；
-- 异常进入 `FAILED`，可按接口错误决定重试或重新授权。
+权限角色为 `ADMIN`、`OPERATOR`、`VIEWER`，分别用于管理配置、内容业务和只读访问。具体页面和接口仍按路由/后端权限检查执行。JWT、密码哈希、凭证加密、审计与发布幂等存在实现，但会话撤销等边界仍有待修复，不能仅凭模块存在判定安全验收完成。
 
-### 降级
+## 内容工作流
 
-- LLM 缺少密钥或失败：生成任务明确失败，不生成伪造的模型结果；
-- Unsplash 不可用：10 张本地 SVG；
-- 微博或公众号未通过官方验证：禁止创建真实发布排期；
-- 小红书没有可用官方发布权限：只生成文案与图片交付包，等待人工发布确认。
+1. 新建或导入 TXT/Markdown 原文，也可从热点研究或灵感库创建选题。
+2. 为微博、X、小红书、微信公众号、今日头条选择独立平台版本。
+3. 使用 `QUICK` 快速改写，或 `DEEP` 研究、策略、候选稿、评审及修订流程。
+4. 对照原文检查关键信息、数字、时间和来源，编辑并审核；公众号版本可排版和预览。
+5. 为版本选择本地、上传、搜索或生成图片，随后进入推荐、排期和交付。
 
-### 安全
+每个平台使用独立 Prompt Profile 与结构化输出模型。JSON 校验失败会重试，单个平台失败保留其他平台结果；生成任务保存模型、服务商、Prompt 版本、Token 和耗时。总任务状态包括 `PENDING`、`RUNNING`、`SUCCESS`、`PARTIAL_SUCCESS`、`FAILED`，平台状态另有 `RETRYING`。
 
-JWT 区分 access/refresh；服务端校验角色；密码 BCrypt；SQLAlchemy 参数化；上传限制类型与大小；系统密钥只显示掩码；发布使用唯一 `idempotency_key` 和事务状态检查；写操作进入 `audit_log`。
+模型未配置或调用失败时不能生成伪造的成功结果。质量评审有模型评审与规则降级；规则文本相似度不能核验事实。DEEP 简报是待核验的中间结果，候选评审应能回看原文；内容发生实质修改后，旧评分与审核状态应失效或标记过期。这些展示和失效机制的缺口列在 [ROADMAP](ROADMAP.md)。
 
-## 3. 数据库设计
+热点模块读取公开榜单并保留来源，榜单作为选题线索。配图模块包含 Wikimedia Commons、可配置 Unsplash、本地素材以及图片服务请求；保存的图片保留来源和关联信息。素材授权需要人工核对，图片服务商协议兼容和远程图片交付仍有已知问题。
 
-迁移：`20260721_0001` 创建认证/RBAC；`d7bc40428afb` 创建完整业务模型。
+## 历史数据与推荐
 
-| 领域 | 表 | 关系/用途 |
-|---|---|---|
-| 认证 | `sys_user`, `sys_role`, `sys_user_role` | 用户与多角色 |
-| 内容 | `content_article`, `content_variant` | 一篇原文对应多平台、多版本 |
-| 媒体 | `media_asset` | 关联文章/版本，记录来源、署名和用途 |
-| 平台 | `platform_account` | 平台账号和发布方式，不明文返回凭证 |
-| 推荐 | `activity_prior`, `account_activity_stat`, `publish_recommendation` | 平台先验、账号历史与推荐解释 |
-| 发布 | `publish_schedule`, `publish_log` | 排期、幂等键、状态、错误与逐步日志 |
-| 分析 | `engagement_metric` | 曝光、互动、分组和数据来源 |
-| 实验 | `experiment`, `experiment_sample` | 研究假设、分组样本、结果与结论 |
-| 管理 | `audit_log`, `system_setting`, `generation_task` | 审计、配置与 AI 任务状态 |
+### 数据来源
 
-关键约束：版本号按文章+平台唯一；活跃规则时段唯一；发布幂等键唯一；互动记录按排期+日期+来源去重；外键删除使用 CASCADE 或 SET NULL 保持一致性。
+- **合成演示数据**：用于验证导入、清洗、推荐和日历流程，保留明显的 `SIMULATED` 标识。
+- **公开历史数据**：记录原始平台、账号、来源、覆盖日期、源时区和指标定义；跨平台借用时只作为明确标注的参考。
+- **账号运营数据**：若以后采集，需要独立记录采集方法和观察窗口。`MANUAL` 标签本身不证明数据已核验。
 
-## 4. API 设计
+来源类型与真实性标记应分别保存。已有合成记录曾使用 `ACCOUNT_HISTORY` 类型并在备注中标注模拟；模式过滤不能只判断类型。推荐和实验使用的模式、批次及日期条件应贯穿曲线、检索、估计、优化与结果快照。
 
-统一成功响应：`{ "code": 0, "message": "success", "data": ..., "traceId": "..." }`。校验、权限、冲突和内部错误使用业务码并保留相同结构。Swagger：`/docs`。
+导入使用 CSV/XLSX 字段映射、预览和批次记录。历史分析截止时间与未来排期时间是两个参数：多年前的公开数据可以按其覆盖范围分析，不能无提示地被“最近 90 天”排除。源时区应转换为统一统计时区，再划分小时和星期。
 
-| 模块 | 主要端点 |
-|---|---|
-| 认证 | `/api/auth/login`, `/logout`, `/me`, `/refresh`, `/password` |
-| 内容 | `/api/articles`, `/api/articles/{id}`, `/archive`, `/import`, `/variants/{id}/approve` |
-| AI | `/api/generation/content`, `/tasks/{taskId}`, `/regenerate`, `/keywords`, `/review` |
-| 媒体 | `/api/media/search`, `/extract-keywords`, `/select`, `/articles/{id}/media` |
-| 推荐 | `/api/recommendations/publish-time`, `/api/activity/curve`, `/platform-priors` |
-| 排期发布 | `/api/schedules`, `/{id}/publish-now`, `/retry`, `/cancel`, `/manual-confirm` |
-| 平台账号 | `/api/platform-accounts`, `/{platform}/test`, `/{platform}/auth-logs`, `/{platform}` |
-| 微博授权 | `/api/platform-accounts/WEIBO/oauth/start`, `/WEIBO/oauth/callback` |
-| 发布包 | `/api/schedules/{id}/publish-package`, `/publish-package/download` |
-| 数据 | `/api/analytics/import`, `/manual`, `/overview`, 三类对比、`/report`, `/ai-summary` |
-| 实验 | `/api/experiments`, `/{id}/start`, `/finish`, `/report` |
-| 管理 | `/api/admin/users`, `/audit-logs`, `/api/settings` |
+### 算法路径
 
-权限原则：读接口允许对应业务的查看者；所有写操作至少 OPERATOR；用户、配置和活跃规则写操作仅 ADMIN。
+现有实现包含 `hybrid-v2` 单平台推荐和可选语义排期流程，不能把整个系统描述成早期固定权重公式。
 
-### 文章改写任务
+1. 内容画像和历史检索使用文章与版本信息；可用时调用 embedding 模型，否则存在字符 n-gram 哈希向量降级。
+2. 历史样本按相似度、时间衰减、数据质量与来源可靠性加权，生成 7×24 时段估计。有效样本量影响与平台先验的收缩混合。
+3. 从可选时段构造未来候选，OR-Tools CP-SAT 在锁定时间、平台间隔、禁用时段及有效期等约束下联合选择。
+4. 缺少依赖、样本不足或求解失败时回退，并保留原因和原单平台结果。
 
-- `POST /api/generation/content`：创建并行生成任务，保持原 API 主路径。
-- `GET /api/generation/tasks/{task_id}`：查询总进度及 `platformStatusJson` 平台级状态。
-- `POST /api/generation/tasks/{task_id}/platforms/{platform}/retry`：只重试指定平台。
-- `POST /api/generation/content/{variant_id}/regenerate`：基于历史版本重新生成单个平台。
-- `POST /api/generation/review`：执行规则校验和 LLM 语义质量评审。
-- `POST /api/generation/keywords`：LLM 优先的关键词提取。
-- `POST /api/variants/{variant_id}/reject`：拒绝版本。
-- `DELETE /api/variants/{variant_id}`：删除未进入发布任务的版本。
+推荐需要记录参与样本、历史范围、参考时间、候选/备选时段、约束、选择原因和算法版本。置信度主要表达数据支持程度，不能当作已经校准的预测准确率。检索范围传递、模拟样本隔离和锁定时间一致性仍需修复。
 
-任务总状态为 `PENDING/RUNNING/SUCCESS/PARTIAL_SUCCESS/FAILED`，平台状态为
-`PENDING/RUNNING/RETRYING/SUCCESS/FAILED`。任务记录 provider、modelName、promptVersion、
-tokenUsage、durationMs，以及每个平台的错误、耗时、重试次数和结果版本 ID。
+代码入口：[内容向量](../backend/app/services/content_embedding_service.py)、[历史检索](../backend/app/services/semantic_history_retrieval_service.py)、[加权估计](../backend/app/services/activity_estimation_service.py)、[联合优化](../backend/app/services/schedule_optimization_service.py)、[语义流程](../backend/app/services/semantic_schedule_pipeline.py)。
 
-## 5. Prompt 设计
+## 排期与交付
 
-Prompt 版本当前为 `3.3.0`，生成版本保存 `prompt_version`、模型、耗时和 Token。
+日历任务与调度器有持久化、日志和重试流程。状态应区分草稿创建、待人工交付、提交中、公开成功和演示完成；保存凭证、连接检测通过、进入草稿箱均不能代替公开发布证据。
 
-- 系统约束：保留事实、不虚构数字、信息不足给出警告、结构化 JSON；
-- 微博：120–160 字、核心观点优先、2–4 个话题、最多 2 个 Emoji；
-- X：标题钩子、正文和最多 4 个标签合并后不超过 280 个加权字符，不输出 Markdown；
-- 小红书：自然标题、短段落、5–8 标签、不虚构亲身经历；
-- 公众号：标题/摘要/二级标题/Markdown/配图位置/风险提示；
-- 今日头条：新闻资讯式标题、清晰导语与分段正文，避免夸张和未经核验的事实；
-- 质量审查：完整度、事实一致性、平台风格、可读性、标签相关性与人工复核；
-- 数据复盘：只根据输入数据，区分相关与因果，提示样本限制。
+| 平台       | 当前连接/交付路径                         | 边界                                           |
+| ---------- | ----------------------------------------- | ---------------------------------------------- |
+| 微博       | 官方 OAuth 与发布接口                     | 需要合法授权及相应发布权限                     |
+| X          | OAuth 2.0 + PKCE，文字发布                | 当前路径不上传图片或视频                       |
+| 小红书     | 人工发布包；可选本机 MCP                  | MCP 属于实验能力，不能当成官方接口             |
+| 微信公众号 | 本机 Chrome 草稿；可选官方接口/Wechatsync | 草稿与公开发布分开验收；正式提交分支有已知缺陷 |
+| 今日头条   | 可选本机 Chrome 会话                      | 依赖页面与登录状态，受账号真实发布开关约束     |
 
-完整文字来自总任务书，代码入口为 `backend/app/prompts/profiles.py`。真实 OpenAI 兼容响应需是 JSON；结构校验失败会自动重试，连续失败则将对应平台标为 `FAILED`，不会生成本地伪结果。
+毕业设计默认不要求外部社交平台公开发布验收。显式演示执行应复用内容校验、调度器、日志和交付包，通过专用后端分支禁止外部发送，并以“演示执行完成”作为独立终态；目前属于待完成事项。
 
-## 6. 实验设计
+## 数据模型与 API
 
-### 内容适配效率
+| 领域 | 主要模型/数据                            |
+| ---- | ---------------------------------------- |
+| 认证 | 用户、角色、用户角色关联                 |
+| 内容 | 原文、平台版本、生成任务、素材关联       |
+| 推荐 | 平台先验、互动历史、导入批次、推荐与快照 |
+| 发布 | 平台账号、排期、执行日志、幂等键         |
+| 分析 | 互动指标、实验、实验样本                 |
+| 管理 | 系统设置、审计日志                       |
 
-- 至少 10 篇文章；
-- 对照组纯人工改写，实验组 AI 生成后人工修改；
-- 指标：耗时、修改字符数、修改次数、适配评分、满意度；
-- 记录 Prompt/模型版本，避免模型变化污染结论。
+版本按文章和平台编号，任务保留推荐依据，导入批次保留来源元数据。指标汇总需保存分母及计算口径；这是当前需要补齐的数据约束。
 
-### 发布时间推荐
+接口按 `/api/auth`、`articles`、`variants`、`generation`、`media`、`activity`、`recommendations`、`schedules`、`platform-accounts`、`analytics`、`experiments`、`admin` 和 `settings` 分组。以运行中的 [Swagger](http://127.0.0.1:8000/docs) 和 [路由聚合](../backend/app/api/router.py) 为接口定义依据。
 
-- 建议连续两周；
-- 实验组使用推荐时间，对照组使用固定时间；
-- 指标：互动率及点赞、评论、收藏、转发均值；
-- 同期尽量平衡平台、主题、内容质量和粉丝规模。
+## 运行数据
 
-推荐评分有历史时：`0.4×平台先验 + 0.4×账号历史 + 0.1×内容类型 + 0.1×受众时区`；冷启动为 `0.7×平台先验 + 0.2×内容类型 + 0.1×受众时区`。置信度按历史样本量分为高/中/低。
+源码、示例和运行数据分开保存。`examples/history/` 保存可复现样例，`var/` 保存运行状态、日志、上传、会话、工具、缓存、报告、临时文件和本地数据库。`CONTENTPILOT_VAR_DIR` 统一指定运行数据根目录；默认 `<project>/var`。配置、缓存与真实会话不得混入源码或样例提交。
 
-系统自带样本仅为 `SIMULATED`，不能直接作为论文真实结论。
+## 实验与验收
 
-## 7. 测试计划
+| 实验             | 方法                                                                                                         | 可支持的结论                                                                   |
+| ---------------- | ------------------------------------------------------------------------------------------------------------ | ------------------------------------------------------------------------------ |
+| 内容适配         | 使用不同类型原文，固定真实模型与参数，比较人工改写、通用 Prompt 和平台 Prompt；可补 QUICK/DEEP 比较          | 格式合规、硬事实错误、信息覆盖、人工修改量、真实耗时和 API usage；保留失败样本 |
+| 排期离线评估     | 按时间切分公开历史：较早样本建立规则与检索库，未来样本只用于评估；固定时间、先验和完整方法使用相同样本与约束 | 相应数据集范围内的历史预测/排序表现及不确定性                                  |
+| 模块消融         | 去检索、去衰减、去联合优化，与完整流程比较                                                                   | 可行率、冲突、约束违例、求解耗时及目标值                                       |
+| 软件流程         | 隔离环境覆盖连续编辑、失败、切换模式、锁定、重复执行与重启                                                   | 输入和状态一致性，日志与结果可追踪                                             |
+| 线上效果（可选） | 合法账号下控制主题和内容质量，统一发布后观察窗口和互动分母                                                   | 仅在真正实施后评价线上效果                                                     |
 
-- 后端：认证、RBAC、文章 CRUD、五平台生成、任务轮询、JSON 降级、时间评分、排期、发布幂等、指标、导入和实验；
-- 前端：Prettier、ESLint、TypeScript 构建、Pinia 和登录组件单测；
-- E2E：管理员登录与真实工作台、运营者访问内容/AI/日历/复盘、管理员接口越权；
-- 数据库：在 MySQL 8 实际执行 Alembic 和 seed；自动化测试使用隔离 SQLite；
-- 启动：后台启动、健康等待、状态、精确停止和再次启动；
-- 异常：空/短文本、无权限、过去时间、重复排期、重复发布、负指标、字段缺失、外部模型失败。
+内容实验可从至少 10 篇文章、2–3 个代表平台起步；样本数量不等于统计充分性。适用时采用两名评阅者盲评。离线样本内均值差异不证明推荐导致互动提升；系统优化目标改善也不等于真实运营改善。
 
-每次发布前运行 `.\contentpilot.ps1 test`，不得以删除断言、吞异常或伪造日志获得通过。
+自动检查覆盖后端、前端和浏览器业务，数据库测试使用隔离实例。E2E 应按角色核对实际路由与内容，并覆盖常用桌面和手机视口。具体故障验收清单见 [ROADMAP](ROADMAP.md)，执行入口见 [README](../README.md)。

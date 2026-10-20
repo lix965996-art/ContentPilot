@@ -1,14 +1,28 @@
 import json
 import os
 import re
+import tempfile
 from collections.abc import Generator
 from pathlib import Path
 
 import pytest
 from fastapi.testclient import TestClient
 
-TEST_DATABASE_PATH = Path(__file__).resolve().parent / ".test_socialflow.db"
-os.environ["DATABASE_URL"] = f"sqlite:///{TEST_DATABASE_PATH.as_posix()}"
+PROJECT_ROOT = Path(__file__).resolve().parents[3]
+configured_var = os.environ.get("CONTENTPILOT_VAR_DIR", "").strip()
+TEST_STORAGE_PARENT = Path(configured_var).expanduser() if configured_var else PROJECT_ROOT / "var"
+if not TEST_STORAGE_PARENT.is_absolute():
+    TEST_STORAGE_PARENT = PROJECT_ROOT / TEST_STORAGE_PARENT
+TEST_STORAGE_PARENT = TEST_STORAGE_PARENT.resolve() / "tests"
+TEST_STORAGE_PARENT.mkdir(parents=True, exist_ok=True)
+TEST_STORAGE = tempfile.TemporaryDirectory(prefix="pytest-", dir=TEST_STORAGE_PARENT)
+TEST_VAR_DIR = Path(TEST_STORAGE.name)
+os.environ["CONTENTPILOT_VAR_DIR"] = str(TEST_VAR_DIR)
+TEST_DATABASE_PATH = TEST_VAR_DIR / "db" / ".test_socialflow.db"
+MYSQL_TEST_URL = os.environ.get("CONTENTPILOT_TEST_MYSQL_URL", "").strip()
+os.environ["DATABASE_URL"] = (
+    MYSQL_TEST_URL if MYSQL_TEST_URL else f"sqlite:///{TEST_DATABASE_PATH.as_posix()}"
+)
 os.environ["JWT_SECRET"] = "test-secret-that-is-long-enough-for-jwt-signing"
 os.environ["APP_DEMO_MODE"] = "true"
 os.environ["APP_ENV"] = "test"
@@ -25,6 +39,12 @@ from app.main import app  # noqa: E402
 from app.services import generation_service  # noqa: E402
 
 
+def pytest_configure(config) -> None:
+    if config.option.basetemp is None:
+        (TEST_VAR_DIR / "tmp").mkdir(parents=True, exist_ok=True)
+        config.option.basetemp = str(TEST_VAR_DIR / "tmp" / "pytest")
+
+
 @pytest.fixture(scope="session", autouse=True)
 def database() -> Generator[None, None, None]:
     Base.metadata.create_all(bind=engine)
@@ -32,8 +52,7 @@ def database() -> Generator[None, None, None]:
         seed_database(db)
     yield
     engine.dispose()
-    if TEST_DATABASE_PATH.exists():
-        TEST_DATABASE_PATH.unlink()
+    TEST_STORAGE.cleanup()
 
 
 @pytest.fixture()

@@ -1,20 +1,23 @@
 FROM python:3.12-slim
 
-ENV PYTHONDONTWRITEBYTECODE=1 \
+ENV TZ=Asia/Shanghai \
+    PYTHONDONTWRITEBYTECODE=1 \
     PYTHONUNBUFFERED=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 WORKDIR /app/backend
 
-COPY backend/requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
+COPY backend/requirements-runtime.lock.txt ./requirements-runtime.lock.txt
+RUN pip install --no-cache-dir -r requirements-runtime.lock.txt
 
 COPY backend/ ./
+COPY frontend/public/ /app/frontend/public/
 COPY backend/docker-entrypoint.sh /usr/local/bin/contentpilot-entrypoint
 
 RUN addgroup --system contentpilot \
     && adduser --system --ingroup contentpilot contentpilot \
-    && mkdir -p /app/uploads /app/data \
+    && mkdir -p /app/var/uploads /app/var/db /app/var/run /app/var/logs \
+        /app/var/sessions /app/var/tools /app/var/cache /app/var/reports /app/var/tmp \
     && chown -R contentpilot:contentpilot /app \
     && chmod +x /usr/local/bin/contentpilot-entrypoint
 

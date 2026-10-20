@@ -5,9 +5,11 @@ from sqlalchemy import engine_from_config, pool
 from alembic import context
 from app import models  # noqa: F401
 from app.core.config import settings
+from app.core.paths import ensure_sqlite_directory
 from app.db.base import Base
 
 config = context.config
+ensure_sqlite_directory(settings.database_url)
 config.set_main_option("sqlalchemy.url", settings.database_url)
 
 if config.config_file_name is not None:

@@ -24,7 +24,11 @@ from sqlalchemy.orm import Session
 
 from app.core.exceptions import AppException
 from app.models.business import ContentArticle, ContentEmbedding, EngagementHistory
-from app.services.activity_service import BASELINE_SOURCE_TYPES
+from app.services.activity_service import (
+    BASELINE_SOURCE_TYPES,
+    business_now,
+    real_history_conditions,
+)
 from app.services.content_embedding_service import (
     EMBEDDING_VERSION,
     embed_text,
@@ -76,10 +80,16 @@ def _scope_embeddings(
     callers label as cross-platform. Article vectors are platform-agnostic
     originals with the article being scheduled removed so it cannot match itself.
     """
-    history_query = select(ContentEmbedding).where(
-        ContentEmbedding.ref_type == "HISTORY",
-        ContentEmbedding.embedding_version == EMBEDDING_VERSION,
-        ContentEmbedding.platform == platform,
+    history_query = (
+        select(ContentEmbedding)
+        .join(EngagementHistory, EngagementHistory.id == ContentEmbedding.content_id)
+        .where(
+            ContentEmbedding.ref_type == "HISTORY",
+            ContentEmbedding.embedding_version == EMBEDDING_VERSION,
+            ContentEmbedding.platform == platform,
+            *real_history_conditions(),
+            EngagementHistory.publish_time <= business_now(),
+        )
     )
     history = list(db.scalars(history_query.where(ContentEmbedding.account_id == account_id)).all())
     if not history:
@@ -94,6 +104,8 @@ def _scope_embeddings(
                     ContentEmbedding.embedding_version == EMBEDDING_VERSION,
                     ContentEmbedding.platform != platform,
                     EngagementHistory.source_type.in_(BASELINE_SOURCE_TYPES),
+                    *real_history_conditions(),
+                    EngagementHistory.publish_time <= business_now(),
                 )
             ).all()
         )

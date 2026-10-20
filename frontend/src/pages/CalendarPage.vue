@@ -14,9 +14,12 @@ import StatusBadge from '@/components/StatusBadge.vue'
 import DetailDrawer from '@/components/DetailDrawer.vue'
 import { workflowApi } from '@/api/workflow'
 import { getApiErrorMessage } from '@/api/client'
+import { createIdempotencyIntent, normalizeSchedulePayload } from '@/utils/idempotency'
 import {
   accountStatusNames,
   canUseXApi,
+  canUseBlueskyApi,
+  canUseMastodonApi,
   defaultPublishMode,
   formatLocalDateTime,
   publishModeLabel,
@@ -48,13 +51,25 @@ const backlogQuery = ref('')
 const backlogElement = ref<HTMLElement>()
 let backlogDraggable: Draggable | undefined
 const drawer = ref(false)
+const rescheduleTime = ref('')
+const rescheduling = ref(false)
 const editing = ref<Schedule>()
 const dialog = ref(false)
 const articles = ref<Article[]>([])
 const variants = ref<Variant[]>([])
+const variantsLoading = ref(false)
+let variantSequence = 0
 const accounts = ref<PlatformAccount[]>([])
 const accountFilter = ref<number | ''>('')
 const recommendation = ref<PublishTimeRecommendation>()
+const createIntent = createIdempotencyIntent()
+const creating = ref(false)
+let recommendationSequence = 0
+let conflictSequence = 0
+
+watch(platformFilter, () => {
+  accountFilter.value = ''
+})
 const recommending = ref(false)
 const conflicts = ref<ScheduleConflict[]>([])
 const timeSource = ref<TimeSource>('CUSTOM')
@@ -79,6 +94,8 @@ const platformGlyphs: Record<Platform, string> = {
   XIAOHONGSHU: '红',
   WECHAT_OFFICIAL: '公',
   X: 'X',
+  BLUESKY: '蓝',
+  MASTODON: '象',
   TOUTIAO: '头',
 }
 const filteredBacklog = computed(() =>
@@ -106,7 +123,8 @@ const visibleSchedules = computed(() =>
 const densityAlerts = computed(() => {
   const groups = new Map<string, Schedule[]>()
   visibleSchedules.value.forEach((item) => {
-    if (!item.accountId || ['CANCELLED', 'FAILED'].includes(item.status)) return
+    if (!item.accountId || ['CANCELLED', 'FAILED', 'EXPIRED', 'INTERRUPTED'].includes(item.status))
+      return
     const key = `${item.platform}-${item.accountId}`
     groups.set(key, [...(groups.get(key) || []), item])
   })
@@ -201,12 +219,32 @@ const options = computed(() => ({
 }))
 async function openSchedule(id: number) {
   editing.value = await workflowApi.schedule(id)
+  rescheduleTime.value = formatLocalDateTime(
+    new Date(Math.max(Date.now() + 3600000, new Date(editing.value.scheduledAt).getTime())),
+  ).slice(0, 16)
   drawer.value = true
   basis.value = undefined
   try {
     basis.value = await workflowApi.scheduleRecommendationBasis(id)
   } catch {
     basis.value = undefined
+  }
+}
+async function reschedule() {
+  if (!editing.value || !rescheduleTime.value) return
+  rescheduling.value = true
+  try {
+    await workflowApi.updateSchedule(editing.value.id, {
+      scheduled_at: `${rescheduleTime.value}:00`,
+      time_source: 'CUSTOM',
+    })
+    await openSchedule(editing.value.id)
+    await load()
+    ElMessage.success('任务已重新排期')
+  } catch (error) {
+    ElMessage.error(getApiErrorMessage(error))
+  } finally {
+    rescheduling.value = false
   }
 }
 const basisReasons = computed(() => {
@@ -261,23 +299,47 @@ async function init() {
     const articleId = Number(route.query.article)
     if (articleId && articles.value.some((item) => item.id === articleId)) {
       form.value.article_id = articleId
-      await chooseArticle()
       const variantId = Number(route.query.variant)
-      if (variantId && variants.value.some((item) => item.id === variantId)) {
-        form.value.variant_id = variantId
-        chooseVariant(variantId)
-      }
+      await loadArticleVariants(articleId, variantId)
     }
   }
 }
 async function chooseArticle() {
-  if (!form.value.article_id) return
-  variants.value = await workflowApi.variants(form.value.article_id)
-  const first = variants.value.find((item) => item.reviewStatus === 'APPROVED') || variants.value[0]
-  if (first) {
-    form.value.variant_id = first.id
-    form.value.platform = first.platform
-    choosePlatform()
+  await loadArticleVariants(form.value.article_id)
+}
+async function loadArticleVariants(
+  articleId?: number,
+  preferredVariantId?: number,
+  autofill = true,
+) {
+  const sequence = ++variantSequence
+  const active = () => sequence === variantSequence && articleId === form.value.article_id
+  variants.value = []
+  form.value.variant_id = undefined
+  form.value.account_id = undefined
+  resetAdvisor()
+  variantsLoading.value = Boolean(articleId)
+  if (!articleId) return
+  try {
+    const rows = await workflowApi.variants(articleId)
+    if (!active()) return
+    variants.value = rows
+    const first =
+      rows.find((item) => item.id === preferredVariantId) ||
+      rows.find((item) => item.reviewStatus === 'APPROVED') ||
+      rows[0]
+    if (first) {
+      form.value.variant_id = first.id
+      form.value.platform = first.platform
+      const account = accounts.value.find((item) => item.platform === first.platform && item.id)
+      form.value.account_id = account?.id || undefined
+      form.value.publish_mode = defaultPublishMode(first.platform, account)
+      void fetchRecommendation(autofill)
+    }
+  } catch (error) {
+    if (active()) ElMessage.error(getApiErrorMessage(error, '平台版本加载失败，请重新选择文章'))
+  } finally {
+    if (active()) variantsLoading.value = false
   }
 }
 function chooseVariant(id: number) {
@@ -294,22 +356,27 @@ function choosePlatform() {
   void fetchRecommendation()
 }
 async function fetchRecommendation(autofill = true) {
+  const sequence = ++recommendationSequence
   recommendation.value = undefined
   if (!form.value.article_id) return
   recommending.value = true
   try {
-    recommendation.value = await workflowApi.recommend({
+    const data = await workflowApi.recommend({
       article_id: form.value.article_id,
       variant_id: form.value.variant_id,
       platform: form.value.platform,
       account_id: form.value.account_id,
     })
-    if (autofill && recommendation.value.recommendedAt) applyRecommendedTime()
+    if (sequence !== recommendationSequence) return
+    recommendation.value = data
+    if (autofill && data.recommendedAt) applyRecommendedTime()
   } catch (e) {
-    ElMessage.warning(getApiErrorMessage(e))
+    if (sequence === recommendationSequence) ElMessage.warning(getApiErrorMessage(e))
   } finally {
-    recommending.value = false
-    await checkConflict()
+    if (sequence === recommendationSequence) {
+      recommending.value = false
+      await checkConflict()
+    }
   }
 }
 function applyRecommendedTime() {
@@ -335,6 +402,7 @@ function markCustomTime() {
   void checkConflict()
 }
 async function checkConflict() {
+  const sequence = ++conflictSequence
   conflicts.value = []
   if (!form.value.scheduled_at) return
   try {
@@ -343,17 +411,24 @@ async function checkConflict() {
       scheduled_at: `${form.value.scheduled_at}:00`,
       account_id: form.value.account_id,
     })
+    if (sequence !== conflictSequence) return
     conflicts.value = result.conflicts
   } catch {
-    conflicts.value = []
+    if (sequence === conflictSequence) conflicts.value = []
   }
 }
 function resetAdvisor() {
+  recommendationSequence += 1
+  conflictSequence += 1
+  recommending.value = false
   recommendation.value = undefined
   conflicts.value = []
   timeSource.value = 'CUSTOM'
 }
 function openCreate() {
+  variantSequence += 1
+  variantsLoading.value = false
+  variants.value = []
   resetAdvisor()
   form.value = {
     platform: 'WEIBO',
@@ -375,16 +450,21 @@ async function openBacklog(item: ScheduleBacklogItem, date?: Date) {
     ).slice(0, 16),
     publish_mode: defaultPublishMode(item.platform),
   }
-  variants.value = await workflowApi.variants(item.articleId)
-  const account = accounts.value.find((row) => row.platform === form.value.platform && row.id)
-  form.value.account_id = account?.id || undefined
-  form.value.publish_mode = defaultPublishMode(form.value.platform, account)
   dialog.value = true
   // 拖到具体格子时保留用户选定的时间，仅展示推荐；点击“排期”按钮时自动填充推荐时间
-  await fetchRecommendation(!date)
+  await loadArticleVariants(item.articleId, item.variantId, !date)
 }
 async function create() {
+  if (creating.value || variantsLoading.value) return
   try {
+    if (!form.value.article_id || !form.value.variant_id) {
+      ElMessage.warning('请选择原文和平台版本')
+      return
+    }
+    if (!form.value.scheduled_at) {
+      ElMessage.warning('请选择排期时间')
+      return
+    }
     if (
       (form.value.platform !== 'XIAOHONGSHU' || form.value.publish_mode === 'MCP_PUBLISH') &&
       !form.value.account_id
@@ -396,18 +476,33 @@ async function create() {
       ElMessage.warning('X 账号尚未完成授权，或管理员尚未开启真实发布')
       return
     }
-    await workflowApi.createSchedule({
+    if (form.value.platform === 'MASTODON' && !canUseMastodonApi(selectedAccount.value)) {
+      ElMessage.warning('Mastodon 账号尚未通过连接验证，或管理员尚未开启真实发布')
+      return
+    }
+    if (form.value.platform === 'BLUESKY' && !canUseBlueskyApi(selectedAccount.value)) {
+      ElMessage.warning('Bluesky 账号尚未通过连接验证，或管理员尚未开启真实发布')
+      return
+    }
+    const payload = normalizeSchedulePayload({
       ...form.value,
       scheduled_at: `${form.value.scheduled_at}:00`,
       recommendation_id: recommendation.value?.id,
       time_source: timeSource.value,
       content_type: recommendation.value?.contentType,
     })
+    creating.value = true
+    await workflowApi.createSchedule({
+      ...payload,
+      idempotency_key: createIntent.keyFor(payload),
+    })
     dialog.value = false
     await load()
     ElMessage.success('排期已创建')
   } catch (e) {
     ElMessage.error(getApiErrorMessage(e))
+  } finally {
+    creating.value = false
   }
 }
 onMounted(init)
@@ -420,7 +515,12 @@ watch(
       .filter(Boolean)
   },
 )
-onBeforeUnmount(() => backlogDraggable?.destroy())
+onBeforeUnmount(() => {
+  variantSequence += 1
+  recommendationSequence += 1
+  conflictSequence += 1
+  backlogDraggable?.destroy()
+})
 </script>
 <template>
   <div>
@@ -522,6 +622,27 @@ onBeforeUnmount(() => backlogDraggable?.destroy())
             <p class="field-label">发布方式</p>
             <p class="mt-2">{{ publishModeLabel(editing.platform, editing.publishMode) }}</p>
           </div>
+          <el-alert
+            v-if="editing.errorMessage"
+            :title="editing.errorMessage"
+            type="warning"
+            :closable="false"
+          />
+          <div
+            v-if="
+              canOperate && ['PENDING', 'FAILED', 'EXPIRED', 'INTERRUPTED'].includes(editing.status)
+            "
+            class="space-y-3"
+          >
+            <p class="field-label">重新排期</p>
+            <p v-if="editing.status === 'INTERRUPTED'" class="text-xs text-muted">
+              请先到平台确认是否已发布，避免重复发送。
+            </p>
+            <el-input v-model="rescheduleTime" type="datetime-local" aria-label="重新排期时间" />
+            <el-button type="primary" :loading="rescheduling" @click="reschedule"
+              >保存新排期</el-button
+            >
+          </div>
           <div v-if="basis">
             <p class="field-label">推荐依据</p>
             <div class="reason-card mt-2 space-y-2">
@@ -561,14 +682,25 @@ onBeforeUnmount(() => backlogDraggable?.destroy())
     ><el-dialog v-model="dialog" title="新建排期" width="520px"
       ><el-form label-position="top"
         ><el-form-item label="文章" required
-          ><el-select v-model="form.article_id" filterable class="w-full" @change="chooseArticle"
+          ><el-select
+            v-model="form.article_id"
+            data-testid="schedule-create-article"
+            filterable
+            class="w-full"
+            @change="chooseArticle"
             ><el-option
               v-for="item in articles"
               :key="item.id"
               :label="item.title"
               :value="item.id" /></el-select></el-form-item
         ><el-form-item label="平台版本" required
-          ><el-select v-model="form.variant_id" class="w-full" @change="chooseVariant"
+          ><el-select
+            v-model="form.variant_id"
+            data-testid="schedule-create-variant"
+            :loading="variantsLoading"
+            :disabled="variantsLoading"
+            class="w-full"
+            @change="chooseVariant"
             ><el-option
               v-for="item in variants"
               :key="item.id"
@@ -577,6 +709,7 @@ onBeforeUnmount(() => backlogDraggable?.destroy())
         ><el-form-item label="排期时间" required
           ><el-date-picker
             v-model="form.scheduled_at"
+            data-testid="schedule-create-time"
             type="datetime"
             value-format="YYYY-MM-DDTHH:mm"
             class="!w-full"
@@ -671,6 +804,26 @@ onBeforeUnmount(() => backlogDraggable?.destroy())
           :closable="false"
         />
         <el-alert
+          v-else-if="form.platform === 'BLUESKY'"
+          :title="
+            canUseBlueskyApi(selectedAccount)
+              ? '排期到点后会通过 Bluesky API 自动发送真实帖子，请保持项目服务运行。'
+              : '当前不会发布：请先保存 Bluesky 应用密码、验证连接，并开启真实发布开关。'
+          "
+          :type="canUseBlueskyApi(selectedAccount) ? 'warning' : 'info'"
+          :closable="false"
+        />
+        <el-alert
+          v-else-if="form.platform === 'MASTODON'"
+          :title="
+            canUseMastodonApi(selectedAccount)
+              ? '排期到点后会自动发布到 Mastodon，请保持项目服务运行。'
+              : '当前不会发布：请先配置 Mastodon 服务器与访问令牌，验证连接，并开启真实发布。'
+          "
+          :type="canUseMastodonApi(selectedAccount) ? 'warning' : 'info'"
+          :closable="false"
+        />
+        <el-alert
           v-else-if="form.platform === 'TOUTIAO'"
           :title="
             selectedAccount?.status === 'CONNECTED' && selectedAccount.publicPublishEnabled
@@ -687,7 +840,14 @@ onBeforeUnmount(() => backlogDraggable?.destroy())
       </el-form>
       <template #footer>
         <el-button @click="dialog = false">取消</el-button>
-        <el-button type="primary" @click="create">创建排期</el-button>
+        <el-button
+          type="primary"
+          :loading="creating"
+          :disabled="variantsLoading || !form.variant_id"
+          data-testid="schedule-create-submit"
+          @click="create"
+          >创建排期</el-button
+        >
       </template>
     </el-dialog>
   </div>

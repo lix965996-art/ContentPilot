@@ -1,14 +1,24 @@
 [tool.pytest.ini_options]
 testpaths = ["app/tests"]
 addopts = "-q"
+cache_dir = "../var/cache/pytest"
+markers = [
+    "mysql_integration: requires CONTENTPILOT_TEST_MYSQL_URL pointing at a disposable MySQL database",
+]
 
 [tool.ruff]
 target-version = "py312"
 line-length = 100
+cache-dir = "../var/cache/ruff/backend"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "B", "UP"]
+select = ["E", "F", "I", "B", "UP", "C90"]
 ignore = ["B008"]
+
+[tool.ruff.lint.mccabe]
+# Baseline after splitting the scheduling, account and publishing pipelines.
+# New code may not exceed this without an explicit, reviewed exception.
+max-complexity = 25
 
 [tool.ruff.lint.per-file-ignores]
 # prompt 模板中的长行是三引号字符串内的 LLM 示例文案（好稿/差稿对照），
@@ -17,3 +27,47 @@ ignore = ["B008"]
 
 [tool.ruff.format]
 quote-style = "double"
+
+[tool.coverage.run]
+branch = true
+source = ["app"]
+omit = ["app/tests/*"]
+data_file = "../var/reports/coverage/.coverage"
+
+[tool.coverage.report]
+show_missing = true
+skip_covered = true
+fail_under = 70
+
+[tool.importlinter]
+root_packages = ["app"]
+
+[[tool.importlinter.contracts]]
+name = "Core stays a leaf layer"
+type = "forbidden"
+source_modules = ["app.core"]
+forbidden_modules = ["app.api", "app.services", "app.scheduler", "app.publishers"]
+
+[[tool.importlinter.contracts]]
+name = "Models stay a leaf layer"
+type = "forbidden"
+source_modules = ["app.models"]
+forbidden_modules = ["app.api", "app.services", "app.scheduler", "app.publishers"]
+
+[[tool.importlinter.contracts]]
+name = "Services never import the HTTP API"
+type = "forbidden"
+source_modules = ["app.services"]
+forbidden_modules = ["app.api"]
+
+[[tool.importlinter.contracts]]
+name = "Scheduler never imports the HTTP API"
+type = "forbidden"
+source_modules = ["app.scheduler"]
+forbidden_modules = ["app.api"]
+
+[[tool.importlinter.contracts]]
+name = "Publishers never import the HTTP API or scheduler"
+type = "forbidden"
+source_modules = ["app.publishers"]
+forbidden_modules = ["app.api", "app.scheduler"]

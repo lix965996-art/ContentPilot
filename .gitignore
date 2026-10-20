@@ -1,44 +1,38 @@
-# Python
+# Dependencies and generated outputs
 backend/.venv/
-backend/.env
-backend/__pycache__/
-backend/**/__pycache__/
-backend/.pytest_cache/
-.ruff_cache/
-backend/*.db
-backend/app/tests/.e2e_socialflow.db
-
-# Node
 frontend/node_modules/
 frontend/dist/
+var/
+**/__pycache__/
+*.py[cod]
+**/.pytest_cache/
+**/.ruff_cache/
+backend/*.db
 frontend/coverage/
 frontend/playwright-report/
 frontend/test-results/
 frontend/artifacts/
-uploads/
+**/.coverage
+**/.coverage.*
+coverage.xml
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.db-*
 
-# Environment and editors
+# Environment, credentials and editors
 .env
+backend/.env
+**/.env.*
+!**/.env.example
 .idea/
 .vscode/
 *.log
-.runtime/
-logs/
-Thumbs.db
-.DS_Store
-
-# Monitoring agents and local backups
-.nezha/
-backups/
-
-# Local platform sessions and browser-automation artifacts
-cookies.json
 **/cookies.json
 *_qrcode.png
 *_qr_code.png
-xhs_*_img.png
-test_xhs_*.png
-.local-private/
+Thumbs.db
+.DS_Store
 
-# External public dataset, downloaded manually (see sample-data/history/README.md)
-sample-data/history/YouTubeDurationData/
+# Manually downloaded public dataset (see examples/history/README.md)
+examples/history/YouTubeDurationData/

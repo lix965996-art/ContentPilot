@@ -88,11 +88,14 @@ def _publish_run(db: Session, schedule: PublishSchedule) -> dict[str, Any]:
         )
     terminal = {
         "SUCCESS",
+        "PUBLISHED",
         "MANUAL_PUBLISHED",
         "DRAFT_CREATED",
         "PUBLISH_SUBMITTED",
         "FAILED",
         "CANCELLED",
+        "EXPIRED",
+        "INTERRUPTED",
     }
     progress = (
         100
@@ -170,7 +173,7 @@ def list_operation_runs(
         if status == "ACTIVE":
             publish_filters.append(PublishSchedule.status.in_(["PENDING", "RUNNING", "PUBLISHING"]))
         elif status == "ATTENTION":
-            publish_filters.append(PublishSchedule.status == "FAILED")
+            publish_filters.append(PublishSchedule.status.in_(["FAILED", "EXPIRED", "INTERRUPTED"]))
         elif status:
             publish_filters.append(PublishSchedule.status == status)
         if article_ids is not None:
@@ -187,7 +190,13 @@ def list_operation_runs(
     items.extend(_publish_run(db, row) for row in publish_rows)
     items.sort(key=lambda row: row.get("createdAt") or datetime.min, reverse=True)
     items = items[:limit]
-    success_states = {"SUCCESS", "MANUAL_PUBLISHED", "DRAFT_CREATED", "PUBLISH_SUBMITTED"}
+    success_states = {
+        "SUCCESS",
+        "PUBLISHED",
+        "MANUAL_PUBLISHED",
+        "DRAFT_CREATED",
+        "PUBLISH_SUBMITTED",
+    }
     return success_response(
         request,
         {
@@ -197,7 +206,10 @@ def list_operation_runs(
                 "running": sum(
                     row["status"] in {"RUNNING", "RETRYING", "PUBLISHING"} for row in items
                 ),
-                "failed": sum(row["status"] in {"FAILED", "PARTIAL_SUCCESS"} for row in items),
+                "failed": sum(
+                    row["status"] in {"FAILED", "PARTIAL_SUCCESS", "EXPIRED", "INTERRUPTED"}
+                    for row in items
+                ),
                 "success": sum(row["status"] in success_states for row in items),
             },
         },

@@ -16,7 +16,7 @@ services:
     volumes:
       - mysql_data:/var/lib/mysql
     healthcheck:
-      test: ["CMD-SHELL", "mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent"]
+      test: ['CMD-SHELL', 'mysqladmin ping -h 127.0.0.1 -uroot -p$$MYSQL_ROOT_PASSWORD --silent']
       interval: 10s
       timeout: 5s
       retries: 12
@@ -31,8 +31,10 @@ services:
       APP_NAME: ContentPilot
       APP_ENV: production
       APP_TIMEZONE: Asia/Shanghai
+      TZ: Asia/Shanghai
       DATABASE_URL: mysql+pymysql://contentpilot:${MYSQL_PASSWORD}@db:3306/contentpilot?charset=utf8mb4
-      SQLITE_FALLBACK_URL: sqlite:////app/data/contentpilot.db
+      CONTENTPILOT_VAR_DIR: /app/var
+      SQLITE_FALLBACK_URL: sqlite:////app/var/db/contentpilot.db
       JWT_SECRET: ${JWT_SECRET:?Copy .env.example to .env and set JWT_SECRET}
       PLATFORM_CREDENTIAL_KEY: ${PLATFORM_CREDENTIAL_KEY:?Copy .env.example to .env and set PLATFORM_CREDENTIAL_KEY}
       CORS_ORIGINS: http://localhost:${CONTENTPILOT_PORT:-8080},http://127.0.0.1:${CONTENTPILOT_PORT:-8080}
@@ -43,24 +45,28 @@ services:
       LLM_BASE_URL: ${LLM_BASE_URL:-}
       LLM_API_KEY: ${LLM_API_KEY:-}
       LLM_MODEL: ${LLM_MODEL:-}
+      OUTBOUND_HTTP_PROXY: ${OUTBOUND_HTTP_PROXY:-}
+      DISPATCH_POLL_SECONDS: ${DISPATCH_POLL_SECONDS:-15}
+      DISPATCH_MAX_ATTEMPTS: ${DISPATCH_MAX_ATTEMPTS:-10}
       UNSPLASH_ACCESS_KEY: ${UNSPLASH_ACCESS_KEY:-}
       MEDIA_FALLBACK_ENABLED: ${MEDIA_FALLBACK_ENABLED:-true}
       PUBLISH_MODE: ${PUBLISH_MODE:-manual}
       WEIBO_API_BASE_URL: https://api.weibo.com
       WECHAT_API_BASE_URL: https://api.weixin.qq.com
     volumes:
-      - uploads:/app/uploads
+      - runtime_data:/app/var
+      - uploads:/app/var/uploads
     ports:
-      - "${CONTENTPILOT_API_PORT:-8000}:8000"
+      - '${CONTENTPILOT_API_PORT:-8000}:8000'
     depends_on:
       db:
         condition: service_healthy
     healthcheck:
       test:
         [
-          "CMD",
-          "python",
-          "-c",
+          'CMD',
+          'python',
+          '-c',
           "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/api/health', timeout=3)",
         ]
       interval: 10s
@@ -74,12 +80,12 @@ services:
       dockerfile: frontend/Dockerfile
     restart: unless-stopped
     ports:
-      - "${CONTENTPILOT_PORT:-8080}:80"
+      - '${CONTENTPILOT_PORT:-8080}:80'
     depends_on:
       backend:
         condition: service_healthy
     healthcheck:
-      test: ["CMD", "wget", "--quiet", "--tries=1", "--spider", "http://127.0.0.1/healthz"]
+      test: ['CMD', 'wget', '--quiet', '--tries=1', '--spider', 'http://127.0.0.1/healthz']
       interval: 10s
       timeout: 5s
       retries: 6
@@ -87,3 +93,4 @@ services:
 volumes:
   mysql_data:
   uploads:
+  runtime_data:

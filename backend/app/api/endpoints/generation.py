@@ -1,9 +1,6 @@
-import asyncio
-import time
 import uuid
-from dataclasses import replace
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Request
 from sqlalchemy import select
@@ -12,7 +9,7 @@ from sqlalchemy.orm import Session
 from app.api.deps import get_current_user, require_roles
 from app.core.exceptions import AppException
 from app.core.responses import success_response
-from app.db.session import SessionLocal, get_db
+from app.db.session import get_db
 from app.models.business import ContentArticle, ContentVariant, GenerationTask
 from app.models.user import User
 from app.prompts.profiles import PROMPT_VERSION
@@ -23,23 +20,33 @@ from app.schemas.business import (
     KeywordRequest,
     Platform,
 )
+from app.services.activity_service import business_now
 from app.services.audit_service import record_audit
 from app.services.generation_service import (
     GenerationResult,
     extract_keywords_with_llm,
-    generate_content_brief,
-    generate_deep_variant_data,
-    generate_variant_data,
     load_llm_runtime,
     review_variant_quality,
     save_variant,
 )
+from app.services.generation_task_service import (
+    run_generation_task as _run_generation_task,
+)
+from app.services.review_fingerprint import (
+    commit_content_change,
+    content_fingerprint,
+    variant_fingerprint,
+)
 from app.services.serializers import model_dict
+from app.services.task_dispatch_service import (
+    TASK_TYPE_GENERATION,
+    upsert_dispatch,
+)
 
 router = APIRouter(tags=["AI 内容生成"])
 
 
-def _initial_platform_status(platforms: list[str]) -> dict[str, dict[str, Any]]:
+def _initial_platform_status(platforms: list[Platform]) -> dict[str, dict[str, Any]]:
     return {
         platform: {
             "status": "PENDING",
@@ -75,8 +82,19 @@ def _create_task(db: Session, payload: GenerateRequest) -> GenerationTask:
         options_json=payload.model_dump(mode="json"),
     )
     db.add(task)
-    db.commit()
+    db.flush()
     return task
+
+
+def _enqueue_generation_dispatch(db: Session, task: GenerationTask) -> None:
+    """Write the dispatch intent in the same transaction as the task row."""
+    upsert_dispatch(
+        db,
+        task_type=TASK_TYPE_GENERATION,
+        task_id=task.id,
+        revision=task.id,
+        run_at=business_now(),
+    )
 
 
 def _task_data(db: Session, task: GenerationTask) -> dict[str, Any]:
@@ -88,238 +106,23 @@ def _task_data(db: Session, task: GenerationTask) -> dict[str, Any]:
             .all()
         )
         order = {variant_id: index for index, variant_id in enumerate(task.result_variant_ids_json)}
-        data["variants"] = [
-            model_dict(item, camel=True)
-            for item in sorted(variants, key=lambda item: order[item.id])
-        ]
+        article = db.get(ContentArticle, task.article_id)
+        source_text = article.source_text if article else ""
+        payloads = []
+        for item in sorted(variants, key=lambda item: order[item.id]):
+            variant_data = model_dict(item, camel=True)
+            variant_data["contentFingerprint"] = content_fingerprint(
+                platform=item.platform,
+                title=item.title,
+                content=item.content_text,
+                hashtags=item.hashtags_json,
+                source_text=source_text,
+            )
+            payloads.append(variant_data)
+        data["variants"] = payloads
     else:
         data["variants"] = []
     return data
-
-
-async def _run_generation_task(task_id: str) -> None:
-    started = time.perf_counter()
-    lock = asyncio.Lock()
-
-    async def update_platform(platform: str, status: str, detail: dict[str, Any]) -> None:
-        async with lock:
-            with SessionLocal() as state_db:
-                task = state_db.get(GenerationTask, task_id)
-                if not task:
-                    return
-                states = dict(task.platform_status_json or {})
-                state = dict(states.get(platform, {}))
-                previous_progress = int(state.get("progress", 0))
-                state.update(detail)
-                state["status"] = status
-                fallback_progress = {
-                    "PENDING": 0,
-                    "RUNNING": 35,
-                    "RETRYING": 65,
-                    "SUCCESS": 100,
-                    "FAILED": 100,
-                }[status]
-                state["progress"] = max(
-                    previous_progress, int(detail.get("progress", fallback_progress))
-                )
-                state["updatedAt"] = datetime.now(UTC).isoformat()
-                states[platform] = state
-                task.platform_status_json = states
-                task.progress = int(
-                    sum(int(item.get("progress", 0)) for item in states.values())
-                    / max(1, len(states))
-                )
-                task.status = "RUNNING"
-                state_db.commit()
-
-    try:
-        with SessionLocal() as db:
-            task = db.get(GenerationTask, task_id)
-            if not task:
-                return
-            article = db.get(ContentArticle, task.article_id)
-            if not article:
-                task.status = "FAILED"
-                task.error_message = "文章不存在"
-                db.commit()
-                return
-            runtime = load_llm_runtime(db)
-            options = dict(task.options_json or {})
-            task.status = "RUNNING"
-            db.commit()
-
-            brief: dict[str, Any] | None = None
-            shared_prompt_tokens = 0
-            shared_completion_tokens = 0
-            if options.get("generation_mode") == "DEEP":
-                for platform in task.platforms_json:
-                    await update_platform(
-                        platform,
-                        "RUNNING",
-                        {
-                            "progress": 8,
-                            "stage": "ANALYZING_SOURCE",
-                            "message": "正在提取原文核心论点、事实边界和信息缺口",
-                        },
-                    )
-                (
-                    brief,
-                    shared_prompt_tokens,
-                    shared_completion_tokens,
-                ) = await generate_content_brief(runtime, article, options)
-                for platform in task.platforms_json:
-                    await update_platform(
-                        platform,
-                        "RUNNING",
-                        {
-                            "progress": 18,
-                            "stage": "SOURCE_ANALYZED",
-                            "message": "原文事实简报已完成，准备制定平台策略",
-                            "brief": brief,
-                        },
-                    )
-
-            async def run_one(platform: str):
-                async def callback(status: str, detail: dict[str, Any]) -> None:
-                    await update_platform(platform, status, detail)
-
-                # Each concurrent task gets its own session to avoid any risk of
-                # shared-state issues. In practice runtime is pre-loaded so this
-                # session is only a fallback for load_llm_runtime().
-                task_db = SessionLocal()
-                try:
-                    if options.get("generation_mode") == "DEEP" and brief is not None:
-                        return await generate_deep_variant_data(
-                            task_db,
-                            article,
-                            platform,
-                            options,
-                            brief,
-                            status_callback=callback,
-                            runtime=runtime,
-                        )
-                    return await generate_variant_data(
-                        task_db,
-                        article,
-                        platform,
-                        options,
-                        status_callback=callback,
-                        runtime=runtime,
-                    )
-                finally:
-                    task_db.close()
-
-            results = await asyncio.gather(
-                *(run_one(platform) for platform in task.platforms_json),
-                return_exceptions=True,
-            )
-
-            successful_result_count = sum(
-                not isinstance(result, BaseException) for result in results
-            )
-            successful_result_index = 0
-            variant_ids: list[int] = []
-            errors: list[str] = []
-            total_tokens = (
-                0 if successful_result_count else shared_prompt_tokens + shared_completion_tokens
-            )
-            total_duration = 0
-            for platform, result in zip(task.platforms_json, results, strict=True):
-                if isinstance(result, BaseException):
-                    message = (
-                        getattr(result, "message", None) or str(result) or type(result).__name__
-                    )
-                    errors.append(f"{platform}: {message}")
-                    await update_platform(
-                        platform,
-                        "FAILED",
-                        {
-                            "progress": 100,
-                            "stage": "FAILED",
-                            "message": "生成失败，可单独重试此平台",
-                            "error": message,
-                        },
-                    )
-                    continue
-                if successful_result_count:
-                    prompt_share, prompt_remainder = divmod(
-                        shared_prompt_tokens, successful_result_count
-                    )
-                    completion_share, completion_remainder = divmod(
-                        shared_completion_tokens, successful_result_count
-                    )
-                    result = replace(
-                        result,
-                        prompt_tokens=result.prompt_tokens
-                        + prompt_share
-                        + int(successful_result_index < prompt_remainder),
-                        completion_tokens=result.completion_tokens
-                        + completion_share
-                        + int(successful_result_index < completion_remainder),
-                    )
-                    successful_result_index += 1
-                await update_platform(
-                    platform,
-                    "RUNNING",
-                    {
-                        "progress": 90,
-                        "stage": "SAVING_RESULT",
-                        "message": "模型输出已通过校验，正在保存版本",
-                        "strategy": result.strategy,
-                        "review": result.review_detail,
-                        "candidateTitles": result.candidate_titles,
-                        "candidates": result.candidates,
-                        "selectedCandidate": result.selected_candidate,
-                    },
-                )
-                variant = save_variant(db, article, platform, result)
-                db.commit()
-                db.refresh(variant)
-                variant_ids.append(variant.id)
-                token_usage = result.prompt_tokens + result.completion_tokens
-                total_tokens += token_usage
-                total_duration = max(total_duration, result.duration_ms)
-                await update_platform(
-                    platform,
-                    "SUCCESS",
-                    {
-                        "variantId": variant.id,
-                        "progress": 100,
-                        "stage": "COMPLETED",
-                        "message": "平台版本已生成",
-                        "attempt": result.attempts,
-                        "error": None,
-                        "durationMs": result.duration_ms,
-                        "tokenUsage": token_usage,
-                    },
-                )
-
-            task = db.get(GenerationTask, task_id)
-            if not task:
-                return
-            task.result_variant_ids_json = variant_ids
-            task.progress = 100
-            task.token_usage = total_tokens
-            task.duration_ms = max(total_duration, int((time.perf_counter() - started) * 1000))
-            task.error_message = "；".join(errors) or None
-            if variant_ids and errors:
-                task.status = "PARTIAL_SUCCESS"
-            elif variant_ids:
-                task.status = "SUCCESS"
-            else:
-                task.status = "FAILED"
-            if variant_ids:
-                article.status = "GENERATED"
-            db.commit()
-    except Exception as exc:
-        with SessionLocal() as db:
-            task = db.get(GenerationTask, task_id)
-            if task:
-                task.status = "FAILED"
-                task.progress = 100
-                task.duration_ms = int((time.perf_counter() - started) * 1000)
-                task.error_message = str(exc) or type(exc).__name__
-                db.commit()
 
 
 @router.post("/generation/content")
@@ -336,6 +139,7 @@ async def generate(
     if not payload.target_audience:
         payload.target_audience = article.target_audience
     task = _create_task(db, payload)
+    _enqueue_generation_dispatch(db, task)
     record_audit(
         db,
         request,
@@ -462,9 +266,11 @@ def select_deep_candidate(
     db.commit()
     db.refresh(variant)
     db.refresh(task)
+    variant_data = model_dict(variant, camel=True)
+    variant_data["contentFingerprint"] = variant_fingerprint(variant)
     return success_response(
         request,
-        {"variant": model_dict(variant, camel=True), "task": _task_data(db, task)},
+        {"variant": variant_data, "task": _task_data(db, task)},
         "候选稿已保存为新版本",
     )
 
@@ -499,6 +305,7 @@ async def regenerate_deep_platform(
         }
     )
     task = _create_task(db, GenerateRequest.model_validate(options))
+    _enqueue_generation_dispatch(db, task)
     record_audit(
         db,
         request,
@@ -536,6 +343,7 @@ async def retry_task_platform(
     options.update({"article_id": previous.article_id, "platforms": [platform]})
     payload = GenerateRequest.model_validate(options)
     task = _create_task(db, payload)
+    _enqueue_generation_dispatch(db, task)
     record_audit(
         db,
         request,
@@ -565,13 +373,17 @@ async def regenerate(
     if not old:
         raise AppException(40402, "内容版本不存在", 404)
     article = db.get(ContentArticle, old.article_id)
+    if not article:
+        raise AppException(40401, "内容文章不存在", 404)
     payload = GenerateRequest(
         article_id=old.article_id,
-        platforms=[old.platform],
+        platforms=[cast(Platform, old.platform)],
         style=article.tone or "专业自然",
         target_audience=article.target_audience,
     )
     task = _create_task(db, payload)
+    _enqueue_generation_dispatch(db, task)
+    db.commit()
     background_tasks.add_task(_run_generation_task, task.id)
     return success_response(
         request, {"taskId": task.id, "status": task.status}, "重新生成任务已创建"
@@ -583,7 +395,7 @@ async def keywords(
     payload: KeywordRequest,
     request: Request,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     article = db.get(ContentArticle, payload.article_id)
     if not article:
@@ -599,12 +411,49 @@ async def review(
     payload: KeywordRequest,
     request: Request,
     db: Session = Depends(get_db),
-    _: User = Depends(get_current_user),
+    _: User = Depends(require_roles("OPERATOR")),
 ) -> dict:
     variant = db.get(ContentVariant, payload.article_id)
     if not variant:
         raise AppException(40402, "内容版本不存在", 404)
+    fingerprint_before = content_fingerprint(
+        platform=variant.platform,
+        title=variant.title,
+        content=variant.content_text,
+        hashtags=variant.hashtags_json,
+        source_text=variant.article.source_text,
+    )
+    revision_before = variant.content_revision
     result, provider = await review_variant_quality(db, variant.article, variant)
+    # Lock only after the slow model call, in the same article -> variant order
+    # as source edits. Locking reads also see committed changes on MySQL.
+    db.scalar(
+        select(ContentArticle)
+        .where(ContentArticle.id == variant.article_id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    variant = db.scalar(
+        select(ContentVariant)
+        .where(ContentVariant.id == variant.id)
+        .with_for_update()
+        .execution_options(populate_existing=True)
+    )
+    if variant is None:
+        raise AppException(40907, "评审期间内容版本已删除，请刷新后重试", 409)
+    fingerprint_after = content_fingerprint(
+        platform=variant.platform,
+        title=variant.title,
+        content=variant.content_text,
+        hashtags=variant.hashtags_json,
+        source_text=variant.article.source_text,
+    )
+    if fingerprint_after != fingerprint_before or variant.content_revision != revision_before:
+        raise AppException(
+            40907,
+            "评审期间内容已被修改，评审结果已过期，请重新评审",
+            409,
+        )
     dimension_keys = (
         "factual_consistency",
         "information_completeness",
@@ -613,9 +462,17 @@ async def review(
         "format_compliance",
     )
     score = round(sum(float(result[key]) for key in dimension_keys) / len(dimension_keys), 1)
+    need_human_review = bool(
+        result.get("needHumanReview")
+        or provider == "RULE_FALLBACK"
+        or result["issues"]
+        or score < 85
+    )
+    result = {**result, "provider": provider, "needHumanReview": need_human_review}
     variant.quality_score = score
     variant.review_detail_json = result
-    db.commit()
+    variant.review_fingerprint = fingerprint_after
+    commit_content_change(db, code=40907)
     return success_response(
         request,
         {
@@ -627,8 +484,11 @@ async def review(
             "formatCompliance": result["format_compliance"],
             "issues": result["issues"],
             "suggestions": result["suggestions"],
-            "needHumanReview": bool(result["issues"] or score < 85),
+            "needHumanReview": need_human_review,
             "provider": provider,
+            "reviewSource": result.get("reviewSource", provider),
+            "factCheckStatus": result.get("factCheckStatus"),
+            "factCheckIssues": result.get("factCheckIssues", []),
             "ruleReview": result.get("ruleReview", {}),
             "semanticReview": result.get("semanticReview"),
         },
