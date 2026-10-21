@@ -16,11 +16,21 @@ import regex
 
 from app.core.config import settings
 from app.core.credentials import decrypt_json, decrypt_secret, encrypt_json, encrypt_secret
+from app.core.exceptions import AppException
 from app.core.paths import local_media_path
 from app.models.business import PlatformAccount
 from app.publishers.base import PublishResult
 from app.publishers.official import OfficialPublisher
-from app.services.platform_content import build_bluesky_post, validate_platform_publish
+from app.services.platform_content import (
+    build_bluesky_post,
+    normalize_image_alt_texts,
+    validate_platform_publish,
+)
+from app.services.thread_publishing import (
+    THREAD_REPLY_FIELD,
+    freeze_thread_reply,
+    thread_request_context,
+)
 
 COLLECTION = "app.bsky.feed.post"
 MAX_IMAGE_BYTES = 1_000_000
@@ -288,7 +298,12 @@ class BlueskyPublisher(OfficialPublisher):
         )
 
     async def _existing(
-        self, did: str, rkey: str, text: str, images: list[dict[str, Any]]
+        self,
+        did: str,
+        rkey: str,
+        text: str,
+        images: list[dict[str, Any]],
+        reply: dict | None = None,
     ) -> PublishResult | None:
         response = await self._request(
             "GET",
@@ -304,7 +319,11 @@ class BlueskyPublisher(OfficialPublisher):
             existing_images = (
                 existing_embed.get("images", []) if isinstance(existing_embed, dict) else []
             )
-            if value.get("text") != text or existing_images != images:
+            if (
+                value.get("text") != text
+                or existing_images != images
+                or value.get("reply") != reply
+            ):
                 return self.failure(
                     "TASK_ALREADY_PUBLISHED",
                     "此任务已发布过不同内容，不能覆盖或重复发布",
@@ -320,10 +339,54 @@ class BlueskyPublisher(OfficialPublisher):
             return None
         return self._api_failure(response)
 
+    async def _thread_reply(self, request: dict, did: str) -> dict | PublishResult | None:
+        schedule, context = thread_request_context(self.db, self.account.id, self.platform, request)
+        if schedule is None or context is None or not context.is_reply:
+            return None
+        assert context.root is not None and context.parent is not None
+        records = {}
+        for peer in (context.root, context.parent):
+            uri = str(peer.external_id)
+            if uri in records:
+                continue
+            prefix = f"at://{did}/{COLLECTION}/"
+            if not uri.startswith(prefix) or not TID_PATTERN.fullmatch(uri[len(prefix) :]):
+                return self.failure("THREAD_INVALID", "串帖父帖不属于当前 Bluesky 账号")
+            response = await self._request(
+                "GET",
+                "com.atproto.repo.getRecord",
+                params={"repo": did, "collection": COLLECTION, "rkey": uri[len(prefix) :]},
+            )
+            if not response.is_success:
+                return self._api_failure(response)
+            data = _json(response)
+            if (
+                data.get("uri") != uri
+                or not isinstance(data.get("cid"), str)
+                or not data["cid"]
+                or not isinstance(data.get("value"), dict)
+                or data["value"].get("reply")
+                != (peer.publish_package_json or {}).get(THREAD_REPLY_FIELD)
+            ):
+                return self.failure("THREAD_INVALID", "Bluesky 父帖回执或回复关系不一致")
+            records[uri] = {"uri": uri, "cid": data["cid"]}
+        return freeze_thread_reply(
+            self.db,
+            schedule,
+            {
+                "root": records[str(context.root.external_id)],
+                "parent": records[str(context.parent.external_id)],
+            },
+        )
+
     async def publish(self, request: dict[str, Any]) -> PublishResult:
         if decrypt_json(self.account.credentials_encrypted).get("allow_public_publish") is not True:
             return self.failure("PUBLIC_PUBLISH_DISABLED", "Bluesky 真实发布开关未开启")
         images = [str(value) for value in request.get("images", []) if str(value)]
+        try:
+            alt_texts = normalize_image_alt_texts(request.get("image_alt_texts"), len(images))
+        except ValueError as exc:
+            return self.failure("CONTENT_INVALID", str(exc))
         errors = validate_platform_publish(
             platform=self.platform,
             title=str(request.get("title") or ""),
@@ -349,8 +412,11 @@ class BlueskyPublisher(OfficialPublisher):
             did = str(decrypt_json(self.account.credentials_encrypted).get("bluesky_did") or "")
             if not did.startswith("did:"):
                 return self.failure("IDENTITY_MISSING", "请先在账号设置中检测 Bluesky 连接")
+            reply = await self._thread_reply(request, did)
+            if isinstance(reply, PublishResult):
+                return reply
             embeds = []
-            for value in images:
+            for value, alt_text in zip(images, alt_texts, strict=True):
                 path = local_media_path(value, local_hosts_only=True)
                 if path is None:
                     return self.failure(
@@ -376,8 +442,8 @@ class BlueskyPublisher(OfficialPublisher):
                 blob = _json(response).get("blob")
                 if not isinstance(blob, dict) or not blob.get("ref"):
                     return self.failure("INVALID_IMAGE_RECEIPT", "Bluesky 未返回有效的图片上传回执")
-                embeds.append({"alt": "", "image": blob})
-            existing = await self._existing(did, rkey, text, embeds)
+                embeds.append({"alt": alt_text, "image": blob})
+            existing = await self._existing(did, rkey, text, embeds, reply)
             if existing:
                 return existing
             record: dict[str, Any] = {
@@ -390,6 +456,8 @@ class BlueskyPublisher(OfficialPublisher):
                 record["facets"] = facets
             if embeds:
                 record["embed"] = {"$type": "app.bsky.embed.images", "images": embeds}
+            if reply is not None:
+                record["reply"] = reply
             try:
                 response = await self._request(
                     "POST",
@@ -397,7 +465,7 @@ class BlueskyPublisher(OfficialPublisher):
                     json={"repo": did, "collection": COLLECTION, "rkey": rkey, "record": record},
                 )
             except httpx.HTTPError:
-                recovered = await self._existing(did, rkey, text, embeds)
+                recovered = await self._existing(did, rkey, text, embeds, reply)
                 return recovered or self.failure(
                     "PUBLISH_UNCERTAIN",
                     "Bluesky 发布请求中断，尚未确认结果",
@@ -406,12 +474,14 @@ class BlueskyPublisher(OfficialPublisher):
             if response.is_success:
                 return self._published(_json(response), did, rkey, published_at=record["createdAt"])
             if response.status_code >= 500 or response.status_code in {400, 409}:
-                recovered = await self._existing(did, rkey, text, embeds)
+                recovered = await self._existing(did, rkey, text, embeds, reply)
                 if recovered:
                     return recovered
             return self._api_failure(response)
         except _SessionFailure as exc:
             return exc.result
+        except AppException as exc:
+            return self.failure("THREAD_INVALID", exc.message)
         except (httpx.HTTPError, ValueError, OSError):
             return self.failure(
                 "REQUEST_FAILED",

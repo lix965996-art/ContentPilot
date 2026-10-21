@@ -33,8 +33,9 @@ from app.publishers.x_official import XPublisher
 from app.publishers.xhs_mcp import XiaohongshuMCPPublisher
 from app.services.activity_service import business_now
 from app.services.platform_account_service import effective_status
-from app.services.platform_content import validate_platform_publish
+from app.services.platform_content import normalize_image_alt_texts, validate_platform_publish
 from app.services.review_fingerprint import require_current_approval
+from app.services.thread_publishing import filter_thread_assets, prepare_thread_publish
 
 FINAL_STATUSES: set[str] = {
     "PUBLISHED",
@@ -362,6 +363,44 @@ def _validate_content_approval(
     require_current_approval(variant, db=db)
 
 
+def _frozen_social_images(
+    db: Session, schedule: PublishSchedule, assets: Sequence[MediaAsset]
+) -> tuple[list[str], list[str]]:
+    """Bind descriptions and image order before uploads, including safe retries."""
+    package = dict(schedule.publish_package_json or {})
+    snapshot = package.get("imageDescriptions")
+    if snapshot is None:
+        snapshot = [{"url": item.image_url, "alt": item.alt_text or ""} for item in assets]
+    if not isinstance(snapshot, list) or any(
+        not isinstance(item, dict) or not isinstance(item.get("url"), str) for item in snapshot
+    ):
+        raise AppException(40079, "已保存的发布配图信息无效，请重新排期")
+    image_urls = [item["url"] for item in snapshot]
+    try:
+        alt_texts = normalize_image_alt_texts([item.get("alt") for item in snapshot], len(snapshot))
+    except ValueError as exc:
+        raise AppException(40079, str(exc)) from exc
+    if "imageDescriptions" not in package:
+        package["imageDescriptions"] = [
+            {"url": url, "alt": alt} for url, alt in zip(image_urls, alt_texts, strict=True)
+        ]
+        schedule.publish_package_json = package
+        db.commit()
+    return image_urls, alt_texts
+
+
+def _images_for_publish(
+    db: Session, schedule: PublishSchedule, assets: Sequence[MediaAsset]
+) -> tuple[list[str], list[str] | None]:
+    if schedule.platform not in {"BLUESKY", "MASTODON"} or schedule.publish_mode != "REAL_API":
+        return [asset.image_url for asset in assets], None
+    try:
+        return _frozen_social_images(db, schedule, assets)
+    except AppException as exc:
+        _record_precheck_failure(db, schedule, exc)
+        raise
+
+
 async def execute_publish(
     db: Session, schedule_id: int, *, expected_state: ScheduleState | None = None
 ) -> PublishSchedule:
@@ -428,6 +467,7 @@ async def execute_publish(
     try:
         _validate_content_approval(db, schedule, variant)
         validate_schedule_account(schedule, account)
+        thread_context, thread_reply = prepare_thread_publish(db, schedule)
     except AppException as exc:
         _record_precheck_failure(db, schedule, exc)
         raise
@@ -441,7 +481,8 @@ async def execute_publish(
             MediaAsset.id,
         )
     ).all()
-    image_urls = [asset.image_url for asset in assets]
+    assets = filter_thread_assets(thread_context, assets)
+    image_urls, image_alt_texts = _images_for_publish(db, schedule, assets)
 
     from app.services.engagement_collection_service import (
         capture_publication,
@@ -534,6 +575,8 @@ async def execute_publish(
                     "summary": variant.content_text[:120],
                     "hashtags": variant.hashtags_json or [],
                     "images": image_urls,
+                    "image_alt_texts": image_alt_texts,
+                    "thread_reply": thread_reply,
                     "operation_ip": (schedule.publish_package_json or {}).get("operationIp"),
                     "idempotency_key": schedule.idempotency_key,
                     "record_key": (schedule.publish_package_json or {}).get("blueskyRkey"),

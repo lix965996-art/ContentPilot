@@ -130,6 +130,12 @@ backend\.venv\Scripts\python.exe scripts\import_youtube_public_sample.py
 
 不使用外部平台发布也能进行内容生成、历史分析和排期研究。启用真实发送前应检查账号权限、发布开关和已知发布缺陷；“配置已保存”“连接检测通过”“草稿创建成功”“公开发布成功”是不同结果。
 
+### Bluesky / Mastodon 图文与串帖
+
+配图先上传到本项目并填写图片说明，发布前会按实际顺序冻结图片及说明；Bluesky 的 `alt` 和 Mastodon 的 `description` 都会保留这些说明。Bluesky 单张图上限为 1,000,000 字节，使用小于 900 KB 的 JPEG 可以给编码留出余量。
+
+后台支持受控的串帖任务：每段是独立审核的稿件与排期，首段带图，后续段回复前一段。回复目标、顺序和 Bluesky 的 URI/CID 在写入前持久化，同任务重试不能改挂其他父帖。前一段未确认发布或结果不明时，停止创建后续段。当前页面尚无专用串帖编排入口，不会把超长单帖自动截断或自动拆开发送。
+
 ### Mastodon 的可选安全 DNS
 
 若本机 DNS 返回错误的公网地址，Mastodon 可能在连接检测或发布时超时。在 `backend/.env` 设置 `OUTBOUND_DNS_OVER_HTTPS=true` 并重启后端，可让 Mastodon 通过固定的 Cloudflare HTTPS DNS 服务查询 A/AAAA 记录。默认值为 `false`；此选项不会修改 Windows DNS，也不会改变其他平台的解析方式。

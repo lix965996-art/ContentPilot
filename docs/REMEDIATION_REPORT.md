@@ -2,6 +2,21 @@
 
 日期：2026-10-20。当前重点是 Bluesky、Mastodon 的图文编辑、审核、排期和 API 发布。
 
+## 2026-10-21 原创配图与全文串帖重发
+
+- 按用户授权，为文章 66–68 各生成一张原创配图，使用内置图像生成工具；发布版 JPEG 分别为 441,085 / 374,383 / 414,499 字节。素材、完整提示词与操作回执保存在忽略的 `var/publishing/`，图片作为文章封面上传，带 AI 生成说明与替代文本，非事件照片。
+- 保留三篇全文及来源，分别编排为 Bluesky 三段、Mastodon 两段，共六组串帖、十五条分段（任务 218–232）。每段独立保存、审核，通过原发布服务逐段发送；只有确认前段成功才创建下一段。
+- 补齐图片说明到两个平台的传递与重试冻结。串帖校验同文章、平台、账号、操作者、真实回执及完整祖先顺序；回复目标与版本冻结，续段不重复带封面。保留原幂等及结果不明保护，无数据库迁移或新增公开创建接口。
+- 全部十五条均为 `PUBLISHED / REAL_API`，已从平台逐字核对正文、图片数量、图片说明、父帖与根帖引用；生成十五条发布快照及四十五个观测任务。旧六条发布记录未修改或删除，未把互动采集任务当成已有流量结果。
+
+| 内容 | Bluesky 首帖 | Mastodon 首帖 |
+| --- | --- | --- |
+| AI 把作业做完了，学习可能还没开始 | [查看全文串帖](https://bsky.app/profile/did:plc:mda6ld7aje6h4ksb4srtt24j/post/3myentml5d7ee) | [查看全文串帖](https://mastodon.social/@xiaoqian022/117477790995100906) |
+| 那个做了半年的 AI 工具，最后没能上架 | [查看全文串帖](https://bsky.app/profile/did:plc:mda6ld7aje6h4ksb4srtt24j/post/3myenuliobpjb) | [查看全文串帖](https://mastodon.social/@xiaoqian022/117477792763582731) |
+| 换了一个更强的 AI，为什么事情还是没做好？ | [查看全文串帖](https://bsky.app/profile/did:plc:mda6ld7aje6h4ksb4srtt24j/post/3myenveojblrp) | [查看全文串帖](https://mastodon.social/@xiaoqian022/117477794528853902) |
+
+- 最终验证：后端完整 546 passed、6 skipped（SQLite 运行跳过 MySQL 专用用例），覆盖率 73.18%；Ruff、格式、显式虚拟环境 Pyright 0 errors、5 条 Import Linter 契约通过。存在既有第三方 TestClient 弃用提醒，前端未改动，未重复执行前端测试。新增三十项测试覆盖图片说明冻结、错误说明拒绝、跨账号/跨文章父帖拒绝、回复版本变化、同任务重放及续段无图。
+
 ## 2026-10-21 Mastodon 连接修复与授权发布
 
 - 已保存用户提供的 Mastodon 访问令牌，使用现有加密存储；应用 ID/应用密钥未写入源码。Bluesky 与 Mastodon 均已通过真实账号验证。

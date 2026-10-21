@@ -266,6 +266,7 @@ async def test_bluesky_uploads_local_image_before_record_and_rejects_remote(monk
             )
         record = kwargs["json"]["record"]
         assert record["embed"]["images"][0]["image"]["ref"]["$link"] == "blobcid"
+        assert record["embed"]["images"][0]["alt"] == "学生桌上的笔记本与手写笔记"
         return _response(
             method,
             url,
@@ -279,6 +280,7 @@ async def test_bluesky_uploads_local_image_before_record_and_rejects_remote(monk
             {
                 "content": "图片正文",
                 "images": ["/uploads/bluesky-test.png"],
+                "image_alt_texts": ["学生桌上的笔记本与手写笔记"],
                 "record_key": RECORD_KEY,
             }
         )
@@ -298,6 +300,25 @@ async def test_bluesky_uploads_local_image_before_record_and_rejects_remote(monk
         )
         assert remote.error_code == "IMAGE_UNAVAILABLE"
         assert "com.atproto.repo.createRecord" not in methods
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("descriptions", [[], ["说明", "错位"], [None], ["字" * 501]])
+async def test_bluesky_rejects_invalid_image_descriptions_before_network(monkeypatch, descriptions):
+    async def unexpected(*_args, **_kwargs):
+        pytest.fail("Invalid descriptions must not reach the platform")
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", unexpected)
+    with SessionLocal() as db:
+        result = await BlueskyPublisher(db, _account(db)).publish(
+            {
+                "content": "图文正文",
+                "images": ["/uploads/unused.png"],
+                "image_alt_texts": descriptions,
+                "record_key": RECORD_KEY,
+            }
+        )
+        assert result.error_code == "CONTENT_INVALID"
 
 
 def test_bluesky_facets_use_utf8_offsets_and_ignore_link_fragment_tag():

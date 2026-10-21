@@ -18,6 +18,7 @@ from app.db.base import Base
 from app.models.business import (
     ContentArticle,
     ContentVariant,
+    MediaAsset,
     PlatformAccount,
     PublishLog,
     PublishSchedule,
@@ -104,6 +105,61 @@ def _task(sessions, platform="BLUESKY"):
         variant = db.get(ContentVariant, 1)
         variant.review_fingerprint = variant_fingerprint(variant)
         db.commit()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("platform", ["BLUESKY", "MASTODON"])
+async def test_social_image_descriptions_keep_cover_order_and_survive_retry(
+    isolated_publish_db, monkeypatch, platform
+):
+    sessions = isolated_publish_db
+    _task(sessions, platform=platform)
+    calls = []
+
+    async def publish(request):
+        calls.append(request)
+        return PublishResult(
+            False, platform, "REAL_API", "FAILED", error_code="API_ERROR", retryable=True
+        )
+
+    publisher = AsyncMock()
+    publisher.publish = publish
+    monkeypatch.setattr(publish_service, "resolve_publisher", lambda *_args: publisher)
+    with sessions() as db:
+        body = MediaAsset(
+            article_id=1,
+            source="LOCAL_UPLOAD",
+            image_url="/uploads/body.png",
+            thumbnail_url="/uploads/body.png",
+            alt_text="正文配图说明",
+            usage_type="BODY",
+            selected=True,
+        )
+        cover = MediaAsset(
+            article_id=1,
+            source="LOCAL_UPLOAD",
+            image_url="/uploads/cover.png",
+            thumbnail_url="/uploads/cover.png",
+            alt_text="封面配图说明",
+            usage_type="COVER",
+            selected=True,
+        )
+        db.add_all([body, cover])
+        db.commit()
+        await publish_service.execute_publish(db, 1)
+        body.alt_text = "后改的正文说明"
+        cover.selected = False
+        db.commit()
+        await publish_service.execute_publish(db, 1)
+        assert len(calls) == 2
+        for request in calls:
+            assert request["images"] == ["/uploads/cover.png", "/uploads/body.png"]
+            assert request["image_alt_texts"] == ["封面配图说明", "正文配图说明"]
+        task = db.get(PublishSchedule, 1)
+        assert task.publish_package_json["imageDescriptions"] == [
+            {"url": "/uploads/cover.png", "alt": "封面配图说明"},
+            {"url": "/uploads/body.png", "alt": "正文配图说明"},
+        ]
 
 
 @pytest.mark.asyncio

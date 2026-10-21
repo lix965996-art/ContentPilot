@@ -9,9 +9,11 @@ from typing import Any
 from urllib.parse import urlsplit
 
 import httpx
+from sqlalchemy import select
 
 from app.core.config import settings
 from app.core.credentials import decrypt_json, decrypt_secret, encrypt_json
+from app.core.exceptions import AppException
 from app.core.mastodon import ensure_public_instance, normalize_instance_url
 from app.core.paths import local_media_path
 from app.core.urls import PublicHTTPTransport
@@ -19,10 +21,50 @@ from app.models.business import PublishSchedule
 from app.publishers.base import PublishResult
 from app.publishers.bluesky import _image_mime
 from app.publishers.official import OfficialPublisher
-from app.services.platform_content import build_mastodon_post, mastodon_text_length
+from app.services.platform_content import (
+    build_mastodon_post,
+    mastodon_text_length,
+    normalize_image_alt_texts,
+)
+from app.services.thread_publishing import (
+    THREAD_REPLY_FIELD,
+    freeze_thread_reply,
+    thread_request_context,
+)
 
 MAX_IMAGE_BYTES = 8 * 1024 * 1024
 ATTEMPT_FIELD = "mastodonPublish"
+
+
+def _request_fingerprint(
+    text: str,
+    uploads: list[tuple[str, bytes, str]],
+    account_id: str,
+    instance_url: Any,
+    alt_texts: list[str],
+    reply_to_id: str | None,
+) -> str:
+    payload = {
+        "text": text,
+        "images": [hashlib.sha256(item[1]).hexdigest() for item in uploads],
+        "account_id": account_id,
+        "instance_url": instance_url,
+    }
+    # Keep existing hashes compatible for legacy non-thread, empty-alt attempts.
+    if any(alt_texts):
+        payload["image_alt_texts"] = alt_texts
+    if reply_to_id is not None:
+        payload["in_reply_to_id"] = reply_to_id
+    return hashlib.sha256(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True).encode()
+    ).hexdigest()
+
+
+def _status_payload(text: str, media_ids: list[str], reply_to_id: str | None) -> dict:
+    payload = {"status": text, "visibility": "public", "media_ids": media_ids}
+    if reply_to_id is not None:
+        payload["in_reply_to_id"] = reply_to_id
+    return payload
 
 
 def _json(response: httpx.Response) -> dict[str, Any]:
@@ -149,7 +191,14 @@ class MastodonPublisher(OfficialPublisher):
         schedule.publish_package_json = context
         self.db.commit()
 
-    def _receipt(self, data: dict[str, Any], account_id: str) -> PublishResult:
+    def _receipt(
+        self,
+        data: dict[str, Any],
+        account_id: str,
+        *,
+        reply_to_id: str | None = None,
+        check_reply: bool = False,
+    ) -> PublishResult:
         status_id = data.get("id")
         url = data.get("url")
         account = data.get("account") or {}
@@ -169,6 +218,7 @@ class MastodonPublisher(OfficialPublisher):
             or parsed.netloc != urlsplit(origin).netloc
             or parsed.username is not None
             or not parsed.path.rstrip("/").endswith(f"/{status_id}")
+            or (check_reply and data.get("in_reply_to_id") != reply_to_id)
         ):
             return self.failure(
                 "INVALID_RECEIPT", "Mastodon 未返回有效的公开帖子回执，请先核对个人主页"
@@ -183,26 +233,94 @@ class MastodonPublisher(OfficialPublisher):
             detail={"real": True, "publishedAtUTC": data.get("created_at")},
         )
 
-    async def _read_receipt(self, status_id: str, account_id: str) -> PublishResult:
+    async def _read_receipt(
+        self,
+        status_id: str,
+        account_id: str,
+        *,
+        reply_to_id: str | None = None,
+        check_reply: bool = False,
+    ) -> PublishResult:
         response = await self._request("GET", f"/api/v1/statuses/{status_id}", auth=False)
         if response.is_success:
             data = _json(response)
             if data.get("id") == status_id:
-                return self._receipt(data, account_id)
+                return self._receipt(
+                    data, account_id, reply_to_id=reply_to_id, check_reply=check_reply
+                )
         return self.failure(
             "PUBLISH_UNCERTAIN",
             "已有发布记录，但目前无法核实该帖子；不会自动重发",
             action="请核对 Mastodon 个人主页和任务回执。",
         )
 
+    async def _thread_reply(self, request: dict, account_id: str) -> str | PublishResult | None:
+        schedule, context = thread_request_context(self.db, self.account.id, self.platform, request)
+        if schedule is None or context is None or not context.is_reply:
+            return None
+        assert context.root is not None and context.parent is not None
+        checked = set()
+        for peer in (context.root, context.parent):
+            if peer.id in checked:
+                continue
+            expected = (peer.publish_package_json or {}).get(THREAD_REPLY_FIELD) or {}
+            result = await self._read_receipt(
+                str(peer.external_id),
+                account_id,
+                reply_to_id=expected.get("inReplyToId"),
+                check_reply=True,
+            )
+            if not result.success:
+                return result
+            checked.add(peer.id)
+        frozen = freeze_thread_reply(
+            self.db, schedule, {"inReplyToId": str(context.parent.external_id)}
+        )
+        return frozen["inReplyToId"]
+
+    def _content_inputs(
+        self, request: dict, config: dict
+    ) -> tuple[str, list[str], list[str]] | PublishResult:
+        text = build_mastodon_post(
+            request.get("title", ""), request.get("content", ""), request.get("hashtags", [])
+        )
+        max_characters = min(500, _positive(config.get("mastodon_max_characters"), 500))
+        reserved = _positive(config.get("mastodon_characters_reserved_per_url"), 23)
+        images = [str(value) for value in request.get("images", []) if str(value)]
+        try:
+            alt_texts = normalize_image_alt_texts(request.get("image_alt_texts"), len(images))
+        except ValueError as exc:
+            return self.failure("CONTENT_INVALID", str(exc))
+        max_images = min(4, _positive(config.get("mastodon_max_media_attachments"), 4))
+        if (
+            not text
+            or mastodon_text_length(text, reserved) > max_characters
+            or len(images) > max_images
+        ):
+            return self.failure(
+                "CONTENT_INVALID",
+                f"Mastodon 正文须为 1–{max_characters} 字符，"
+                f"配图最多 {max_images} 张（标题与标签计入）",
+            )
+        return text, images, alt_texts
+
     async def _upload(
-        self, filename: str, content: bytes, mime: str, media_id=None, on_upload=None
+        self,
+        filename: str,
+        content: bytes,
+        mime: str,
+        media_id=None,
+        on_upload=None,
+        description: str = "",
     ) -> str | PublishResult:
         response = (
             await self._request("GET", f"/api/v1/media/{media_id}")
             if media_id
             else await self._request(
-                "POST", "/api/v2/media", files={"file": (filename, content, mime)}
+                "POST",
+                "/api/v2/media",
+                files={"file": (filename, content, mime)},
+                data={"description": description},
             )
         )
         if not response.is_success:
@@ -256,23 +374,13 @@ class MastodonPublisher(OfficialPublisher):
         ):
             return self.failure("TASK_REQUIRED", "Mastodon 发布需要有效的排期任务")
         try:
-            text = build_mastodon_post(
-                request.get("title", ""), request.get("content", ""), request.get("hashtags", [])
-            )
-            max_characters = min(500, _positive(config.get("mastodon_max_characters"), 500))
-            reserved = _positive(config.get("mastodon_characters_reserved_per_url"), 23)
-            images = [str(value) for value in request.get("images", []) if str(value)]
-            max_images = min(4, _positive(config.get("mastodon_max_media_attachments"), 4))
-            if (
-                not text
-                or mastodon_text_length(text, reserved) > max_characters
-                or len(images) > max_images
-            ):
-                return self.failure(
-                    "CONTENT_INVALID",
-                    f"Mastodon 正文须为 1–{max_characters} 字符，"
-                    f"配图最多 {max_images} 张（标题与标签计入）",
-                )
+            reply_to_id = await self._thread_reply(request, account_id)
+            if isinstance(reply_to_id, PublishResult):
+                return reply_to_id
+            inputs = self._content_inputs(request, config)
+            if isinstance(inputs, PublishResult):
+                return inputs
+            text, images, alt_texts = inputs
             uploads = []
             for image in images:
                 path = local_media_path(image, local_hosts_only=True)
@@ -293,18 +401,9 @@ class MastodonPublisher(OfficialPublisher):
                 if not mime:
                     return self.failure("IMAGE_FORMAT", "Mastodon 配图目前支持 JPEG、PNG、WebP")
                 uploads.append((path.name, content, mime))
-            fingerprint = hashlib.sha256(
-                json.dumps(
-                    {
-                        "text": text,
-                        "images": [hashlib.sha256(item[1]).hexdigest() for item in uploads],
-                        "account_id": account_id,
-                        "instance_url": config.get("instance_url"),
-                    },
-                    ensure_ascii=False,
-                    sort_keys=True,
-                ).encode()
-            ).hexdigest()
+            fingerprint = _request_fingerprint(
+                text, uploads, account_id, config.get("instance_url"), alt_texts, reply_to_id
+            )
             attempt = dict((schedule.publish_package_json or {}).get(ATTEMPT_FIELD) or {})
             if attempt.get("requestHash") and attempt["requestHash"] != fingerprint:
                 return self.failure(
@@ -317,7 +416,12 @@ class MastodonPublisher(OfficialPublisher):
             )
             self._save_attempt(schedule, attempt)
             if attempt.get("statusId"):
-                return await self._read_receipt(str(attempt["statusId"]), account_id)
+                return await self._read_receipt(
+                    str(attempt["statusId"]),
+                    account_id,
+                    reply_to_id=reply_to_id,
+                    check_reply=True,
+                )
             if attempt.get("uncertain"):
                 sent_at = datetime.fromisoformat(str(attempt["sentAt"]))
                 if datetime.now(UTC) - sent_at >= timedelta(minutes=55):
@@ -341,6 +445,7 @@ class MastodonPublisher(OfficialPublisher):
                     *upload,
                     media_id=saved_media[index] if index < len(saved_media) else None,
                     on_upload=remember_media,
+                    description=alt_texts[index],
                 )
                 if isinstance(media_id, PublishResult):
                     return media_id
@@ -362,7 +467,7 @@ class MastodonPublisher(OfficialPublisher):
                 "POST",
                 "/api/v1/statuses",
                 headers={"Idempotency-Key": attempt["key"]},
-                json={"status": text, "visibility": "public", "media_ids": media_ids},
+                json=_status_payload(text, media_ids, reply_to_id),
             )
             if not response.is_success:
                 if (
@@ -375,13 +480,15 @@ class MastodonPublisher(OfficialPublisher):
                     self._save_attempt(schedule, attempt)
                 return self._api_failure(response)
             data = _json(response)
-            result = self._receipt(data, account_id)
+            result = self._receipt(data, account_id, reply_to_id=reply_to_id, check_reply=True)
             if result.success:
                 attempt.update(
                     statusId=result.external_id, statusUrl=result.published_url, uncertain=False
                 )
                 self._save_attempt(schedule, attempt)
             return result
+        except AppException as exc:
+            return self.failure("THREAD_INVALID", exc.message)
         except httpx.HTTPError:
             return self.failure(
                 "PUBLISH_UNCERTAIN",
@@ -400,7 +507,21 @@ class MastodonPublisher(OfficialPublisher):
             account_id = str(
                 decrypt_json(self.account.credentials_encrypted).get("mastodon_account_id") or ""
             )
-            result = await self._read_receipt(task_id, account_id)
+            schedule = self.db.scalar(
+                select(PublishSchedule).where(
+                    PublishSchedule.account_id == self.account.id,
+                    PublishSchedule.platform == self.platform,
+                    PublishSchedule.external_id == task_id,
+                )
+            )
+            package = schedule.publish_package_json or {} if schedule is not None else {}
+            reply = package.get(THREAD_REPLY_FIELD) or {}
+            result = await self._read_receipt(
+                task_id,
+                account_id,
+                reply_to_id=reply.get("inReplyToId"),
+                check_reply="thread" in package,
+            )
             return {
                 "status": result.status if result.success else "UNKNOWN",
                 "externalId": result.external_id,

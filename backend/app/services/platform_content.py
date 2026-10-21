@@ -7,6 +7,17 @@ from typing import Any
 import regex
 
 
+def normalize_image_alt_texts(value: Any, image_count: int) -> list[str]:
+    """Keep descriptions positional; never silently attach an alt to another image."""
+    if value is None:
+        return [""] * image_count
+    if not isinstance(value, list) or len(value) != image_count:
+        raise ValueError("图片说明必须与配图数量及顺序一致")
+    if any(not isinstance(item, str) or len(item) > 500 for item in value):
+        raise ValueError("每张图片说明须为不超过 500 字符的文字")
+    return [item.strip() for item in value]
+
+
 def bluesky_grapheme_length(value: str) -> int:
     """Count the Unicode grapheme clusters used by Bluesky's post lexicon."""
     return len(regex.findall(r"\X", value))

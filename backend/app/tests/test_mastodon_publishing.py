@@ -380,6 +380,7 @@ async def test_mastodon_waits_for_async_media_url_before_status_write(monkeypatc
         calls.append((method, path))
         if path == "/api/v2/media":
             assert kwargs["files"]["file"][2] == "image/png"
+            assert kwargs["data"] == {"description": "被审核挡住的应用上架流程示意图"}
             return _response(method, url, {"id": "7", "url": None}, 202)
         if path == "/api/v1/media/7":
             media_polls += 1
@@ -397,6 +398,7 @@ async def test_mastodon_waits_for_async_media_url_before_status_write(monkeypatc
         account, _task_row, request = _task(db)
         _path, image_url = _image()
         request["images"] = [image_url]
+        request["image_alt_texts"] = ["被审核挡住的应用上架流程示意图"]
         result = await MastodonPublisher(db, account).publish(request)
         assert result.success
         assert calls == [
@@ -405,6 +407,37 @@ async def test_mastodon_waits_for_async_media_url_before_status_write(monkeypatc
             ("GET", "/api/v1/media/7"),
             ("POST", "/api/v1/statuses"),
         ]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("descriptions", [[], ["说明", "错位"], [None], ["字" * 501]])
+async def test_mastodon_rejects_invalid_image_descriptions_before_network(descriptions):
+    with SessionLocal() as db:
+        account, _task_row, request = _task(db)
+        result = await MastodonPublisher(db, account).publish(
+            {**request, "images": ["/uploads/unused.png"], "image_alt_texts": descriptions}
+        )
+        assert result.error_code == "CONTENT_INVALID"
+
+
+@pytest.mark.asyncio
+async def test_mastodon_cannot_change_description_on_reused_media(monkeypatch):
+    async def transport(_self, method, url, **kwargs):
+        if url.endswith("/api/v2/media"):
+            assert kwargs["data"]["description"] == "原始说明"
+            return _response(method, url, {"id": "7", "url": "https://cdn.example.org/7.png"})
+        assert url.endswith("/api/v1/statuses")
+        raise httpx.ReadTimeout("lost response", request=httpx.Request(method, url))
+
+    monkeypatch.setattr(httpx.AsyncClient, "request", transport)
+    with SessionLocal() as db:
+        account, _task_row, request = _task(db)
+        _path, image_url = _image()
+        request.update(images=[image_url], image_alt_texts=["原始说明"])
+        publisher = MastodonPublisher(db, account)
+        assert (await publisher.publish(request)).error_code == "PUBLISH_UNCERTAIN"
+        result = await publisher.publish({**request, "image_alt_texts": ["被更改的说明"]})
+        assert result.error_code == "TASK_CONTENT_CHANGED"
 
 
 @pytest.mark.asyncio
