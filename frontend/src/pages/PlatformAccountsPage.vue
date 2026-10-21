@@ -101,7 +101,7 @@ const statusNames: Record<string, string> = {
   NOT_CONFIGURED: '未配置',
   CONNECTING: '待检测',
   CONNECTED: '已连接',
-  TOKEN_EXPIRED: 'Token 已过期',
+  TOKEN_EXPIRED: '访问令牌已过期',
   INVALID: '连接无效',
   DISABLED: '已停用',
   MANUAL_ONLY: '仅人工交付',
@@ -122,11 +122,11 @@ const xOAuthCredentialsReady = computed(
 )
 const publishModeNames: Record<string, string> = {
   REAL_API: '官方 API',
-  DRAFT_ONLY: '真实草稿箱 (API)',
+  DRAFT_ONLY: '同步到平台草稿箱',
   SUBMIT_PUBLISH: '真实提交发布',
   MANUAL_CONFIRM: '人工发布交付',
   CDP_PUBLISH: 'Chrome 自动发布',
-  WECHATSYNC_CLI: 'Wechatsync CLI',
+  WECHATSYNC_CLI: '多平台草稿同步',
   MCP_PUBLISH: '本机自动发布（仅自己可见）',
   BROWSER_PUBLISH: '本机浏览器发布',
   BROWSER_DRAFT: '本机扫码保存草稿',
@@ -136,7 +136,7 @@ function publishModeLabel(account: PlatformAccount): string {
   if (account.publishMode === 'REAL_API' && account.platform === 'X') return 'X 官方 API'
   if (account.publishMode === 'REAL_API' && account.platform === 'BLUESKY') return 'Bluesky API'
   if (account.publishMode === 'REAL_API' && account.platform === 'MASTODON') return 'Mastodon API'
-  return publishModeNames[account.publishMode] || account.publishMode
+  return publishModeNames[account.publishMode] || '待确认发布方式'
 }
 
 function formatDateTime(value?: string): string {
@@ -690,7 +690,7 @@ onBeforeUnmount(() => {
             <p>{{ account.accountName }}</p>
           </div>
           <el-tag :type="statusType(account.status)" effect="light">
-            {{ statusNames[account.status] || account.status }}
+            {{ statusNames[account.status] || '状态待确认' }}
           </el-tag>
         </header>
 
@@ -820,7 +820,7 @@ onBeforeUnmount(() => {
         <section class="capability-list">
           <p>目标能力（最终以平台审核和接口权限为准）</p>
           <span v-for="capability in account.capabilities" :key="capability">
-            <CheckCircle2 :size="13" />{{ capabilityNames[capability] || capability }}
+            <CheckCircle2 :size="13" />{{ capabilityNames[capability] || '其他平台能力' }}
           </span>
         </section>
         <p v-if="account.lastError && account.status !== 'CONNECTED'" class="account-error">

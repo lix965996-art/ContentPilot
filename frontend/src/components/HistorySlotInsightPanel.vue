@@ -412,7 +412,7 @@ watch(
         <table>
           <thead>
             <tr>
-              <th>#</th>
+              <th>顺序</th>
               <th>时间</th>
               <th>得分</th>
               <th>样本</th>

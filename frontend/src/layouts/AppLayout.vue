@@ -18,7 +18,7 @@ const collapsed = ref(false)
       @toggle="collapsed = !collapsed"
       @close="mobileOpen = false"
     />
-    <div :class="collapsed ? 'lg:pl-[64px]' : 'lg:pl-[196px]'" class="app-workspace">
+    <div :class="collapsed ? 'lg:pl-[72px]' : 'lg:pl-[220px]'" class="app-workspace">
       <AppTopbar @menu="mobileOpen = true" />
       <main class="app-main">
         <RouterView v-slot="{ Component, route }">

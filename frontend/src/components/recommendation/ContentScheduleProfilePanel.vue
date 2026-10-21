@@ -42,7 +42,7 @@ const verdictLabels: Record<string, string> = {
 
 const review = computed<SchedulePlanReview | undefined>(() => props.plan?.review ?? undefined)
 const sourceLabel = computed(() =>
-  (props.profileSource || props.plan?.profileSource) === 'LLM' ? 'LLM 生成' : '规则降级',
+  (props.profileSource || props.plan?.profileSource) === 'LLM' ? '智能分析' : '规则分析',
 )
 const isFallback = computed(() => (props.profileSource || props.plan?.profileSource) !== 'LLM')
 
@@ -54,7 +54,7 @@ function platformLabel(code: string) {
 <template>
   <section v-if="profile" class="profile-panel">
     <header>
-      <h3><BrainCircuit :size="15" />LLM 内容排期画像</h3>
+      <h3><BrainCircuit :size="15" />内容排期画像</h3>
       <span class="tag" :class="{ fallback: isFallback }">{{ sourceLabel }}</span>
     </header>
 
@@ -95,7 +95,7 @@ function platformLabel(code: string) {
       </div>
       <div>
         <span>平台优先级</span>
-        <strong>{{ profile.platform_priority.map(platformLabel).join(' → ') }}</strong>
+        <strong>{{ profile.platform_priority.map(platformLabel).join('、') }}</strong>
       </div>
     </div>
 
@@ -105,14 +105,13 @@ function platformLabel(code: string) {
 
     <div v-if="!compact && plan" class="solver-strip">
       <span
-        ><Timer :size="13" />求解 {{ plan.solverStatus }} · {{ plan.solveDurationMs ?? 0 }} ms</span
+        ><Timer :size="13" />{{
+          plan.optimizationApplied ? '联合排期已完成' : '使用统计推荐'
+        }}</span
       >
-      <span v-if="plan.objectiveValue !== undefined">目标值 {{ plan.objectiveValue }}</span>
-      <span>{{
-        plan.optimizationApplied ? '已应用联合优化结果' : '未应用优化，保留 hybrid-v2 结果'
-      }}</span>
+      <span>{{ plan.optimizationApplied ? '已应用联合优化结果' : '使用原始统计推荐' }}</span>
       <span v-if="review" class="verdict" :class="review.verdict.toLowerCase()">
-        <ShieldCheck :size="13" />LLM 审查：{{ verdictLabels[review.verdict] || review.verdict }}
+        <ShieldCheck :size="13" />方案审查：{{ verdictLabels[review.verdict] || review.verdict }}
         <template v-if="review.resolveApplied">（已按要求重新求解一次）</template>
       </span>
     </div>
@@ -123,9 +122,9 @@ function platformLabel(code: string) {
 <style scoped>
 .profile-panel {
   border: 1px solid var(--sf-line, #e5e7eb);
-  border-radius: 10px;
+  border-radius: 16px;
   background: #fff;
-  padding: 12px 14px;
+  padding: 20px;
 }
 .profile-panel header {
   display: flex;
@@ -156,7 +155,7 @@ function platformLabel(code: string) {
 .profile-grid {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
+  gap: 10px;
 }
 .profile-grid div {
   border: 1px solid var(--sf-line, #e5e7eb);
@@ -167,7 +166,7 @@ function platformLabel(code: string) {
 .profile-grid span {
   display: block;
   color: var(--sf-muted, #667085);
-  font-size: 11px;
+  font-size: 12px;
 }
 .profile-grid strong {
   display: block;
@@ -213,5 +212,13 @@ function platformLabel(code: string) {
   color: var(--sf-ink, #172033);
   font-size: 12px;
   line-height: 1.6;
+}
+@media (max-width: 640px) {
+  .profile-grid {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+  .profile-panel {
+    padding: 16px;
+  }
 }
 </style>

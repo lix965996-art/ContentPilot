@@ -682,7 +682,7 @@ function platformStatusLabel(status: string) {
       RETRYING: '自动重试',
       SUCCESS: '已完成',
       FAILED: '失败',
-    }[status] || status
+    }[status] || '状态待确认'
   )
 }
 
@@ -1472,9 +1472,14 @@ onMounted(() => {
             completed: index < deepStageIndex || (index === 4 && deepStageIndex === 4),
           }"
         >
-          <span>{{
-            index < deepStageIndex || (index === 4 && deepStageIndex === 4) ? '✓' : index + 1
-          }}</span>
+          <span>
+            <Check
+              v-if="index < deepStageIndex || (index === 4 && deepStageIndex === 4)"
+              :size="15"
+              aria-label="已完成"
+            />
+            <template v-else>{{ index + 1 }}</template>
+          </span>
           <div>
             <b>{{ stage.title }}</b>
             <small>{{ stage.description }}</small>

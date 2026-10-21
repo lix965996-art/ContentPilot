@@ -27,16 +27,6 @@ const highlightHour = computed(() => {
   return at ? new Date(at).getHours() : undefined
 })
 const activity = computed(() => recommendation.value?.activityEstimate)
-const learning = computed(() => recommendation.value?.optimization?.learning)
-const learningReasons: Record<string, string> = {
-  NO_VALIDATED_MODEL: '暂无通过评估的平台模型，使用统计推荐',
-  COLD_ACCOUNT: '该账号不在模型验证范围，使用统计推荐',
-  ACCOUNT_NOT_CONNECTED: '账号尚未连接，使用统计推荐',
-  PLATFORM_UNSUPPORTED: '该平台使用统计推荐',
-  MODEL_UNAVAILABLE: '模型不可用，已回退统计推荐',
-  INFERENCE_BUDGET_EXCEEDED: '预测耗时超过预算，已回退统计推荐',
-  MODEL_NOT_AVAILABLE_ASOF_DECISION: '模型训练时间晚于决策时间，已回退统计推荐',
-}
 const similarHistory = computed(() => recommendation.value?.similarHistory || [])
 const historyOpen = ref(false)
 
@@ -66,9 +56,7 @@ function formatTime(value: string) {
         </div>
         <div>
           <span>置信度</span
-          ><strong>{{
-            confidenceLabels[recommendation.confidence] || recommendation.confidence
-          }}</strong>
+          ><strong>{{ confidenceLabels[recommendation.confidence] || '待评估' }}</strong>
         </div>
         <div>
           <span>样本数</span><strong>{{ recommendation.sampleCount }}</strong>
@@ -85,30 +73,6 @@ function formatTime(value: string) {
       <p v-else-if="recommendation.reasons[0]" class="detail-narrative">
         {{ recommendation.reasons[0].description }}
       </p>
-
-      <section v-if="learning" class="detail-block panel">
-        <h3>互动预测依据</h3>
-        <p v-if="learning.mode === 'MACHINE_LEARNING'">
-          平台模型 {{ learning.modelId }} · 目标：{{
-            learning.target
-          }}。预测用于候选时间评分，排期仍需满足发布约束。
-        </p>
-        <p v-else>
-          {{ learningReasons[learning.reason || ''] || '平台模型未满足启用条件，使用统计推荐' }}
-        </p>
-        <template v-if="learning.mode === 'MACHINE_LEARNING' && learning.explanations.length">
-          <p>
-            以下解释对应模型评分最高的候选时间
-            {{ learning.explanationTime }}，实际排期可能因约束调整。
-          </p>
-          <ul>
-            <li v-for="(item, index) in learning.explanations" :key="index">
-              {{ item.feature }}：{{ item.contribution > 0 ? '+' : ''
-              }}{{ item.contribution }}（对数目标贡献）
-            </li>
-          </ul>
-        </template>
-      </section>
 
       <ContentScheduleProfilePanel
         v-if="recommendation.profile"
@@ -128,9 +92,9 @@ function formatTime(value: string) {
             v-for="item in similarHistory.slice(0, 3)"
             :key="`${item.refType}-${item.historicalContentId}`"
           >
-            <strong>{{ item.title || `#${item.historicalContentId}` }}</strong>
+            <strong>{{ item.title || '未命名内容' }}</strong>
             <span>
-              向量相似度 {{ item.vectorSimilarity }} · LLM 相关性
+              语义相似度 {{ item.vectorSimilarity }} · 内容相关性
               {{ item.llmRelevance === null ? '未评分' : item.llmRelevance }} · 综合
               {{ item.combinedScore }}
             </span>
@@ -142,29 +106,21 @@ function formatTime(value: string) {
         <h3>用户活跃度依据</h3>
         <ul class="fact-list">
           <li>
-            主档位：{{ activity.primaryLevelLabel || activity.primaryLevel }} · 置信度
-            {{ confidenceLabels[activity.confidence || ''] || activity.confidence }}
+            参考来源：{{ activity.primaryLevelLabel || '历史互动数据' }} · 置信度
+            {{ confidenceLabels[activity.confidence || ''] || '待评估' }}
           </li>
           <li v-if="activity.primaryLevel === 'CROSS_PLATFORM_PUBLIC'" class="warn">
             该平台还没有自己的历史数据，当前活跃度来自其他平台的公开数据集（{{
               activity.crossPlatformSampleCount
             }}
-            条），只作为冷启动代理，权重已额外折减。积累本平台数据后会自动切换。
+            条），仅供参考，不能代表本平台的实际互动。积累本平台数据后可进一步个性化推荐。
           </li>
           <li>
             有效样本 {{ activity.effectiveSampleCount }} · 相似内容样本
             {{ activity.similarSampleCount }} · 账号样本 {{ activity.accountSampleCount }} ·
             平台样本 {{ activity.platformSampleCount }}
           </li>
-          <li>
-            时间衰减 decay_days = {{ activity.decayDays }} · 贝叶斯平滑强度
-            {{ activity.priorStrength }} · 覆盖时段 {{ activity.coveredSlots }} 个
-          </li>
-          <li v-if="activity.priorChain?.length">
-            平滑链：{{
-              activity.priorChain.map((item) => `${item.label}(${item.slotCount})`).join(' → ')
-            }}
-          </li>
+          <li>已覆盖 {{ activity.coveredSlots }} 个发布时段。</li>
         </ul>
         <HourlyActivityChart
           v-if="!activity.hourlyCurve?.length"
@@ -217,10 +173,10 @@ function formatTime(value: string) {
       </section>
 
       <el-collapse class="detail-collapse">
-        <el-collapse-item title="完整技术依据（默认收起）" name="tech">
+        <el-collapse-item title="查看完整分析依据" name="tech">
           <ul class="tech-list">
             <li v-for="reason in recommendation.reasons" :key="reason.type">
-              {{ reason.description }}（贡献 {{ reason.contribution }} 分）
+              {{ reason.description }}
             </li>
             <li>
               {{ recommendation.dataSource.baseline }} ·
@@ -228,14 +184,6 @@ function formatTime(value: string) {
             </li>
             <li>{{ recommendation.dataSufficiency.message }}</li>
             <li v-if="recommendation.window">分析范围：{{ recommendation.window.label }}</li>
-            <li>算法版本：{{ recommendation.algorithmVersion }}</li>
-            <li v-if="recommendation.stageStatus">
-              阶段状态：{{
-                Object.entries(recommendation.stageStatus)
-                  .map(([key, value]) => `${key}=${value}`)
-                  .join(' · ')
-              }}
-            </li>
           </ul>
         </el-collapse-item>
       </el-collapse>
@@ -245,7 +193,6 @@ function formatTime(value: string) {
         :title="`${platformNames[row.platform]} 相似历史内容`"
         :items="similarHistory"
         :retrieval-provider="recommendation.retrievalProvider"
-        :embedding-model="recommendation.embeddingModel"
       />
     </template>
   </DetailDrawer>
@@ -286,8 +233,8 @@ function formatTime(value: string) {
 }
 .panel {
   border: 1px solid var(--sf-line, #e5e7eb);
-  border-radius: 10px;
-  padding: 12px 14px;
+  border-radius: 16px;
+  padding: 18px;
   background: #fff;
 }
 .panel h3,
@@ -386,5 +333,10 @@ function formatTime(value: string) {
   color: var(--sf-muted, #667085);
   font-size: 12px;
   line-height: 1.7;
+}
+@media (max-width: 560px) {
+  .detail-summary {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
 }
 </style>

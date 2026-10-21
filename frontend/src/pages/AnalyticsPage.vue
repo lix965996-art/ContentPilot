@@ -302,7 +302,7 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
               <el-option
                 v-for="item in schedules"
                 :key="item.id"
-                :label="`#${item.id} · ${item.articleTitle}`"
+                :label="`${item.articleTitle} · 任务 ${item.id}`"
                 :value="item.id"
               />
             </el-select>

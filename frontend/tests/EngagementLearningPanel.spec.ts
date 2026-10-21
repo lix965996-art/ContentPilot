@@ -35,7 +35,7 @@ function status(): LearningStatus {
 }
 function mount(manageModels = false) {
   return render(EngagementLearningPanel, {
-    props: { manageModels },
+    props: { showModelManagement: manageModels },
     global: { plugins: [ElementPlus] },
   })
 }
@@ -48,8 +48,8 @@ beforeEach(() => {
 })
 
 describe('engagement learning', () => {
-  it('keeps missing counters distinct from zero and explains the sampling window', async () => {
-    mount()
+  it('keeps missing counters distinct from zero and explains the sampling window in management', async () => {
+    mount(true)
     expect(await screen.findByText(/点赞 0 · 回复 未知 · 转发 3/)).toBeTruthy()
     expect(screen.getByText(/24小时15分钟/)).toBeTruthy()
     expect(screen.getByText(/曝光量不可用/)).toBeTruthy()
@@ -123,9 +123,34 @@ describe('engagement learning', () => {
     ]
     vi.mocked(learningApi.status).mockResolvedValue(data)
     mount()
-    expect(await screen.findByText(/AUTH_REQUIRED/)).toBeTruthy()
-    expect(screen.getByText(/失败 RATE_LIMITED/)).toBeTruthy()
+    expect(await screen.findByText('账号授权已失效，请重新连接')).toBeTruthy()
+    expect(screen.queryByText(/AUTH_REQUIRED/)).toBeNull()
+    expect(screen.getByText(/平台请求较多，请稍后重试/)).toBeTruthy()
+    expect(screen.queryByText(/RATE_LIMITED/)).toBeNull()
     expect(screen.getByText('采集最新互动')).toBeTruthy()
+  })
+
+  it('keeps internal codes and model diagnostics out of the everyday view', async () => {
+    const data = status()
+    data.items[0]!.errorCode = 'INTERNAL_COLLECTION_DEBUG_CODE'
+    data.readiness.reasons = { INTERNAL_READINESS_REASON: 1 }
+    vi.mocked(learningApi.status).mockResolvedValue(data)
+    mount()
+    expect(await screen.findByText('采集暂未完成，请检查账号连接后重试')).toBeTruthy()
+    expect(
+      screen.queryByText(/INTERNAL_COLLECTION_DEBUG_CODE|INTERNAL_READINESS_REASON/),
+    ).toBeNull()
+    expect(screen.queryByText('模型与公开数据实验')).toBeNull()
+    expect(screen.queryByText('24小时合格样本')).toBeNull()
+    expect(screen.getByText('发布互动')).toBeTruthy()
+  })
+
+  it('does not show management details to non-admin users', async () => {
+    permissions.canManageSystem = false
+    mount(true)
+    await screen.findByText(/点赞 0/)
+    expect(screen.queryByText('24小时合格样本')).toBeNull()
+    expect(screen.queryByText('模型与公开数据实验')).toBeNull()
   })
 
   it('ignores a stale response after the component is removed', async () => {
@@ -136,7 +161,7 @@ describe('engagement learning', () => {
       }),
     )
     const view = mount()
-    expect(await screen.findByText(/正在加载互动学习数据/)).toBeTruthy()
+    expect(await screen.findByText(/正在加载互动数据/)).toBeTruthy()
     view.unmount()
     resolve(status())
     await waitFor(() => expect(screen.queryByText(/点赞 0/)).toBeNull())

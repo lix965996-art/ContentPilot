@@ -56,6 +56,20 @@ function sampleMix(row: RecommendationPlanRow) {
   return `${account}% / ${baseline}%`
 }
 
+const solverLabels: Record<string, string> = {
+  OPTIMAL: '已优化',
+  FEASIBLE: '方案可用',
+  INFEASIBLE: '暂无可行方案',
+  MODEL_INVALID: '使用统计推荐',
+  UNKNOWN: '使用统计推荐',
+  ORTOOLS_UNAVAILABLE: '使用统计推荐',
+  NO_CANDIDATE: '暂无候选时段',
+}
+function solverText(row: RecommendationPlanRow) {
+  if (!row.recommendation) return '尚未计算'
+  return solverLabels[row.recommendation.solverStatus || ''] || '统计推荐'
+}
+
 function score(value?: number | null) {
   return value === null || value === undefined ? '—' : Math.round(value)
 }
@@ -119,10 +133,8 @@ function score(value?: number | null) {
           </span>
         </template>
       </el-table-column>
-      <el-table-column label="求解状态" width="112">
-        <template #default="{ row }">{{
-          row.recommendation?.solverStatus || 'hybrid-v2'
-        }}</template>
+      <el-table-column label="排期状态" width="112">
+        <template #default="{ row }">{{ solverText(row) }}</template>
       </el-table-column>
       <el-table-column label="备选时间" min-width="160">
         <template #default="{ row }">
@@ -143,7 +155,7 @@ function score(value?: number | null) {
       <el-table-column label="得分" width="66">
         <template #default="{ row }">{{ row.recommendation?.score ?? '—' }}</template>
       </el-table-column>
-      <el-table-column label="样本(账号/公开)" width="130">
+      <el-table-column label="账号与公开样本" width="130">
         <template #default="{ row }">
           {{ row.recommendation ? `${row.recommendation.sampleCount} · ${sampleMix(row)}` : '—' }}
         </template>
@@ -202,15 +214,15 @@ function score(value?: number | null) {
 <style scoped>
 .result-table-wrap {
   border: 1px solid var(--sf-line, #e5e7eb);
-  border-radius: 10px;
+  border-radius: 16px;
   background: #fff;
-  padding: 12px;
+  padding: 18px;
 }
 .result-table-head {
   display: flex;
   align-items: baseline;
   justify-content: space-between;
-  margin-bottom: 10px;
+  margin-bottom: 16px;
 }
 .result-table-head h2 {
   margin: 0;

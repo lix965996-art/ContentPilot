@@ -15,6 +15,21 @@ const chain = ref<PublishDecisionChain>()
 const loading = ref(false)
 const errorMessage = ref('')
 
+const confidenceLabels: Record<string, string> = { HIGH: '高', MEDIUM: '中', LOW: '低' }
+const dataSourceLabels: Record<string, string> = {
+  ACCOUNT_API: '平台实测',
+  SIMULATED_DEMO: '演示数据',
+  SIMULATED: '模拟数据',
+  YOUTUBE_PUBLIC_SAMPLE: 'YouTube 公开样本',
+  YOUTUBE: 'YouTube 公开样本',
+  MANUAL: '手动录入',
+  API: '平台实测',
+}
+
+function displayDataSource(source: string) {
+  return dataSourceLabels[source] || (/[\u4e00-\u9fff]/.test(source) ? source : '来源待确认')
+}
+
 function displayPlatform(name: string) {
   return analysisPlatformNames[name] || platformNames[name as keyof typeof platformNames] || name
 }
@@ -251,7 +266,7 @@ const contributionOption = computed(() => {
           <div>
             <h2>{{ chain.title }}</h2>
             <p>
-              {{ displayPlatform(chain.platform) }} · 算法 {{ chain.analysis.algorithmVersion }} ·
+              {{ displayPlatform(chain.platform) }} ·
               {{ chain.analysis.window.label }}
             </p>
           </div>
@@ -275,7 +290,7 @@ const contributionOption = computed(() => {
                   <strong>{{ chain.content.modelName || '规则改写' }}</strong>
                 </div>
                 <div>
-                  <span>Prompt 版本</span>
+                  <span>提示词版本</span>
                   <strong>{{ chain.content.promptVersion || '—' }}</strong>
                 </div>
                 <div>
@@ -339,7 +354,7 @@ const contributionOption = computed(() => {
               <h4>
                 加权打分<small
                   >综合得分 {{ chain.analysis.score }} · 置信度
-                  {{ chain.analysis.confidence }}</small
+                  {{ confidenceLabels[chain.analysis.confidence] || '待评估' }}</small
                 >
               </h4>
               <div class="score-grid">
@@ -407,7 +422,9 @@ const contributionOption = computed(() => {
                     <td>{{ formatTime(alt.recommendedAt) }}</td>
                     <td>{{ alt.score }}</td>
                     <td>{{ alt.sampleCount }}</td>
-                    <td>{{ alt.confidence }}</td>
+                    <td>
+                      {{ confidenceLabels[alt.confidence] || '待评估' }}
+                    </td>
                   </tr>
                 </tbody>
               </table>
@@ -418,16 +435,18 @@ const contributionOption = computed(() => {
             <div class="step-no">5</div>
             <div class="step-body">
               <h4>
-                发布效果<small>{{ chain.result.dataSources.join('、') || '暂无数据' }}</small>
+                发布效果<small>{{
+                  chain.result.dataSources.map(displayDataSource).join('、') || '暂无数据'
+                }}</small>
               </h4>
               <div class="kv">
                 <div>
                   <span>曝光</span>
-                  <strong>{{ chain.result.impressions || '—' }}</strong>
+                  <strong>{{ chain.result.impressions ?? '—' }}</strong>
                 </div>
                 <div>
                   <span>互动总数</span>
-                  <strong>{{ chain.result.engagementTotal || '—' }}</strong>
+                  <strong>{{ chain.result.engagementTotal ?? '—' }}</strong>
                 </div>
                 <div>
                   <span>互动率</span>

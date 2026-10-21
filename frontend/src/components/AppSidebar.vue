@@ -23,16 +23,20 @@ const sections = computed(() =>
   <aside
     :class="[
       mobileOpen ? 'translate-x-0' : '-translate-x-full lg:translate-x-0',
-      collapsed ? 'lg:w-[64px]' : 'lg:w-[196px]',
+      collapsed ? 'is-collapsed lg:w-[72px]' : 'lg:w-[220px]',
     ]"
     class="app-sidebar"
   >
     <div class="sidebar-brand">
-      <BrandMark :compact="collapsed" /><button class="lg:hidden" @click="emit('close')">
+      <BrandMark :compact="collapsed" /><button
+        class="lg:hidden"
+        aria-label="关闭导航"
+        @click="emit('close')"
+      >
         <X :size="18" />
       </button>
     </div>
-    <nav class="sidebar-nav">
+    <nav class="sidebar-nav" aria-label="主导航">
       <section v-for="section in sections" :key="section.label || 'home'">
         <p v-if="section.label && !collapsed">{{ section.label }}</p>
         <el-tooltip
@@ -42,7 +46,14 @@ const sections = computed(() =>
           placement="right"
           :disabled="!collapsed"
         >
-          <RouterLink :to="{ name: item.name }" :aria-label="item.label" @click="emit('close')"
+          <RouterLink
+            :to="{ name: item.name }"
+            :aria-label="item.label"
+            active-class=""
+            exact-active-class=""
+            :class="{ 'is-active': route.name === item.name }"
+            :aria-current="route.name === item.name ? 'page' : undefined"
+            @click="emit('close')"
             ><component :is="item.icon" :size="17" /><span v-if="!collapsed">{{ item.label }}</span
             ><i v-if="route.name === item.name"
           /></RouterLink>
@@ -61,7 +72,11 @@ const sections = computed(() =>
           ><small>{{ auth.primaryRoleName }}</small>
         </div>
       </div>
-      <button @click="emit('toggle')">
+      <button
+        :aria-label="collapsed ? '展开导航' : '收起导航'"
+        :aria-expanded="!collapsed"
+        @click="emit('toggle')"
+      >
         <PanelLeftClose :size="17" :class="collapsed ? 'rotate-180' : ''" /><span v-if="!collapsed"
           >收起导航</span
         >

@@ -8,7 +8,7 @@ async function login(page: import('@playwright/test').Page, username: string, pa
   await expect(page).toHaveURL('/')
 }
 
-test('operator can inspect real collection readiness without inventing trained models', async ({
+test('operator sees published interactions without internal model diagnostics', async ({
   page,
 }) => {
   await login(page, 'operator', 'Operator@123456')
@@ -17,20 +17,20 @@ test('operator can inspect real collection readiness without inventing trained m
   )
   await page.goto('/analytics')
   await response
-  const panel = page.getByRole('region', { name: '互动采集与机器学习' })
+  const panel = page.getByRole('region', { name: '发布互动' })
   await expect(panel).toBeVisible()
-  await expect(panel.getByText(/24小时合格样本/)).toBeVisible()
-  await expect(panel.getByText(/曝光量不可用/)).toBeVisible()
-  await expect(panel.getByText(/没有合格平台模型时继续使用统计推荐/)).toBeVisible()
+  await expect(panel.getByText('已发布内容的互动')).toBeVisible()
+  await expect(panel.getByText(/24小时合格样本|模型与公开数据实验/)).toHaveCount(0)
   await panel.getByRole('button', { name: '刷新互动数据' }).click()
-  await expect(panel.getByText(/24小时合格样本/)).toBeVisible()
+  await expect(panel.getByText('已发布内容的互动')).toBeVisible()
 })
 
 test('administrator has model management and read-only users cannot collect', async ({ page }) => {
   await login(page, 'admin', 'Admin@123456')
   await page.goto('/settings')
-  await page.getByRole('tab', { name: '互动学习' }).click()
-  const panel = page.getByRole('region', { name: '互动采集与机器学习' })
+  await page.getByRole('tab', { name: '高级数据管理' }).click()
+  const panel = page.getByRole('region', { name: '发布互动' })
   await expect(panel.getByText(/尚无本地训练模型/)).toBeVisible()
+  await expect(panel.getByText('24小时合格样本')).toBeVisible()
   await expect(panel.getByRole('button', { name: '采集最新互动' })).toHaveCount(0)
 })

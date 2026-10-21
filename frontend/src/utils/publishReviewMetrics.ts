@@ -63,7 +63,7 @@ export const DATA_SOURCE_META: Record<
     purpose: '真实与演示数据混合，不参与效果结论',
   },
   SIMULATED: {
-    label: '演示数据 SIMULATED',
+    label: '演示数据',
     participates: false,
     purpose: '页面与流程演示，不参与真实效果结论',
   },

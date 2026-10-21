@@ -92,6 +92,18 @@ function formatNumber(value: number | null) {
   return new Intl.NumberFormat('zh-CN').format(value || 0)
 }
 
+function usageStatusLabel(value?: string) {
+  const labels: Record<string, string> = {
+    RUNNING: '处理中',
+    SUCCEEDED: '已完成',
+    SUCCESS: '已完成',
+    FAILED: '未完成',
+    UNCERTAIN: '结果待确认',
+    CANCELLED: '已取消',
+  }
+  return value ? labels[value] || '状态待确认' : '历史记录'
+}
+
 function changeProvider(value: string) {
   const preset = providerOptions.find((item) => item.value === value)
   if (preset?.url) llm.baseUrl = preset.url
@@ -171,8 +183,8 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
   <div>
     <PageHeader title="设置" />
     <el-tabs v-model="tab" class="settings-tabs">
-      <el-tab-pane label="互动学习" name="learning" lazy>
-        <EngagementLearningPanel manage-models />
+      <el-tab-pane label="高级数据管理" name="learning" lazy>
+        <EngagementLearningPanel show-model-management />
       </el-tab-pane>
       <el-tab-pane label="模型服务" name="model">
         <div class="model-service-layout">
@@ -450,7 +462,7 @@ onMounted(() => load().catch((error) => ElMessage.error(getApiErrorMessage(error
               <article v-for="item in usage.recent" :key="item.id">
                 <div>
                   <b>{{ item.articleTitle }}</b>
-                  <small>{{ item.status || '历史记录' }} · {{ item.model }}</small>
+                  <small>{{ usageStatusLabel(item.status) }} · {{ item.model }}</small>
                 </div>
                 <span
                   >输入 {{ formatNumber(item.promptTokens) }} / 输出

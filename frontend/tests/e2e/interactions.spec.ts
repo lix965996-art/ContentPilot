@@ -18,6 +18,24 @@ test('primary navigation actions respond for an operator', async ({ page }) => {
   await searchDialog.getByRole('button', { name: '内容库' }).click()
   await expect(page).toHaveURL(/\/articles/)
 
+  const navigation = page.getByRole('navigation', { name: '主导航' })
+  await expect(navigation.locator('a.is-active')).toHaveCount(1)
+  await expect(navigation.getByRole('link', { name: '内容库', exact: true })).toHaveAttribute(
+    'aria-current',
+    'page',
+  )
+  await expect(navigation.getByRole('link', { name: '工作台', exact: true })).not.toHaveClass(
+    /is-active/,
+  )
+  await page.getByRole('button', { name: '收起导航' }).click()
+  await expect
+    .poll(() => page.locator('.app-sidebar').evaluate((el) => el.getBoundingClientRect().width))
+    .toBe(72)
+  await page.getByRole('button', { name: '展开导航' }).click()
+  await expect
+    .poll(() => page.locator('.app-sidebar').evaluate((el) => el.getBoundingClientRect().width))
+    .toBe(220)
+
   await page
     .getByRole('main')
     .getByRole('button', { name: /新建内容/ })

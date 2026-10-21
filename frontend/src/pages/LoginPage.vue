@@ -232,15 +232,9 @@ watch(isRegister, async (value) => {
       </div>
       <div class="login-card" :class="{ 'is-register': isRegister }">
         <BrandMark class="login-form-brand" />
-        <h2>
-          {{ isRegister ? '创建账号' : '欢迎回来' }} <span>{{ isRegister ? '✨' : '👋' }}</span>
-        </h2>
+        <h2>{{ isRegister ? '创建账号' : '欢迎回来' }}</h2>
         <p>
-          {{
-            isRegister
-              ? '注册后即可使用内容创作、排期与发布功能'
-              : '登录你的工作账号，继续内容运营之旅'
-          }}
+          {{ isRegister ? '注册后即可使用内容创作、排期与发布功能' : '登录以管理内容与发布计划' }}
         </p>
         <el-alert v-if="auth.connectionError" type="warning" :closable="false" class="mb-4">
           <template #title>暂时无法连接服务，已保留你的登录资料。</template>
@@ -405,9 +399,6 @@ watch(isRegister, async (value) => {
             </button>
           </div>
         </details>
-        <p class="login-security">
-          <ShieldCheck :size="16" />数据加密传输，接口通过 JWT 与角色权限校验保护
-        </p>
       </div>
     </section>
   </main>

@@ -123,7 +123,7 @@ onMounted(load)
                 "
                 round
               >
-                {{ statusLabels[account.status] || account.status }}
+                {{ statusLabels[account.status] || '状态待确认' }}
               </el-tag>
             </div>
           </div>
@@ -135,7 +135,7 @@ onMounted(load)
           <div class="mt-4 grid gap-3">
             <button class="admin-action" @click="router.push({ name: 'platform-accounts' })">
               <Share2 :size="18" />
-              <span><b>平台账号</b><small>扫码登录、API Key、发布模式</small></span>
+              <span><b>平台账号</b><small>扫码登录、访问凭证、发布方式</small></span>
               <ArrowUpRight :size="16" />
             </button>
             <button class="admin-action" @click="router.push({ name: 'settings' })">

@@ -36,7 +36,6 @@ const topics = computed(() =>
         <b>{{ accountName }}</b>
         <span>刚刚 · 来自 ContentPilot</span>
       </div>
-      <i>•••</i>
     </header>
 
     <section class="weibo-copy">
@@ -119,11 +118,6 @@ const topics = computed(() =>
   margin-top: 2px;
   color: #98a2b3;
   font-size: 11px;
-}
-.account-row i {
-  color: #98a2b3;
-  font-size: 11px;
-  font-style: normal;
 }
 .weibo-copy {
   padding: 5px 14px 12px;

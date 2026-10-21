@@ -101,7 +101,10 @@ function runPlatforms(run: OperationRun): Platform[] {
 }
 
 function stepName(run: OperationRun, value: string) {
-  if (run.type === 'GENERATION') return platformNames[value as Platform] || value
+  if (run.type === 'GENERATION') {
+    const platform = platformFromValue(value)
+    return platform ? platformNames[platform] : '内容生成'
+  }
   const labels: Record<string, string> = {
     PREPARE: '准备发布内容',
     UPLOAD_MEDIA: '上传媒体',
@@ -111,7 +114,7 @@ function stepName(run: OperationRun, value: string) {
     MANUAL_CONFIRM: '人工确认',
     等待调度: '等待调度',
   }
-  return labels[value] || value
+  return labels[value] || '发布步骤'
 }
 
 function stageLabel(value?: string) {
@@ -134,12 +137,12 @@ function stageLabel(value?: string) {
 function runReference(run: OperationRun) {
   const segments = String(run.id).split(':')
   const raw = segments[segments.length - 1] || String(run.id)
-  return `运行 #${raw.slice(0, 8).toUpperCase()}`
+  return `运行编号 ${raw.slice(0, 8).toUpperCase()}`
 }
 
 function duration(value = 0) {
   if (!value) return '—'
-  if (value < 1000) return `${value} ms`
+  if (value < 1000) return `${value} 毫秒`
   const seconds = value / 1000
   if (seconds < 60) return `${seconds.toFixed(seconds < 10 ? 1 : 0)} 秒`
   const minutes = Math.floor(seconds / 60)

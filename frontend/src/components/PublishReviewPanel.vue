@@ -515,8 +515,7 @@ function hourlyOption(chain: PublishDecisionChain) {
         }}</span>
       </div>
       <p v-if="includeSimulated && simulatedCount" class="review-warning">
-        当前演示对比包含 {{ simulatedCount }} 条 SIMULATED
-        模拟互动数据，用于演示流程，不代表真实平台效果。
+        当前对比包含 {{ simulatedCount }} 条模拟互动数据，用于演示流程，不代表真实平台效果。
       </p>
       <p v-if="comparisonNotice" class="review-warning">{{ comparisonNotice }}</p>
       <table class="review-table">

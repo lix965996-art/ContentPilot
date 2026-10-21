@@ -38,7 +38,12 @@ const publishModeNames: Record<string, string> = {
   SUBMIT_PUBLISH: '提交平台发布',
   MANUAL_CONFIRM: '人工发布确认',
   MCP_PUBLISH: '本机自动发布',
+  CDP_DRAFT: '本机浏览器保存草稿',
+  CDP_PUBLISH: '本机自动发布',
+  BROWSER_PUBLISH: '本机浏览器发布',
   BROWSER_DRAFT: '本机浏览器保存草稿',
+  WECHATSYNC_CLI: '多平台草稿同步',
+  SIMULATED: '演示发布（未真实发送）',
 }
 const retryableStatuses = new Set([
   'FAILED',
@@ -52,7 +57,7 @@ function publishModeLabel(platform: string, mode: string): string {
   if (platform === 'X' && mode === 'REAL_API') return 'X 官方 API（真实发布）'
   if (platform === 'BLUESKY' && mode === 'REAL_API') return 'Bluesky API（真实发布）'
   if (platform === 'MASTODON' && mode === 'REAL_API') return 'Mastodon API（真实发布）'
-  return publishModeNames[mode] || mode
+  return publishModeNames[mode] || '待确认发布方式'
 }
 const statusTabs = [
   ['全部', ''],
@@ -152,7 +157,7 @@ function openCreator() {
 }
 onMounted(load)
 function platformLabel(value: string): string {
-  return platformNames[value as Platform] || value
+  return platformNames[value as Platform] || '其他平台'
 }
 function rowClassName({ row }: { row: Schedule }) {
   return ['FAILED', 'EXPIRED', 'INTERRUPTED', ...retryableStatuses].includes(row.status)
@@ -205,7 +210,7 @@ function logStatusLabel(value: unknown) {
 </script>
 <template>
   <div>
-    <PageHeader title="发布中心" description="跟踪排期执行、人工确认、失败重试和逐步日志。"
+    <PageHeader title="发布中心" description="查看发布进度、处理待办事项，并追踪每一次发布结果。"
       ><el-button :loading="loading" @click="load"
         ><RefreshCw :size="15" class="mr-2" />刷新</el-button
       ></PageHeader
@@ -226,7 +231,7 @@ function logStatusLabel(value: unknown) {
           ><template #default="{ row }"
             ><button class="text-left" @click="open(row)">
               <span class="block text-xs text-muted"
-                >#{{ row.id }} · {{ platformLabel(row.platform) }}</span
+                >{{ platformLabel(row.platform) }} · 任务 {{ row.id }}</span
               ><span class="mt-1 block font-medium text-ink">{{ row.articleTitle }}</span
               ><span v-if="row.errorMessage" class="mt-1 block text-xs text-red-600">{{
                 row.errorMessage
@@ -293,7 +298,7 @@ function logStatusLabel(value: unknown) {
         ><div class="space-y-5">
           <div class="flex items-start justify-between">
             <div>
-              <p class="text-xs text-muted">任务 #{{ detail.id }}</p>
+              <p class="text-xs text-muted">任务编号 {{ detail.id }}</p>
               <h3 class="mt-1 text-lg font-semibold">{{ detail.articleTitle }}</h3>
             </div>
             <StatusBadge :status="detail.status" />
@@ -323,7 +328,7 @@ function logStatusLabel(value: unknown) {
             </div>
             <div>
               <dt>发布账号</dt>
-              <dd>{{ detail.accountName || '—' }}</dd>
+              <dd>{{ detail.accountName || '未指定账号' }}</dd>
             </div>
             <div>
               <dt>计划时间</dt>
@@ -331,7 +336,7 @@ function logStatusLabel(value: unknown) {
             </div>
             <div>
               <dt>发布链接</dt>
-              <dd class="break-all">{{ detail.publishedUrl || '—' }}</dd>
+              <dd class="break-all">{{ detail.publishedUrl || '尚无发布链接' }}</dd>
             </div>
             <div>
               <dt>结果类型</dt>

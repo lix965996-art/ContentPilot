@@ -146,13 +146,13 @@ const emit = defineEmits<{
 <style scoped>
 .batch-form {
   border: 1px solid var(--sf-line, #e5e7eb);
-  border-radius: 10px;
+  border-radius: 18px;
   background: #fff;
-  padding: 16px;
+  padding: 24px;
 }
 .batch-form-grid {
   display: grid;
-  gap: 12px 16px;
+  gap: 20px 24px;
   grid-template-columns: repeat(3, minmax(0, 1fr));
 }
 .platform-checks {
@@ -165,8 +165,8 @@ const emit = defineEmits<{
   align-items: center;
   justify-content: space-between;
   gap: 12px;
-  margin-top: 14px;
-  padding-top: 14px;
+  margin-top: 20px;
+  padding-top: 20px;
   border-top: 1px solid var(--sf-line, #e5e7eb);
 }
 .form-hint {

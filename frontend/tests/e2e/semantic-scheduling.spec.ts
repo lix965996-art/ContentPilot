@@ -58,7 +58,7 @@ async function ensurePlatformAccounts(request: APIRequestContext) {
   }
 }
 
-test('cross-platform plan exposes the LLM profile, solver status and adjustment reasons', async ({
+test('cross-platform plan explains timing choices without internal algorithm parameters', async ({
   page,
   request,
 }) => {
@@ -74,14 +74,14 @@ test('cross-platform plan exposes the LLM profile, solver status and adjustment 
   // The demo seed has no 今日头条 account, which would block the calculation.
   await page.locator('.platform-checks').getByText('今日头条').click()
 
-  await expect(page.getByText('语义联合排期')).toBeVisible()
+  await expect(page.getByText('智能联合排期', { exact: true })).toBeVisible()
   await page.getByRole('button', { name: '计算跨平台推荐时间' }).click()
 
-  const profilePanel = page.getByText('LLM 内容排期画像')
+  const profilePanel = page.getByText('内容排期画像')
   await expect(profilePanel).toBeVisible({ timeout: 200_000 })
 
   // Main table shows the conclusions required by the scheduling workflow.
-  for (const header of ['内容策略', '原始最佳时间', '优化后时间', '调整原因', '求解状态']) {
+  for (const header of ['内容策略', '原始最佳时间', '优化后时间', '调整原因', '排期状态']) {
     await expect(page.getByRole('columnheader', { name: header })).toBeVisible()
   }
 
@@ -89,8 +89,9 @@ test('cross-platform plan exposes the LLM profile, solver status and adjustment 
   await page.getByRole('button', { name: '详情' }).first().click()
   await expect(page.getByText('约束与调整原因')).toBeVisible()
   await expect(page.getByText('硬约束检查')).toBeVisible()
-  await expect(page.getByText('软目标与权重')).toBeVisible()
+  await expect(page.getByText('软目标与权重')).toHaveCount(0)
+  await expect(page.getByText(/算法版本：|阶段状态：|预测耗时超过预算/)).toHaveCount(0)
   await expect(
-    page.getByText('LLM 只能给出结论与新的软约束，不能直接指定发布时间或修改排期数据。'),
+    page.getByText('智能审查只提供排期建议，实际发布时间以你确认的排期为准。'),
   ).toBeVisible()
 })

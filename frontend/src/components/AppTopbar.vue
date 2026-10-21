@@ -136,12 +136,19 @@ onBeforeUnmount(() => window.removeEventListener('keydown', handleShortcut))
 <template>
   <header class="app-topbar">
     <div class="topbar-title">
-      <button class="mobile-menu lg:hidden" @click="emit('menu')"><Menu :size="19" /></button>
+      <button class="mobile-menu lg:hidden" aria-label="打开导航" @click="emit('menu')">
+        <Menu :size="19" />
+      </button>
       <h1>{{ pageTitle }}</h1>
     </div>
     <div class="topbar-actions">
-      <button class="topbar-search" aria-label="搜索" @click="openSearch">
-        <Search :size="16" /><span>搜索</span><kbd>⌘ K</kbd>
+      <button
+        class="topbar-search"
+        aria-label="搜索"
+        title="搜索页面和内容，快捷键 Ctrl+K"
+        @click="openSearch"
+      >
+        <Search :size="16" /><span>搜索页面或内容</span>
       </button>
       <el-button
         v-if="canOperate"

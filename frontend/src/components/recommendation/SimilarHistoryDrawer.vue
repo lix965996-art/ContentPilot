@@ -22,11 +22,11 @@ const rows = computed(() => props.items || [])
 const selectedCount = computed(() => rows.value.filter((item) => item.selected).length)
 
 const providerLabels: Record<string, string> = {
-  LLM_RERANK: 'FAISS 粗检索 + LLM 精排',
-  VECTOR_ONLY: '仅向量检索（LLM 不可用）',
+  LLM_RERANK: '语义检索与智能排序',
+  VECTOR_ONLY: '使用语义相似度排序',
   NO_HISTORY: '该平台账号暂无历史内容，也没有可借用的公开数据集',
   NO_VECTOR: '历史内容尚未生成向量',
-  UNAVAILABLE: '检索阶段异常，已降级',
+  UNAVAILABLE: '检索暂不可用，使用其他推荐依据',
 }
 
 function formatTime(value?: string | null) {
@@ -44,15 +44,14 @@ function formatTime(value?: string | null) {
 <template>
   <DetailDrawer v-model="visible" :title="title || '相似历史内容'" size="560px">
     <p class="retrieval-note">
-      {{ providerLabels[retrievalProvider || ''] || retrievalProvider || '未执行语义检索' }}
-      <template v-if="embeddingModel"> · 向量模型 {{ embeddingModel }}</template>
+      {{ providerLabels[retrievalProvider || ''] || '未执行语义检索' }}
       · 命中 {{ rows.length }} 篇，入选 {{ selectedCount }} 篇
     </p>
 
     <ol v-if="rows.length" class="history-list">
       <li v-for="item in rows" :key="`${item.refType}-${item.historicalContentId}`">
         <header>
-          <strong>{{ item.title || `#${item.historicalContentId}` }}</strong>
+          <strong>{{ item.title || '未命名内容' }}</strong>
           <span v-if="item.crossPlatform" class="badge proxy">
             {{ item.platform }} 跨平台代理
           </span>
@@ -66,7 +65,7 @@ function formatTime(value?: string | null) {
           <span>发布：{{ formatTime(item.publishTime) }}</span>
           <span>向量相似度：{{ item.vectorSimilarity }}</span>
           <span>
-            LLM 相关性：{{ item.llmRelevance === null ? '未评分' : `${item.llmRelevance}/100` }}
+            内容相关性：{{ item.llmRelevance === null ? '未评分' : `${item.llmRelevance} 分` }}
           </span>
           <span>综合得分：{{ item.combinedScore }}</span>
         </div>
@@ -93,8 +92,8 @@ function formatTime(value?: string | null) {
 }
 .history-list li {
   border: 1px solid var(--sf-line, #e5e7eb);
-  border-radius: 8px;
-  padding: 10px 12px;
+  border-radius: 14px;
+  padding: 16px;
   background: #fff;
 }
 .history-list header {

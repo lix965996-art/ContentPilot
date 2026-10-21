@@ -13,12 +13,11 @@ const props = defineProps<{
 }>()
 
 const verdictLabels: Record<string, string> = {
-  APPROVE: '通过，可交用户确认',
-  REQUEST_RESOLVE: '要求以更严格的软约束重新求解',
+  APPROVE: '检查通过，可确认排期',
+  REQUEST_RESOLVE: '建议调整间隔或平台顺序后重新安排',
   MANUAL_REVIEW: '信息不足或风险较高，需人工检查',
 }
 
-const breakdown = computed(() => props.optimization?.softObjectiveBreakdown || {})
 const hardConstraints = computed(() => props.optimization?.hardConstraints || [])
 const candidates = computed(() =>
   (props.optimization?.candidates || []).filter((item) => item.candidateStatus !== 'ELIGIBLE'),
@@ -43,7 +42,7 @@ function platformLabel(code: string) {
   <section class="reason-panel">
     <div class="time-diff">
       <div>
-        <span>原始最佳时间（hybrid-v2）</span><strong>{{ formatTime(originalBestTime) }}</strong>
+        <span>统计推荐时间</span><strong>{{ formatTime(originalBestTime) }}</strong>
       </div>
       <div>
         <span>联合优化后时间</span>
@@ -55,7 +54,7 @@ function platformLabel(code: string) {
     <h4>硬约束检查</h4>
     <ul class="constraint-list">
       <li v-for="(item, index) in hardConstraints" :key="`${item.code}-${index}`">
-        <em :class="{ bad: !item.satisfied }">{{ item.code }}</em>
+        <em :class="{ bad: !item.satisfied }">{{ item.satisfied ? '通过' : '需调整' }}</em>
         <span>
           <template v-if="item.platform && item.platform !== 'ALL'">
             {{ platformLabel(item.platform) }} ·
@@ -66,43 +65,23 @@ function platformLabel(code: string) {
       <li v-if="!hardConstraints.length"><span>本次未执行联合求解，无硬约束记录。</span></li>
     </ul>
 
-    <h4>软目标与权重</h4>
-    <ul class="constraint-list">
-      <li v-for="item in breakdown.objectives || []" :key="item.code">
-        <em>{{ item.code }}</em>
-        <span>{{ item.name }}</span>
-      </li>
-    </ul>
-    <p v-if="breakdown.weights" class="weights">
-      权重：{{
-        Object.entries(breakdown.weights)
-          .map(([key, value]) => `${key} ${value}`)
-          .join(' · ')
-      }}
-    </p>
-    <p v-if="breakdown.strategy" class="weights">
-      策略 {{ breakdown.strategy }} · 最小间隔 {{ breakdown.minimumGapMinutes }} 分钟 · 同时发布对数
-      {{ breakdown.simultaneousPairs ?? 0 }}
-      <template v-if="breakdown.platformPriority?.length">
-        · 优先级 {{ breakdown.platformPriority.map(platformLabel).join(' → ') }}
+    <details v-if="candidates.length" class="advanced-reasons">
+      <summary>查看其他时段未采用的原因</summary>
+      <template v-if="candidates.length">
+        <h4>被硬约束排除的候选时段（节选）</h4>
+        <ul class="constraint-list">
+          <li v-for="item in candidates.slice(0, 6)" :key="item.candidateTime">
+            <em class="bad">不可用</em>
+            <span>{{ formatTime(item.candidateTime) }} · {{ item.rejectReason }}</span>
+          </li>
+        </ul>
       </template>
-    </p>
-
-    <template v-if="candidates.length">
-      <h4>被硬约束排除的候选时段（节选）</h4>
-      <ul class="constraint-list">
-        <li v-for="item in candidates.slice(0, 6)" :key="item.candidateTime">
-          <em class="bad">{{ item.candidateStatus }}</em>
-          <span>{{ formatTime(item.candidateTime) }} · {{ item.rejectReason }}</span>
-        </li>
-      </ul>
-    </template>
+    </details>
 
     <template v-if="review">
-      <h4>LLM 方案审查</h4>
+      <h4>智能方案审查</h4>
       <p class="verdict" :class="review.verdict.toLowerCase()">
         {{ verdictLabels[review.verdict] || review.verdict }}
-        <span v-if="review.provider">（{{ review.provider }}）</span>
       </p>
       <p class="review-text">{{ review.summary }}</p>
       <ul v-if="review.risks?.length" class="constraint-list">
@@ -111,16 +90,14 @@ function platformLabel(code: string) {
         </li>
       </ul>
       <p v-if="review.resolve_request" class="review-text">
-        重新求解要求：最小间隔
+        建议发布间隔：至少
         {{ review.resolve_request.minimum_cross_platform_gap_minutes ?? '不变' }} 分钟
         <template v-if="review.resolve_request.platform_order?.length">
-          · 平台顺序 {{ review.resolve_request.platform_order.map(platformLabel).join(' → ') }}
+          · 平台顺序 {{ review.resolve_request.platform_order.map(platformLabel).join('、') }}
         </template>
-        · {{ review.resolveApplied ? '已重新求解一次' : '重新求解未产生可行解，保留原方案' }}
+        · {{ review.resolveApplied ? '已据此调整排期' : '暂未找到合适的新时间，保留原方案' }}
       </p>
-      <p class="review-text muted">
-        LLM 只能给出结论与新的软约束，不能直接指定发布时间或修改排期数据。
-      </p>
+      <p class="review-text muted">智能审查只提供排期建议，实际发布时间以你确认的排期为准。</p>
     </template>
   </section>
 </template>
@@ -191,11 +168,6 @@ h4 {
   background: #fee4e2;
   color: #b42318;
 }
-.weights {
-  margin: 6px 0 0;
-  color: var(--sf-muted, #667085);
-  line-height: 1.6;
-}
 .verdict {
   margin: 0 0 4px;
   font-weight: 600;
@@ -216,5 +188,15 @@ h4 {
 }
 .review-text.muted {
   color: var(--sf-muted, #667085);
+}
+.advanced-reasons {
+  margin-top: 14px;
+  border-top: 1px solid var(--sf-line, #e5e7eb);
+  padding-top: 12px;
+}
+.advanced-reasons summary {
+  color: #54709d;
+  cursor: pointer;
+  font-size: 12px;
 }
 </style>

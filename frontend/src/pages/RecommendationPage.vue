@@ -2,7 +2,7 @@
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { ElMessage, ElMessageBox } from 'element-plus'
 import type { UploadRequestOptions } from 'element-plus'
-import { Database, Download, Gauge, Sparkles, TriangleAlert, Upload } from 'lucide-vue-next'
+import { Check, Database, Download, Gauge, Sparkles, TriangleAlert, Upload } from 'lucide-vue-next'
 import PageHeader from '@/components/PageHeader.vue'
 import ChartPanel from '@/components/ChartPanel.vue'
 import RecommendationTargetForm from '@/components/recommendation/RecommendationTargetForm.vue'
@@ -361,12 +361,9 @@ async function confirmBatchSchedule() {
       <section class="pipeline-switch mt-3">
         <el-switch v-model="batch.optimizeEnabled.value" size="small" />
         <div>
-          <strong
-            >语义联合排期（LLM 画像 + 相似历史检索 + 活跃度估计 + OR-Tools 求解 + LLM 审查）</strong
-          >
+          <strong>智能联合排期</strong>
           <span>
-            关闭后只使用 hybrid-v2 单平台时段评分；OR-Tools 或 LLM
-            不可用时系统也会自动回退到该结果。
+            结合内容特点、历史表现和账号活跃时间，统筹各平台排期。关闭后使用历史时段评分；智能分析暂不可用时，也会自动采用历史评分结果。
           </span>
         </div>
       </section>
@@ -377,7 +374,7 @@ async function confirmBatchSchedule() {
           <span>{{ batch.calcStep.value === 0 ? '等待服务响应' : '正在检查冲突' }}</span>
         </div>
         <p class="recommend-progress-note">
-          服务端未提供实时进度。收到推荐结果后会检查排期冲突，完成后结果显示在下方。
+          正在计算推荐时间，随后会核对已有排期。完成后，结果会显示在下方。
         </p>
         <ol>
           <li
@@ -388,9 +385,14 @@ async function confirmBatchSchedule() {
               current: index === batch.calcStep.value && batch.calcPercent.value < 100,
             }"
           >
-            <em>{{
-              index < batch.calcStep.value || batch.calcPercent.value >= 100 ? '✓' : index + 1
-            }}</em>
+            <em>
+              <Check
+                v-if="index < batch.calcStep.value || batch.calcPercent.value >= 100"
+                :size="13"
+                aria-label="已完成"
+              />
+              <template v-else>{{ index + 1 }}</template>
+            </em>
             <span>{{ step }}</span>
           </li>
         </ol>
@@ -457,8 +459,7 @@ async function confirmBatchSchedule() {
           <strong>计算未产出结果</strong>
           <p>{{ batch.lastError.value }}</p>
           <p class="calc-error-hint">
-            开启语义联合排期时通常需要 1～2 分钟（含 LLM 与 OR-Tools）。也可先关闭上方开关，只用
-            hybrid-v2 快速出结果。
+            智能分析可能需要较长时间。可稍后重试，或关闭“智能联合排期”，使用历史评分计算。
           </p>
         </div>
         <el-button type="primary" @click="batch.calculateBatch()">重新计算</el-button>
@@ -568,7 +569,8 @@ async function confirmBatchSchedule() {
           <Gauge :size="16" /><span
             >{{ analysis.windowInfo.label }}
             <template v-if="analysis.windowInfo.startDate"
-              >（{{ analysis.windowInfo.startDate }} ~ {{ analysis.windowInfo.endDate }}）</template
+              >（{{ analysis.windowInfo.startDate }} 至
+              {{ analysis.windowInfo.endDate }}）</template
             >
             · {{ analysis.windowInfo.message }}</span
           >
@@ -599,12 +601,12 @@ async function confirmBatchSchedule() {
             </article>
           </section>
           <section class="panel-card">
-            <header><h3>星期 × 小时分布</h3></header>
+            <header><h3>每周活跃时间分布</h3></header>
             <ChartPanel :option="heatmapOption" height="300px" />
           </section>
           <section class="activity-grid">
             <article class="panel-card">
-              <header><h3>最佳时段 Top 8</h3></header>
+              <header><h3>推荐时段前八名</h3></header>
               <ul class="slot-list">
                 <li v-for="item in analysis.topSlots" :key="`${item.dayOfWeek}-${item.hour}`">
                   <b>{{ item.dayName }} {{ item.time }}</b>
@@ -619,8 +621,8 @@ async function confirmBatchSchedule() {
                   <b>{{ item.contentTypeName }}</b>
                   <span>
                     {{
-                      item.bestSlots.map((slot) => `${slot.dayName} ${slot.time}`).join(' / ') ||
-                      '—'
+                      item.bestSlots.map((slot) => `${slot.dayName} ${slot.time}`).join('、') ||
+                      '暂无推荐时段'
                     }}
                     · 样本 {{ item.sampleCount }}
                   </span>
@@ -670,7 +672,7 @@ async function confirmBatchSchedule() {
               v-model="importForm.default_platform"
               clearable
               class="mt-2 w-full"
-              placeholder="文件内含 platform 列时可留空"
+              placeholder="文件已包含平台时可留空"
               ><el-option
                 v-for="(name, key) in platformNames"
                 :key="key"
@@ -691,7 +693,7 @@ async function confirmBatchSchedule() {
               v-model="importForm.default_content_type"
               clearable
               class="mt-2 w-full"
-              placeholder="文件内含 content_type 列时可留空"
+              placeholder="文件已包含内容类型时可留空"
               ><el-option
                 v-for="item in contentTypes"
                 :key="item.value"
@@ -713,10 +715,7 @@ async function confirmBatchSchedule() {
         >
           <Upload :size="22" />
           <p>点击或拖拽上传 CSV / Excel</p>
-          <small
-            >支持
-            platform、account_id、content_type、publish_time、views、impressions、likes、comments、shares、favorites、followers、source_type</small
-          >
+          <small>支持平台、账号、内容类型、发布时间和互动指标，上传后可选择对应列。</small>
         </el-upload>
         <template v-if="preview">
           <div class="import-stats">
@@ -748,7 +747,11 @@ async function confirmBatchSchedule() {
           </div>
           <el-table :data="preview.preview" size="small" max-height="260" class="mt-3">
             <el-table-column prop="row" label="行号" width="70" />
-            <el-table-column prop="platform" label="平台" width="120" />
+            <el-table-column label="平台" width="120">
+              <template #default="{ row }">{{
+                platformNames[row.platform as Platform] || '其他平台'
+              }}</template>
+            </el-table-column>
             <el-table-column prop="accountRef" label="账号" width="120" />
             <el-table-column prop="contentTypeName" label="内容类型" width="110" />
             <el-table-column prop="publishTime" label="发布时间" width="170" />
