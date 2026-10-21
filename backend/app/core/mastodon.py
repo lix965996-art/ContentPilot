@@ -45,8 +45,16 @@ def normalize_instance_url(value: str) -> str:
         ) from None
 
 
-async def ensure_public_instance(value: str) -> str:
+async def ensure_public_instance(
+    value: str, *, dns_over_https: bool = False, proxy: str | None = None
+) -> str:
     origin = normalize_instance_url(value)
+    if dns_over_https:
+        from app.core.urls import ensure_public_http_url
+
+        return await ensure_public_http_url(
+            origin, require_https=True, dns_over_https=True, proxy=proxy
+        )
     host = urlsplit(origin).hostname
     addresses = await asyncio.to_thread(socket.getaddrinfo, host, 443, type=socket.SOCK_STREAM)
     if not addresses or any(not ipaddress.ip_address(item[4][0]).is_global for item in addresses):

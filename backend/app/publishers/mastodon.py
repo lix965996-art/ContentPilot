@@ -45,15 +45,22 @@ class MastodonPublisher(OfficialPublisher):
 
     async def _request(self, method: str, path: str, *, auth: bool = True, **kwargs):
         config = decrypt_json(self.account.credentials_encrypted)
-        origin = await ensure_public_instance(str(config.get("instance_url") or ""))
+        proxy = settings.outbound_http_proxy.strip() or None
+        instance_options = (
+            {"dns_over_https": True, "proxy": proxy} if settings.outbound_dns_over_https else {}
+        )
+        origin = await ensure_public_instance(
+            str(config.get("instance_url") or ""), **instance_options
+        )
         headers = dict(kwargs.pop("headers", {}))
         if auth:
             token = decrypt_secret(self.account.access_token_encrypted)
             if not token:
                 raise ValueError("Mastodon 访问令牌未配置")
             headers["Authorization"] = f"Bearer {token}"
-        proxy = settings.outbound_http_proxy.strip() or None
-        transport = PublicHTTPTransport(proxy=proxy, require_https=True)
+        transport = PublicHTTPTransport(
+            proxy=proxy, require_https=True, dns_over_https=settings.outbound_dns_over_https
+        )
         async with httpx.AsyncClient(
             timeout=30, follow_redirects=False, transport=transport, trust_env=False
         ) as client:

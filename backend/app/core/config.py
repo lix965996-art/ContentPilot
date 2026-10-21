@@ -71,6 +71,8 @@ class Settings(BaseSettings):
     llm_timeout_seconds: int = 60
     # Optional outbound proxy for platform APIs that the host cannot reach directly.
     outbound_http_proxy: str = ""
+    # Opt in only when local DNS cannot resolve platform API hosts reliably.
+    outbound_dns_over_https: bool = False
     # How often the persistent dispatcher scans unconfirmed task intents.
     dispatch_poll_seconds: int = 15
     dispatch_max_attempts: int = 10

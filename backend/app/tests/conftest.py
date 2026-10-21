@@ -31,6 +31,7 @@ os.environ["LLM_BASE_URL"] = "https://llm.test/v1"
 os.environ["LLM_API_KEY"] = "test-only-api-key"
 os.environ["LLM_MODEL"] = "test-chat-model"
 os.environ["PUBLISH_MODE"] = "official"
+os.environ["OUTBOUND_DNS_OVER_HTTPS"] = "false"
 
 from app.db.base import Base  # noqa: E402
 from app.db.seed import seed_database  # noqa: E402

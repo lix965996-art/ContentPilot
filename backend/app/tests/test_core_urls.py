@@ -1,4 +1,5 @@
 import asyncio
+import json
 import socket
 import ssl
 from types import SimpleNamespace
@@ -325,6 +326,219 @@ async def test_proxy_rejects_private_target_before_proxy_connection(monkeypatch)
     monkeypatch.setattr(httpcore.AnyIOBackend, "connect_tcp", forbidden)
     with pytest.raises(ValueError, match="内网"):
         await urls.fetch_public_image("https://127.0.0.1/image.png", proxy="http://127.0.0.1:7890")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("proxy", [None, "http://127.0.0.1:7890"])
+async def test_public_transport_preserves_post_json_headers_and_timeouts(monkeypatch, proxy):
+    """Exercise the same wire bridge as real publishing without sending a post."""
+    response_body = b'{"id":"123"}'
+    response = (
+        b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
+        + str(len(response_body)).encode()
+        + b"\r\nConnection: close\r\n\r\n"
+        + response_body
+    )
+    stream = WireStream(
+        ([b"HTTP/1.1 200 Connection established\r\n\r\n"] if proxy else []) + [response]
+    )
+    timeouts = []
+
+    async def connect(_self, host, port, **kwargs):
+        assert (host, port) == (("127.0.0.1", 7890) if proxy else ("8.8.8.8", 443))
+        timeouts.append(kwargs["timeout"])
+        return stream
+
+    monkeypatch.setattr(urls.socket, "getaddrinfo", _public_dns)
+    monkeypatch.setattr(httpcore.AnyIOBackend, "connect_tcp", connect)
+    payload = {"status": "一篇本地隔离测试文案", "visibility": "public", "media_ids": []}
+    async with httpx.AsyncClient(
+        transport=urls.PublicHTTPTransport(proxy=proxy, require_https=True),
+        timeout=30,
+        trust_env=False,
+    ) as client:
+        result = await client.post(
+            "https://mastodon.example.org/api/v1/statuses",
+            json=payload,
+            headers={"Authorization": "Bearer isolated-test-token", "Idempotency-Key": "cp-test"},
+        )
+    wire = b"".join(stream.writes)
+    post = wire[wire.index(b"POST /api/v1/statuses HTTP/1.1\r\n") :]
+    headers, body = post.split(b"\r\n\r\n", 1)
+    assert json.loads(body) == payload
+    assert b"Host: mastodon.example.org\r\n" in post
+    assert b"Authorization: Bearer isolated-test-token\r\n" in post
+    assert b"Idempotency-Key: cp-test\r\n" in post
+    assert f"Content-Length: {len(body)}".encode() in headers
+    assert timeouts == [30]
+    assert stream.tls[-1][0] == "mastodon.example.org"
+    assert result.json() == {"id": "123"}
+
+
+def _doh_payload(record_type, addresses=()):
+    return {
+        "Status": 0,
+        "Question": [{"name": "mastodon.example.org.", "type": record_type}],
+        "Answer": [
+            {"name": "mastodon.example.org", "type": record_type, "data": address}
+            for address in addresses
+        ],
+    }
+
+
+def _mock_doh_client(monkeypatch, responder):
+    real_client = httpx.AsyncClient
+    requests = []
+
+    def handle(request):
+        assert request.method == "GET"
+        assert str(request.url).startswith(urls.DOH_ENDPOINT + "?")
+        assert request.headers.get("authorization") is None
+        assert request.headers.get("idempotency-key") is None
+        assert request.headers["accept"] == "application/dns-json"
+        requests.append(request)
+        return responder(request)
+
+    def client(**kwargs):
+        if "transport" not in kwargs:
+            assert kwargs["verify"] is True
+            assert kwargs["follow_redirects"] is False
+            assert kwargs["trust_env"] is False
+            assert kwargs["timeout"] == 10
+            assert kwargs.pop("proxy") == "http://127.0.0.1:7890"
+            kwargs["transport"] = httpx.MockTransport(handle)
+        return real_client(**kwargs)
+
+    monkeypatch.setattr(urls.httpx, "AsyncClient", client)
+    return requests
+
+
+@pytest.mark.asyncio
+async def test_doh_uses_fixed_verified_endpoint_without_platform_credentials(monkeypatch):
+    def respond(request):
+        kind = int(request.url.params["type"])
+        addresses = ["8.8.8.8"] if kind == 1 else ["2606:4700:4700::1111"]
+        return httpx.Response(200, json=_doh_payload(kind, addresses))
+
+    requests = _mock_doh_client(monkeypatch, respond)
+    result = await urls._doh_public_addresses("mastodon.example.org", "http://127.0.0.1:7890")
+    assert result == ["8.8.8.8", "2606:4700:4700::1111"]
+    assert {request.url.params["type"] for request in requests} == {"1", "28"}
+
+
+@pytest.mark.parametrize(
+    "payload",
+    [
+        [],
+        {"Status": True},
+        {"Status": "0"},
+        {"Status": 3},
+        {**_doh_payload(1), "Question": [{"name": None, "type": 1}]},
+        {**_doh_payload(1), "Question": [{"name": "other.example.org", "type": 1}]},
+        {**_doh_payload(1), "Answer": None},
+        {**_doh_payload(1), "Answer": {}},
+        {**_doh_payload(1), "Answer": [None]},
+        _doh_payload(1, ["127.0.0.1"]),
+        _doh_payload(1, ["10.0.0.1"]),
+        _doh_payload(1, ["8.8.8.8", "192.168.1.2"]),
+        _doh_payload(1, ["::1"]),
+        _doh_payload(1, ["not-an-address"]),
+        _doh_payload(1, ["2606:4700:4700::1111"]),
+    ],
+)
+def test_doh_rejects_malformed_private_or_mismatched_answers(payload):
+    with pytest.raises(ValueError):
+        urls._doh_answer_addresses(payload, "mastodon.example.org", 1)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("status", [301, 302, 403, 500])
+async def test_doh_rejects_redirects_and_http_failures(monkeypatch, status):
+    _mock_doh_client(
+        monkeypatch,
+        lambda request: httpx.Response(status, headers={"Location": "http://127.0.0.1/secret"}),
+    )
+    with pytest.raises(ValueError, match="安全 DNS"):
+        await urls._doh_public_addresses("mastodon.example.org", "http://127.0.0.1:7890")
+
+
+@pytest.mark.asyncio
+async def test_doh_transport_pins_numeric_proxy_target_and_preserves_post(monkeypatch):
+    def respond(request):
+        kind = int(request.url.params["type"])
+        return httpx.Response(200, json=_doh_payload(kind, ["8.8.8.8"] if kind == 1 else []))
+
+    _mock_doh_client(monkeypatch, respond)
+    stream = WireStream([b"HTTP/1.1 200 Connection established\r\n\r\n", _wire_image(b"ok")])
+
+    async def connect(_self, host, port, **kwargs):
+        assert (host, port) == ("127.0.0.1", 7890)
+        return stream
+
+    def forbidden_dns(*args, **kwargs):
+        pytest.fail("DoH platform requests must not consult polluted local DNS")
+
+    monkeypatch.setattr(urls.socket, "getaddrinfo", forbidden_dns)
+    monkeypatch.setattr(httpcore.AnyIOBackend, "connect_tcp", connect)
+    async with httpx.AsyncClient(
+        transport=urls.PublicHTTPTransport(
+            proxy="http://127.0.0.1:7890", require_https=True, dns_over_https=True
+        ),
+        trust_env=False,
+    ) as client:
+        result = await client.post(
+            "https://mastodon.example.org/api/v1/statuses",
+            json={"status": "隔离文案"},
+            headers={"Authorization": "Bearer isolated-test-token", "Idempotency-Key": "cp-test"},
+        )
+    wire = b"".join(stream.writes)
+    assert b"CONNECT 8.8.8.8:443 HTTP/1.1\r\n" in wire
+    assert b"CONNECT mastodon.example.org" not in wire
+    assert b"Host: mastodon.example.org\r\n" in wire
+    assert b"Authorization: Bearer isolated-test-token\r\n" in wire
+    assert b"Idempotency-Key: cp-test\r\n" in wire
+    assert json.loads(wire.split(b"\r\n\r\n")[-1]) == {"status": "隔离文案"}
+    assert stream.tls[-1][0] == "mastodon.example.org"
+    assert stream.tls[-1][1].check_hostname
+    assert result.content == b"ok"
+
+
+@pytest.mark.asyncio
+async def test_mastodon_doh_rebinding_cannot_send_token(monkeypatch):
+    from app.core import mastodon as mastodon_core
+    from app.core.credentials import encrypt_json, encrypt_secret
+    from app.publishers.mastodon import MastodonPublisher
+
+    count = 0
+
+    def respond(request):
+        nonlocal count
+        count += 1
+        kind = int(request.url.params["type"])
+        address = "8.8.8.8" if count <= 2 else "127.0.0.1"
+        return httpx.Response(200, json=_doh_payload(kind, [address] if kind == 1 else []))
+
+    _mock_doh_client(monkeypatch, respond)
+
+    async def forbidden(*args, **kwargs):
+        pytest.fail("rebound address must not receive platform credentials")
+
+    from app.publishers import mastodon as publisher_module
+
+    monkeypatch.setattr(httpcore.AnyIOBackend, "connect_tcp", forbidden)
+    monkeypatch.setattr(
+        publisher_module, "ensure_public_instance", mastodon_core.ensure_public_instance
+    )
+    monkeypatch.setattr(publisher_module.settings, "outbound_dns_over_https", True)
+    monkeypatch.setattr(publisher_module.settings, "outbound_http_proxy", "http://127.0.0.1:7890")
+    account = SimpleNamespace(
+        credentials_encrypted=encrypt_json({"instance_url": "https://mastodon.example.org"}),
+        access_token_encrypted=encrypt_secret("isolated-test-token"),
+    )
+    with pytest.raises(ValueError, match="安全 DNS"):
+        await MastodonPublisher(None, account)._request(
+            "POST", "/api/v1/statuses", json={"status": "test"}
+        )
 
 
 @pytest.mark.asyncio

@@ -2,6 +2,22 @@
 
 日期：2026-10-20。当前重点是 Bluesky、Mastodon 的图文编辑、审核、排期和 API 发布。
 
+## 2026-10-21 Mastodon 连接修复与授权发布
+
+- 已保存用户提供的 Mastodon 访问令牌，使用现有加密存储；应用 ID/应用密钥未写入源码。Bluesky 与 Mastodon 均已通过真实账号验证。
+- 排查发现本机 DNS 为 `mastodon.social` 返回错误的公网地址，导致固定 IP 的安全传输无法建立连接。新增默认关闭的 `OUTBOUND_DNS_OVER_HTTPS`，仅由 Mastodon 按需启用；使用固定 HTTPS 解析服务，保留公网地址校验、数字 IP CONNECT、原 Host/SNI 和证书验证，不向解析服务发送平台凭证。
+- 本机已启用该选项并重启，API 健康、数据库连接、主调度角色正常。最初结果不明的任务在完整读取作者时间线、确认未发布后记录审计证据，沿用原任务及幂等键恢复；没有创建重复帖子。
+- 按用户明确授权，将三篇本人观点与资料结合的 AI 学习短文适配两个平台，共实际发布六条。内容保留“观点由本人提供，AI 辅助整理”说明，没有使用虚构经历、曝光量或增长结果。文章 63–65、任务 212–217 均为 `PUBLISHED`，六条都通过平台 API 回读并逐字核对正文。
+
+| 内容 | Bluesky | Mastodon |
+| --- | --- | --- |
+| 我想趁现在，认真学 AI | [帖子](https://bsky.app/profile/did:plc:mda6ld7aje6h4ksb4srtt24j/post/3mye7qlhbcmmn) | [帖子](https://mastodon.social/@xiaoqian022/117477626154341063) |
+| AI 得真正帮人把事情做完 | [帖子](https://bsky.app/profile/did:plc:mda6ld7aje6h4ksb4srtt24j/post/3mye7qordbt2u) | [帖子](https://mastodon.social/@xiaoqian022/117477626490227251) |
+| 门槛低了，还是得看懂结果 | [帖子](https://bsky.app/profile/did:plc:mda6ld7aje6h4ksb4srtt24j/post/3mye7qs2gqhrm) | [帖子](https://mastodon.social/@xiaoqian022/117477626824729322) |
+
+- 本轮验证：后端全量 516 passed、6 skipped（MySQL 专用用例在 SQLite 测试中跳过），覆盖率 72.95%；Ruff 检查及格式、Pyright 0 errors、5 条 Import Linter 契约通过。测试覆盖 POST 请求体、幂等键、代理数字目标、DoH 记录校验及解析变化不泄漏令牌。存在一条第三方 Starlette TestClient 弃用提醒，未造成失败；本轮未修改前端，未重复运行前端测试。
+- 上述六条属于用户授权的真实平台写入；普通自动测试仍使用隔离库和受控网络，不会自动发帖。下文“尚未配置 Mastodon”等描述是此前交付时的历史状态，以本节为准。详细操作回执留在忽略的 `var/publishing/`，凭证和运行文件未加入 Git。
+
 ## 2026-10-21 界面整理
 
 - 日常数据页只显示发布互动与记录；训练样本、模型管理和公开数据实验收回管理员的高级数据管理入口。推荐详情移除算法版本、内部阶段键值和评分参数，保留时间建议、调整原因与来源说明。

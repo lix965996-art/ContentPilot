@@ -22,6 +22,8 @@ import httpx
 
 MAX_REDIRECTS = 5
 DEFAULT_MAX_BYTES = 10 * 1024 * 1024
+DOH_ENDPOINT = "https://cloudflare-dns.com/dns-query"
+MAX_DOH_RESPONSE_BYTES = 64 * 1024
 
 
 def _is_public_address(value: str) -> bool:
@@ -64,14 +66,104 @@ async def _public_addresses(host: str, port: int) -> list[str]:
     return list(dict.fromkeys(resolved))
 
 
-async def ensure_public_http_url(value: str, *, require_https: bool = False) -> str:
+def _doh_answer_addresses(data: Any, host: str, record_type: int) -> list[str]:
+    if not isinstance(data, dict) or type(data.get("Status")) is not int or data["Status"] != 0:
+        raise ValueError("安全 DNS 返回的状态无效")
+    questions = data.get("Question")
+    if (
+        not isinstance(questions, list)
+        or len(questions) != 1
+        or not isinstance(questions[0], dict)
+        or not isinstance(questions[0].get("name"), str)
+        or questions[0].get("name", "").rstrip(".").lower() != host.lower()
+        or type(questions[0].get("type")) is not int
+        or questions[0]["type"] != record_type
+    ):
+        raise ValueError("安全 DNS 返回的问题不匹配")
+    answers = data.get("Answer", [])
+    if not isinstance(answers, list):
+        raise ValueError("安全 DNS 返回的地址格式无效")
+    addresses = []
+    for answer in answers:
+        if (
+            not isinstance(answer, dict)
+            or type(answer.get("type")) is not int
+            or not isinstance(answer.get("name"), str)
+            or not isinstance(answer.get("data"), str)
+        ):
+            raise ValueError("安全 DNS 返回的地址格式无效")
+        if answer["type"] not in {1, 28}:
+            if answer["type"] != 5:
+                raise ValueError("安全 DNS 返回了非预期记录")
+            continue
+        address = answer["data"]
+        if not _is_public_address(address):
+            raise ValueError("不允许读取本机或内网地址")
+        parsed = ipaddress.ip_address(address)
+        if (answer["type"] == 1) != (parsed.version == 4):
+            raise ValueError("安全 DNS 返回的地址类型不匹配")
+        addresses.append(str(parsed))
+    return addresses
+
+
+async def _doh_public_addresses(host: str, proxy: str | None) -> list[str]:
+    """Query a fixed HTTPS resolver; no platform credentials enter this client."""
+    async with httpx.AsyncClient(
+        proxy=proxy, timeout=10, follow_redirects=False, trust_env=False, verify=True
+    ) as client:
+
+        async def query(record_type: int) -> list[str]:
+            response = await client.get(
+                DOH_ENDPOINT,
+                params={"name": host, "type": record_type},
+                headers={"Accept": "application/dns-json"},
+            )
+            if response.status_code != 200 or len(response.content) > MAX_DOH_RESPONSE_BYTES:
+                raise ValueError("安全 DNS 请求未返回有效结果")
+            try:
+                return _doh_answer_addresses(response.json(), host, record_type)
+            except (ValueError, TypeError, AttributeError) as exc:
+                raise ValueError("安全 DNS 返回结果无效或包含内网地址") from exc
+
+        groups = await asyncio.gather(query(1), query(28))
+    addresses = list(dict.fromkeys(address for group in groups for address in group))
+    if not addresses:
+        raise ValueError("安全 DNS 未返回可用的公网地址")
+    return addresses
+
+
+async def _resolve_public_addresses(
+    host: str, port: int, *, dns_over_https: bool = False, proxy: str | None = None
+) -> list[str]:
+    try:
+        ipaddress.ip_address(host)
+        is_literal = True
+    except ValueError:
+        is_literal = False
+    if not dns_over_https or is_literal:
+        return await _public_addresses(host, port)
+    return await _doh_public_addresses(host, proxy)
+
+
+async def ensure_public_http_url(
+    value: str,
+    *,
+    require_https: bool = False,
+    dns_over_https: bool = False,
+    proxy: str | None = None,
+) -> str:
     """Preflight only; actual requests must also use PublicHTTPTransport."""
     _validate_http_url(value, require_https=require_https)
     parsed = urlsplit(value)
     host = parsed.hostname
     if host is None:
         raise ValueError("远程地址无效")
-    await _public_addresses(host, parsed.port or (443 if parsed.scheme == "https" else 80))
+    await _resolve_public_addresses(
+        host,
+        parsed.port or (443 if parsed.scheme == "https" else 80),
+        dns_over_https=dns_over_https,
+        proxy=proxy,
+    )
     return value
 
 
@@ -84,8 +176,10 @@ class _PublicNetworkBackend(httpcore.AsyncNetworkBackend):
     the proxy never gets a target hostname that it could resolve differently.
     """
 
-    def __init__(self, proxy: str | None = None) -> None:
+    def __init__(self, proxy: str | None = None, *, dns_over_https: bool = False) -> None:
         self._backend: Any = httpcore.AnyIOBackend()
+        self._dns_over_https = dns_over_https
+        self._proxy_address = proxy
         self._proxy = httpx.Proxy(proxy) if proxy else None
         if self._proxy and self._proxy.url.scheme not in {"http", "https"}:
             raise ValueError("安全远程请求代理仅支持 HTTP 或 HTTPS")
@@ -99,9 +193,19 @@ class _PublicNetworkBackend(httpcore.AsyncNetworkBackend):
         socket_options: Iterable[httpcore.SOCKET_OPTION] | None = None,
     ) -> httpcore.AsyncNetworkStream:
         try:
-            addresses = await asyncio.wait_for(_public_addresses(host, port), timeout=timeout)
+            addresses = await asyncio.wait_for(
+                _resolve_public_addresses(
+                    host,
+                    port,
+                    dns_over_https=self._dns_over_https,
+                    proxy=self._proxy_address,
+                ),
+                timeout=timeout,
+            )
         except TimeoutError as exc:
             raise httpcore.ConnectTimeout("公网地址解析超时") from exc
+        except httpx.HTTPError as exc:
+            raise httpcore.ConnectError("安全 DNS 服务连接失败") from exc
         last_error = None
         for address in addresses:
             try:
@@ -214,11 +318,17 @@ class _PublicResponseStream(httpx.AsyncByteStream):
 class PublicHTTPTransport(httpx.AsyncBaseTransport):
     """HTTPX transport that cannot bypass public-IP checks through DNS/proxies."""
 
-    def __init__(self, *, proxy: str | None = None, require_https: bool = False) -> None:
+    def __init__(
+        self,
+        *,
+        proxy: str | None = None,
+        require_https: bool = False,
+        dns_over_https: bool = False,
+    ) -> None:
         self._require_https = require_https
         self._pool = httpcore.AsyncConnectionPool(
             ssl_context=ssl.create_default_context(),
-            network_backend=_PublicNetworkBackend(proxy),
+            network_backend=_PublicNetworkBackend(proxy, dns_over_https=dns_over_https),
             retries=0,
         )
 
